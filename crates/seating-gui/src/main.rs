@@ -14,10 +14,10 @@ use seating_core::{
     build_layout, build_table_type_map, generate_table_instances, parse_closeness_csv,
     parse_f64_value, parse_optional_usize_value, parse_people_csv, parse_required_usize_value,
     parse_tables_json, reference_id_options, render_png, render_svg, validate_project,
-    validate_seating_solution, write_closeness_csv, write_people_csv, write_seating_csv,
-    write_tables_json, ClosenessRule, HeuristicOptimizer, OptimizationConfig, Person, ProjectInput,
-    RenderOptions, SeatingAssignment, SeatingLayout, SeatingOptimizer, TableShape, TableTypeConfig,
-    ValidationError, ValidationReport,
+    write_closeness_csv, write_people_csv, write_seating_csv, write_tables_json, ClosenessRule,
+    HeuristicOptimizer, OptimizationConfig, Person, ProjectInput, RenderOptions, SeatingAssignment,
+    SeatingLayout, SeatingOptimizer, TableShape, TableTypeConfig, ValidationError,
+    ValidationReport,
 };
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
@@ -198,7 +198,7 @@ struct TableConfigState {
     min_people_input: String,
     recommended_people_input: String,
     number_of_tables_input: String,
-    people_per_side_inputs: [String; 4],
+    people_per_side_inputs: Vec<String>,
 }
 
 struct GuiApp {
@@ -242,7 +242,7 @@ impl Sandbox for GuiApp {
             tables_path: None,
             seating_path: None,
         };
-        app.refresh_validation();
+        app.refresh_validation_and_layout();
         app
     }
 
@@ -429,10 +429,8 @@ impl Sandbox for GuiApp {
             }
             Msg::UpdatePeoplePerSide(index, side, value) => {
                 if let Some(row) = self.table_configs.get_mut(index) {
-                    if let Some(field) = row.people_per_side_inputs.get_mut(side) {
-                        *field = value;
-                        self.refresh_validation_and_layout();
-                    }
+                    row.set_people_per_side_input(side, value);
+                    self.refresh_validation_and_layout();
                 }
             }
             Msg::SeedChanged(value) => self.seed = value,
@@ -644,16 +642,16 @@ impl GuiApp {
                 column![
                     text("people_per_side (top, right, bottom, left)"),
                     row![
-                        text_input("top", &row_state.people_per_side_inputs[0])
+                        text_input("top", row_state.people_per_side_input(0))
                             .on_input(move |value| Msg::UpdatePeoplePerSide(index, 0, value))
                             .width(Length::Fixed(100.0)),
-                        text_input("right", &row_state.people_per_side_inputs[1])
+                        text_input("right", row_state.people_per_side_input(1))
                             .on_input(move |value| Msg::UpdatePeoplePerSide(index, 1, value))
                             .width(Length::Fixed(100.0)),
-                        text_input("bottom", &row_state.people_per_side_inputs[2])
+                        text_input("bottom", row_state.people_per_side_input(2))
                             .on_input(move |value| Msg::UpdatePeoplePerSide(index, 2, value))
                             .width(Length::Fixed(100.0)),
-                        text_input("left", &row_state.people_per_side_inputs[3])
+                        text_input("left", row_state.people_per_side_input(3))
                             .on_input(move |value| Msg::UpdatePeoplePerSide(index, 3, value))
                             .width(Length::Fixed(100.0)),
                     ]
@@ -920,27 +918,22 @@ impl GuiApp {
         }
     }
 
-    fn refresh_validation(&mut self) {
-        self.validation_errors = match self.current_project() {
-            Ok(project) => validate_project(&project)
-                .err()
-                .map(|report| report.errors)
-                .unwrap_or_default(),
-            Err(report) => report.errors,
-        };
-    }
-
-    fn refresh_layout(&mut self) {
+    fn refresh_validation_and_layout(&mut self) {
         self.layout = None;
         self.layout_svg = None;
         self.seating_csv = write_seating_csv(&self.assignments).unwrap_or_default();
-        if self.assignments.is_empty() {
-            return;
-        }
-        let Ok(project) = self.current_project() else {
-            return;
+        let project = match self.current_project() {
+            Ok(project) => project,
+            Err(report) => {
+                self.validation_errors = report.errors;
+                return;
+            }
         };
-        if validate_seating_solution(&project, &self.assignments).is_err() {
+        self.validation_errors = validate_project(&project)
+            .err()
+            .map(|report| report.errors)
+            .unwrap_or_default();
+        if self.assignments.is_empty() || !self.validation_errors.is_empty() {
             return;
         }
         if let Ok(layout) = build_layout(&project, &self.assignments) {
@@ -948,11 +941,6 @@ impl GuiApp {
             self.layout = Some(layout);
             self.layout_svg = Some(svg_markup);
         }
-    }
-
-    fn refresh_validation_and_layout(&mut self) {
-        self.refresh_validation();
-        self.refresh_layout();
     }
 
     fn run_optimize(&mut self) {
@@ -990,7 +978,16 @@ impl GuiApp {
             Ok(result) => match result.solutions.first() {
                 Some(solution) => {
                     self.assignments = solution.assignments.clone();
-                    self.refresh_layout();
+                    self.seating_csv = write_seating_csv(&self.assignments).unwrap_or_default();
+                    self.validation_errors.clear();
+                    if let Ok(layout) = build_layout(&project, &self.assignments) {
+                        let svg_markup = render_svg(&layout, &RenderOptions::default());
+                        self.layout = Some(layout);
+                        self.layout_svg = Some(svg_markup);
+                    } else {
+                        self.layout = None;
+                        self.layout_svg = None;
+                    }
                     self.active_tab = Tab::SeatingPlan;
                     self.message = format!("Optimization complete. Score: {:.3}", solution.score);
                 }
@@ -1057,8 +1054,14 @@ impl GuiApp {
             match write_people_csv(&self.people_data()) {
                 Ok(contents) => match fs::write(&path, contents) {
                     Ok(_) => {
-                        self.people_path = Some(path.clone());
-                        self.message = format!("Saved people CSV to {}", path.display());
+                        if !export_as {
+                            self.people_path = Some(path.clone());
+                        }
+                        self.message = format!(
+                            "{} people CSV to {}",
+                            if export_as { "Exported" } else { "Saved" },
+                            path.display()
+                        );
                     }
                     Err(error) => self.message = format!("People save failed: {error}"),
                 },
@@ -1074,8 +1077,14 @@ impl GuiApp {
                 Ok(rules) => match write_closeness_csv(&rules) {
                     Ok(contents) => match fs::write(&path, contents) {
                         Ok(_) => {
-                            self.closeness_path = Some(path.clone());
-                            self.message = format!("Saved closeness CSV to {}", path.display());
+                            if !export_as {
+                                self.closeness_path = Some(path.clone());
+                            }
+                            self.message = format!(
+                                "{} closeness CSV to {}",
+                                if export_as { "Exported" } else { "Saved" },
+                                path.display()
+                            );
                         }
                         Err(error) => self.message = format!("Closeness save failed: {error}"),
                     },
@@ -1095,8 +1104,14 @@ impl GuiApp {
                 Ok(table_types) => match write_tables_json(&table_types) {
                     Ok(contents) => match fs::write(&path, contents) {
                         Ok(_) => {
-                            self.tables_path = Some(path.clone());
-                            self.message = format!("Saved tables JSON to {}", path.display());
+                            if !export_as {
+                                self.tables_path = Some(path.clone());
+                            }
+                            self.message = format!(
+                                "{} tables JSON to {}",
+                                if export_as { "Exported" } else { "Saved" },
+                                path.display()
+                            );
                         }
                         Err(error) => self.message = format!("Tables save failed: {error}"),
                     },
@@ -1453,7 +1468,7 @@ impl GuiApp {
         &self,
         options: &[seating_core::ReferenceIdOption],
         query: &str,
-    ) -> Vec<String> {
+    ) -> Vec<seating_core::ReferenceIdOption> {
         let normalized = query.trim().to_ascii_lowercase();
         options
             .iter()
@@ -1463,7 +1478,7 @@ impl GuiApp {
                     || option.label.to_ascii_lowercase().contains(&normalized)
             })
             .take(5)
-            .map(|option| option.label.clone())
+            .cloned()
             .collect()
     }
 
@@ -1478,7 +1493,7 @@ impl GuiApp {
     fn suggestion_row<F>(
         &self,
         label: &str,
-        suggestions: Vec<String>,
+        suggestions: Vec<seating_core::ReferenceIdOption>,
         on_press: F,
     ) -> Element<'_, Msg>
     where
@@ -1488,8 +1503,8 @@ impl GuiApp {
             row![text(label)].spacing(6).align_items(Alignment::Center),
             |suggestion_row, suggestion| {
                 suggestion_row.push(
-                    button(text(suggestion.clone()))
-                        .on_press(on_press.clone()(raw_id(&suggestion))),
+                    button(text(suggestion.label.clone()))
+                        .on_press(on_press.clone()(suggestion.id.clone())),
                 )
             },
         );
@@ -1562,7 +1577,7 @@ impl Default for TableConfigState {
             min_people_input: String::new(),
             recommended_people_input: String::new(),
             number_of_tables_input: "1".to_string(),
-            people_per_side_inputs: [
+            people_per_side_inputs: vec![
                 "0".to_string(),
                 "0".to_string(),
                 "0".to_string(),
@@ -1574,17 +1589,18 @@ impl Default for TableConfigState {
 
 impl TableConfigState {
     fn from_pair(table_type_id: String, config: TableTypeConfig) -> Self {
-        let mut inputs = [
-            "0".to_string(),
-            "0".to_string(),
-            "0".to_string(),
-            "0".to_string(),
-        ];
-        if let Some(values) = config.people_per_side.as_ref() {
-            for (slot, value) in inputs.iter_mut().zip(values.iter().take(4)) {
-                *slot = value.to_string();
-            }
-        }
+        let inputs = config
+            .people_per_side
+            .as_ref()
+            .map(|values| values.iter().map(|value| value.to_string()).collect())
+            .unwrap_or_else(|| {
+                vec![
+                    "0".to_string(),
+                    "0".to_string(),
+                    "0".to_string(),
+                    "0".to_string(),
+                ]
+            });
         Self {
             table_type_id,
             shape: ShapeChoice::from(config.shape),
@@ -1604,6 +1620,20 @@ impl TableConfigState {
             people_per_side_inputs: inputs,
         }
     }
+
+    fn people_per_side_input(&self, side: usize) -> &str {
+        self.people_per_side_inputs
+            .get(side)
+            .map(String::as_str)
+            .unwrap_or("")
+    }
+
+    fn set_people_per_side_input(&mut self, side: usize, value: String) {
+        if self.people_per_side_inputs.len() <= side {
+            self.people_per_side_inputs.resize(side + 1, String::new());
+        }
+        self.people_per_side_inputs[side] = value;
+    }
 }
 
 fn selected_string_choice(
@@ -1621,15 +1651,6 @@ fn selected_usize_choice(
     value: Option<usize>,
 ) -> Option<MaybeUsizeChoice> {
     options.iter().find(|choice| choice.value == value).cloned()
-}
-
-fn raw_id(label: &str) -> String {
-    label
-        .split('—')
-        .next()
-        .expect("split always yields at least one segment")
-        .trim()
-        .to_string()
 }
 
 fn same_pair(left_a: &str, right_a: &str, left_b: &str, right_b: &str) -> bool {
