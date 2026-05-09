@@ -21,7 +21,7 @@
 //! For large guest lists, a future version should switch to `iced::Application`
 //! with async `Command`s or a background thread so the window stays responsive.
 
-use iced::widget::{button, column, container, row, scrollable, text, text_editor};
+use iced::widget::{button, column, container, row, scrollable, text, text_editor, text_input};
 use iced::{Alignment, Element, Length, Sandbox, Settings, Theme};
 use rfd::FileDialog;
 use seating_core::{
@@ -205,7 +205,7 @@ impl Sandbox for GuiApp {
         // Second row: optimizer controls.
         let optimize_row = row![
             text("Seed:"),
-            iced::widget::text_input("42", &self.seed)
+            text_input("42", &self.seed)
                 .on_input(Msg::SeedChanged)
                 .width(Length::Fixed(100.0)),
             button("Run Optimize").on_press(Msg::Optimize),

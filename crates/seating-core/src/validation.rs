@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 ///
 /// For each type:
 /// - If `number_of_tables` is specified, exactly that many instances are created.
-/// - Otherwise, the count defaults to `max(ceil(people / max_people), max_locked_table_number)`,
+/// - Otherwise, the count defaults to `max(ceil(person_count / max_people), max_locked_table_number)`,
 ///   which is a safe upper bound ensuring every lock can be satisfied without
 ///   generating an excessive number of instances.
 ///
