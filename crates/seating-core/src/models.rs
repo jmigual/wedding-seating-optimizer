@@ -46,7 +46,7 @@ pub struct TableTypeConfig {
     pub people_per_side: Option<Vec<usize>>,
     /// Hard capacity upper bound.
     pub max_people: usize,
-    /// Soft preferred occupancy (deviations are penalised in scoring).
+    /// Soft preferred occupancy (deviations are penalized in scoring).
     pub recommended_people: Option<usize>,
     /// Hard minimum occupancy for any used table of this type.
     pub min_people: Option<usize>,

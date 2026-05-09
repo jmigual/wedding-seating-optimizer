@@ -409,4 +409,3 @@ pub(crate) fn build_closeness_lookup(
     Ok(map)
 }
 
-
