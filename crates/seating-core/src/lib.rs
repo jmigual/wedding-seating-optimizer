@@ -435,6 +435,10 @@ pub fn make_project(people_csv: &str, closeness_csv: &str, tables_json: &str) ->
     })
 }
 
+/// Returns a lexicographically ordered pair used as a canonical key.
+///
+/// This normalizes bidirectional relationships (A,B) and (B,A) to the same
+/// map key for closeness lookups and duplicate detection.
 fn canonical_pair(a: &str, b: &str) -> (String, String) {
     if a <= b {
         (a.to_string(), b.to_string())
@@ -651,6 +655,11 @@ pub fn perimeter_distance(a: usize, b: usize, seats: usize) -> usize {
     circular_distance(a, b, seats)
 }
 
+/// Default seat-proximity weight profile for pairwise scoring.
+///
+/// Distances 0-1 are treated as immediate neighbors (full weight), then a
+/// smooth decay is applied for distances 2 and 3, and for larger distances
+/// we use inverse distance so influence trends toward zero.
 pub fn default_proximity_weight(distance: usize) -> f64 {
     match distance {
         0 | 1 => 1.0,
@@ -963,6 +972,8 @@ impl SeatingOptimizer for HeuristicOptimizer {
             let Some(initial) = self.random_feasible_assignment(project, seed) else {
                 continue;
             };
+            // Use a fixed bit-mixing constant to derive a deterministic but
+            // decorrelated RNG stream for local improvement from the base seed.
             let candidate = self.local_improve(project, config, initial, seed ^ 0xA5A5_5A5A);
             let Ok(score) = score_solution(project, &candidate, config.recommended_capacity_weight) else {
                 continue;
