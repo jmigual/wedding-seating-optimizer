@@ -288,7 +288,7 @@ pub fn render_png(
 
 fn columns_for(table_count: usize) -> usize {
     match table_count {
-        0 => 1,
+        0 => 0,
         1..=4 => table_count,
         _ => (table_count as f32).sqrt().ceil() as usize,
     }

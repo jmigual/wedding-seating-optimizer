@@ -374,8 +374,8 @@ impl Sandbox for GuiApp {
             }
             Msg::UpdateClosenessScore(index, value) => {
                 if let Some(row) = self.closeness_rules.get_mut(index) {
-                    row.score_input = value.clone();
-                    if let Ok(score) = parse_f64_value(&value, "score") {
+                    row.score_input = value;
+                    if let Ok(score) = parse_f64_value(&row.score_input, "score") {
                         row.rule.score = score;
                     }
                     self.refresh_validation_and_layout();
@@ -1624,7 +1624,12 @@ fn selected_usize_choice(
 }
 
 fn raw_id(label: &str) -> String {
-    label.split('—').next().unwrap_or(label).trim().to_string()
+    label
+        .split('—')
+        .next()
+        .expect("split always yields at least one segment")
+        .trim()
+        .to_string()
 }
 
 fn same_pair(left_a: &str, right_a: &str, left_b: &str, right_b: &str) -> bool {
