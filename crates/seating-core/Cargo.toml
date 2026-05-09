@@ -1,0 +1,15 @@
+[package]
+name = "seating-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+csv.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
