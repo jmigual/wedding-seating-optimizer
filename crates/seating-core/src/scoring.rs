@@ -8,8 +8,12 @@
 //!    across all same-table pairs via [`score_solution`], then applies a soft
 //!    penalty for deviation from recommended table occupancy.
 
-use crate::models::{Person, ProjectInput, SeatingAssignment, TableShape, ValidationError, ValidationReport};
-use crate::validation::{build_closeness_lookup, canonical_pair, generate_table_instances, validate_seating_solution};
+use crate::models::{
+    Person, ProjectInput, SeatingAssignment, TableShape, ValidationError, ValidationReport,
+};
+use crate::validation::{
+    build_closeness_lookup, canonical_pair, generate_table_instances, validate_seating_solution,
+};
 use std::collections::HashMap;
 
 // ── Distance functions ────────────────────────────────────────────────────────
@@ -169,7 +173,9 @@ pub fn score_solution(
                 let pair_score = pair_score_with_lookup(&closeness, pa, pb);
                 let table = table_by_number[&a.table_number];
                 let distance = match table.shape {
-                    TableShape::Round => circular_distance(a.seat_index, b.seat_index, table.max_people),
+                    TableShape::Round => {
+                        circular_distance(a.seat_index, b.seat_index, table.max_people)
+                    }
                     TableShape::Rectangular | TableShape::Square => {
                         perimeter_distance(a.seat_index, b.seat_index, table.max_people)
                     }
@@ -184,7 +190,8 @@ pub fn score_solution(
         if let Some(recommended) = table.recommended_people {
             let count = by_table.get(&table.number).map(|v| v.len()).unwrap_or(0);
             if count > 0 {
-                total -= (count as isize - recommended as isize).unsigned_abs() as f64 * recommended_weight;
+                total -= (count as isize - recommended as isize).unsigned_abs() as f64
+                    * recommended_weight;
             }
         }
     }

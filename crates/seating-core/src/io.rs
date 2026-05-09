@@ -116,7 +116,8 @@ pub fn parse_closeness_csv(input: &str) -> Result<Vec<ClosenessRule>, Validation
         .from_reader(input.as_bytes());
     let mut rules = Vec::new();
     for row in rdr.deserialize::<ClosenessCsvRow>() {
-        let row = row.map_err(|e| ValidationError::MalformedInput(format!("closeness CSV: {e}")))?;
+        let row =
+            row.map_err(|e| ValidationError::MalformedInput(format!("closeness CSV: {e}")))?;
         let score = row.score.parse::<f64>().map_err(|e| {
             ValidationError::MalformedInput(format!("invalid closeness score '{}': {e}", row.score))
         })?;
@@ -133,8 +134,11 @@ pub fn parse_closeness_csv(input: &str) -> Result<Vec<ClosenessRule>, Validation
 ///
 /// # Errors
 /// Returns [`ValidationError::MalformedInput`] on any JSON deserialization error.
-pub fn parse_tables_json(input: &str) -> Result<BTreeMap<TableTypeId, TableTypeConfig>, ValidationError> {
-    serde_json::from_str(input).map_err(|e| ValidationError::MalformedInput(format!("tables JSON: {e}")))
+pub fn parse_tables_json(
+    input: &str,
+) -> Result<BTreeMap<TableTypeId, TableTypeConfig>, ValidationError> {
+    serde_json::from_str(input)
+        .map_err(|e| ValidationError::MalformedInput(format!("tables JSON: {e}")))
 }
 
 /// Parse the seating output CSV into a list of [`SeatingAssignment`] records.
@@ -193,7 +197,9 @@ pub fn write_closeness_csv(rules: &[ClosenessRule]) -> Result<String, Validation
             right_id: &r.right_id,
             score: r.score,
         })
-        .map_err(|e| ValidationError::MalformedInput(format!("closeness CSV serialization: {e}")))?;
+        .map_err(|e| {
+            ValidationError::MalformedInput(format!("closeness CSV serialization: {e}"))
+        })?;
     }
     finish_writer(wtr, "closeness CSV")
 }
@@ -202,7 +208,9 @@ pub fn write_closeness_csv(rules: &[ClosenessRule]) -> Result<String, Validation
 ///
 /// # Errors
 /// Returns [`ValidationError::MalformedInput`] on any serialization error.
-pub fn write_tables_json(tables: &BTreeMap<TableTypeId, TableTypeConfig>) -> Result<String, ValidationError> {
+pub fn write_tables_json(
+    tables: &BTreeMap<TableTypeId, TableTypeConfig>,
+) -> Result<String, ValidationError> {
     serde_json::to_string_pretty(tables)
         .map_err(|e| ValidationError::MalformedInput(format!("tables JSON serialization: {e}")))
 }
@@ -290,5 +298,9 @@ fn parse_pipe_separated(s: &str) -> Vec<String> {
 
 /// Return `Some(s.to_string())` if `s` is non-empty, otherwise `None`.
 fn nonempty(s: &str) -> Option<String> {
-    if s.is_empty() { None } else { Some(s.to_string()) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
 }

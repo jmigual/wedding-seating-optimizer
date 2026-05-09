@@ -11,8 +11,7 @@
 //! between validation, scoring, and the optimizer.
 
 use crate::models::{
-    ProjectInput, TableInstance, TableShape, ValidationError, ValidationReport,
-    SeatingAssignment,
+    ProjectInput, SeatingAssignment, TableInstance, TableShape, ValidationError, ValidationReport,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -90,7 +89,8 @@ pub fn validate_project(project: &ProjectInput) -> Result<(), ValidationReport> 
     validate_closeness_rules(project, &person_ids, &group_ids, &mut errors);
 
     let instances = generate_table_instances(project);
-    let table_by_number: HashMap<usize, &TableInstance> = instances.iter().map(|t| (t.number, t)).collect();
+    let table_by_number: HashMap<usize, &TableInstance> =
+        instances.iter().map(|t| (t.number, t)).collect();
     validate_capacity(&instances, project.people.len(), &mut errors);
     validate_locked_assignments(project, &table_by_number, &mut errors);
     validate_impossible_assignments(project, &instances, &mut errors);
@@ -122,10 +122,14 @@ pub fn validate_seating_solution(
     project: &ProjectInput,
     assignments: &[SeatingAssignment],
 ) -> Result<(), ValidationReport> {
-    let mut errors = validate_project(project).err().map(|r| r.errors).unwrap_or_default();
+    let mut errors = validate_project(project)
+        .err()
+        .map(|r| r.errors)
+        .unwrap_or_default();
 
     let instances = generate_table_instances(project);
-    let table_by_number: HashMap<usize, &TableInstance> = instances.iter().map(|t| (t.number, t)).collect();
+    let table_by_number: HashMap<usize, &TableInstance> =
+        instances.iter().map(|t| (t.number, t)).collect();
     let person_map: HashMap<&str, &crate::models::Person> =
         project.people.iter().map(|p| (p.id.as_str(), p)).collect();
 
@@ -139,7 +143,9 @@ pub fn validate_seating_solution(
             continue;
         };
         if !seen_people.insert(a.person_id.clone()) {
-            errors.push(ValidationError::MissingOrDuplicatePerson(a.person_id.clone()));
+            errors.push(ValidationError::MissingOrDuplicatePerson(
+                a.person_id.clone(),
+            ));
         }
         let Some(table) = table_by_number.get(&a.table_number) else {
             errors.push(ValidationError::UnknownTableInSeating(a.table_number));
@@ -283,10 +289,18 @@ fn collect_id_sets(
 /// Validate per-type constraints: shape/side consistency and min/max ordering.
 fn validate_table_type_configs(project: &ProjectInput, errors: &mut Vec<ValidationError>) {
     for (table_type, cfg) in &project.table_types {
-        if matches!(cfg.shape, TableShape::Rectangular | TableShape::Square) && cfg.people_per_side.is_none() {
+        if matches!(cfg.shape, TableShape::Rectangular | TableShape::Square)
+            && cfg.people_per_side.is_none()
+        {
             errors.push(ValidationError::MissingPeoplePerSide(table_type.clone()));
         }
         if let Some(side) = &cfg.people_per_side {
+            if side.len() != 4 {
+                errors.push(ValidationError::InvalidPeoplePerSideLength {
+                    table_type: table_type.clone(),
+                    len: side.len(),
+                });
+            }
             let sum: usize = side.iter().sum();
             if sum != cfg.max_people {
                 errors.push(ValidationError::PeoplePerSideMismatch {
@@ -302,6 +316,25 @@ fn validate_table_type_configs(project: &ProjectInput, errors: &mut Vec<Validati
                     table_type: table_type.clone(),
                     min,
                     max: cfg.max_people,
+                });
+            }
+        }
+        if let Some(recommended) = cfg.recommended_people {
+            let min_allowed = cfg.min_people.unwrap_or(0);
+            if recommended < min_allowed || recommended > cfg.max_people {
+                errors.push(ValidationError::InvalidRecommendedPeople {
+                    table_type: table_type.clone(),
+                    recommended,
+                    min: min_allowed,
+                    max: cfg.max_people,
+                });
+            }
+        }
+        if let Some(count) = cfg.number_of_tables {
+            if count == 0 {
+                errors.push(ValidationError::InvalidNumberOfTables {
+                    table_type: table_type.clone(),
+                    count,
                 });
             }
         }
@@ -339,7 +372,11 @@ fn validate_closeness_rules(
 }
 
 /// Check that total seat capacity across all instances covers all guests.
-fn validate_capacity(instances: &[TableInstance], person_count: usize, errors: &mut Vec<ValidationError>) {
+fn validate_capacity(
+    instances: &[TableInstance],
+    person_count: usize,
+    errors: &mut Vec<ValidationError>,
+) {
     let total_capacity: usize = instances.iter().map(|t| t.max_people).sum();
     if total_capacity < person_count {
         errors.push(ValidationError::NotEnoughSeats {
@@ -357,7 +394,9 @@ fn validate_locked_assignments(
 ) {
     let mut locked_taken: HashSet<(usize, usize)> = HashSet::new();
     for p in &project.people {
-        let Some(table_num) = p.locked_table else { continue };
+        let Some(table_num) = p.locked_table else {
+            continue;
+        };
         let Some(table) = table_by_number.get(&table_num) else {
             errors.push(ValidationError::LockedTableDoesNotExist {
                 person_id: p.id.clone(),
@@ -475,4 +514,3 @@ pub(crate) fn build_closeness_lookup(
     }
     Ok(map)
 }
-
