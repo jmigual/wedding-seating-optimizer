@@ -1,0 +1,5 @@
+id,name,table_type,groups,locked_table,locked_seat
+p1,Alice,round_4,family|friends,,
+p2,Bob,round_4,family,,
+p3,Carol,round_4,work,,
+p4,Dan,round_4,work,,
