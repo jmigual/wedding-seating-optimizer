@@ -12,6 +12,7 @@
 //! | `validate` | Parse and validate the three input files, reporting all errors |
 //! | `optimize` | Run the optimizer and write the seating CSV |
 //! | `score`    | Score an existing seating CSV against the input files |
+//! | `render`   | Render an existing seating CSV as SVG or PNG |
 //!
 //! ## Example
 //!
@@ -36,23 +37,29 @@
 //!     --closeness closeness.csv \
 //!     --tables tables.json \
 //!     --seating seating.csv
+//!
+//! # Render an existing seating plan
+//! wedding-seating render \
+//!     --people people.csv \
+//!     --tables tables.json \
+//!     --seating seating.csv \
+//!     --output seating-plan.svg
 //! ```
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use seating_core::{
-    make_project, parse_seating_csv, score_solution, validate_project, write_seating_csv,
-    HeuristicOptimizer, OptimizationConfig, SeatingOptimizer,
+    build_layout, parse_people_csv, parse_seating_csv, parse_tables_json, render_png, render_svg,
+    score_solution, validate_project, write_seating_csv, HeuristicOptimizer, OptimizationConfig,
+    ProjectInput, RenderOptions, SeatingOptimizer,
 };
 use std::fs;
 use std::path::PathBuf;
 
-// ── CLI definition ────────────────────────────────────────────────────────────
-
 /// Top-level CLI entry point.
 #[derive(Parser, Debug)]
 #[command(name = "wedding-seating")]
-#[command(about = "Wedding seating validator, optimizer, and scorer")]
+#[command(about = "Wedding seating validator, optimizer, scorer, and renderer")]
 #[command(long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -128,9 +135,23 @@ enum Commands {
         #[arg(long, default_value_t = 1.0)]
         recommended_weight: f64,
     },
-}
 
-// ── Entry point ───────────────────────────────────────────────────────────────
+    /// Render a seating CSV as an SVG or PNG seating plan.
+    Render {
+        /// Path to the people CSV file.
+        #[arg(long)]
+        people: PathBuf,
+        /// Path to the tables JSON file.
+        #[arg(long)]
+        tables: PathBuf,
+        /// Path to the seating CSV to render.
+        #[arg(long)]
+        seating: PathBuf,
+        /// Destination `.svg` or `.png` output path.
+        #[arg(long)]
+        output: PathBuf,
+    },
+}
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -140,15 +161,14 @@ fn main() -> Result<()> {
             closeness,
             tables,
         } => {
-            let project = make_project(
+            let project = seating_core::make_project(
                 &read_file(&people, "people")?,
                 &read_file(&closeness, "closeness")?,
                 &read_file(&tables, "tables")?,
             )?;
-            validate_project(&project).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            validate_project(&project).map_err(|error| anyhow::anyhow!(error.to_string()))?;
             println!("Validation passed.");
         }
-
         Commands::Optimize {
             people,
             closeness,
@@ -160,12 +180,12 @@ fn main() -> Result<()> {
             iterations,
             recommended_weight,
         } => {
-            let project = make_project(
+            let project = seating_core::make_project(
                 &read_file(&people, "people")?,
                 &read_file(&closeness, "closeness")?,
                 &read_file(&tables, "tables")?,
             )?;
-            validate_project(&project).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            validate_project(&project).map_err(|error| anyhow::anyhow!(error.to_string()))?;
             let result = HeuristicOptimizer.optimize(
                 &project,
                 &OptimizationConfig {
@@ -182,9 +202,12 @@ fn main() -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("optimizer returned no solutions"))?;
             fs::write(&output, write_seating_csv(&best.assignments)?)
                 .with_context(|| format!("failed writing output {}", output.display()))?;
-            println!("Wrote seating to {} with score {}", output.display(), best.score);
+            println!(
+                "Wrote seating to {} with score {}",
+                output.display(),
+                best.score
+            );
         }
-
         Commands::Score {
             people,
             closeness,
@@ -192,23 +215,51 @@ fn main() -> Result<()> {
             seating,
             recommended_weight,
         } => {
-            let project = make_project(
+            let project = seating_core::make_project(
                 &read_file(&people, "people")?,
                 &read_file(&closeness, "closeness")?,
                 &read_file(&tables, "tables")?,
             )?;
             let assignments = parse_seating_csv(&read_file(&seating, "seating")?)?;
             let score = score_solution(&project, &assignments, recommended_weight)
-                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
             println!("Score: {score}");
+        }
+        Commands::Render {
+            people,
+            tables,
+            seating,
+            output,
+        } => {
+            let project = ProjectInput {
+                people: parse_people_csv(&read_file(&people, "people")?)?,
+                closeness_rules: Vec::new(),
+                table_types: parse_tables_json(&read_file(&tables, "tables")?)?,
+            };
+            let assignments = parse_seating_csv(&read_file(&seating, "seating")?)?;
+            let layout = build_layout(&project, &assignments)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let options = RenderOptions::default();
+            match output
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(|extension| extension.to_ascii_lowercase())
+                .as_deref()
+            {
+                Some("svg") => fs::write(&output, render_svg(&layout, &options))
+                    .with_context(|| format!("failed writing output {}", output.display()))?,
+                Some("png") => render_png(&layout, &options, &output)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+                _ => return Err(anyhow::anyhow!("render output must end with .svg or .png")),
+            }
+            println!("Rendered seating plan to {}", output.display());
         }
     }
     Ok(())
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
 /// Read a text file, providing a helpful error message on failure.
 fn read_file(path: &PathBuf, label: &str) -> Result<String> {
-    fs::read_to_string(path).with_context(|| format!("failed reading {label} file {}", path.display()))
+    fs::read_to_string(path)
+        .with_context(|| format!("failed reading {label} file {}", path.display()))
 }

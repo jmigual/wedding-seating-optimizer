@@ -220,6 +220,10 @@ impl std::error::Error for ValidationReport {}
 pub enum ValidationError {
     #[error("Duplicate person id: {0}")]
     DuplicatePersonId(String),
+    #[error("Duplicate table type id: {0}")]
+    DuplicateTableTypeId(String),
+    #[error("Table type id cannot be empty")]
+    EmptyTableTypeId,
     #[error("Person ID collides with group ID namespace: {0}")]
     NamespaceCollision(String),
     #[error("Unknown table type '{table_type}' referenced by person '{person_id}'")]
@@ -248,7 +252,13 @@ pub enum ValidationError {
     },
     #[error("Table shape '{0}' requires people_per_side")]
     MissingPeoplePerSide(String),
-    #[error("people_per_side sum ({sum}) must match max_people ({max}) for table type '{table_type}'")]
+    #[error(
+        "Table type '{table_type}' must define exactly four people_per_side values, found {len}"
+    )]
+    InvalidPeoplePerSideLength { table_type: String, len: usize },
+    #[error(
+        "people_per_side sum ({sum}) must match max_people ({max}) for table type '{table_type}'"
+    )]
     PeoplePerSideMismatch {
         table_type: String,
         sum: usize,
@@ -260,6 +270,17 @@ pub enum ValidationError {
         min: usize,
         max: usize,
     },
+    #[error("Table type '{table_type}' has recommended_people ({recommended}) outside the allowed range {min}..={max}")]
+    InvalidRecommendedPeople {
+        table_type: String,
+        recommended: usize,
+        min: usize,
+        max: usize,
+    },
+    #[error(
+        "Table type '{table_type}' must have number_of_tables > 0 when provided (got {count})"
+    )]
+    InvalidNumberOfTables { table_type: String, count: usize },
     #[error("Multiple people locked to same seat: table {table_number}, seat {seat}")]
     DuplicateLockedSeat { table_number: usize, seat: usize },
     #[error("Person '{person_id}' is locked to table {table_number} of type '{locked_type}', incompatible with required table_type '{required_type}'")]
@@ -325,7 +346,9 @@ pub enum ValidationError {
         assigned_table: usize,
     },
     /// A person with a locked seat is assigned to a different seat.
-    #[error("Person '{person_id}' must be at seat {locked_seat} but is placed at seat {assigned_seat}")]
+    #[error(
+        "Person '{person_id}' must be at seat {locked_seat} but is placed at seat {assigned_seat}"
+    )]
     SeatingViolatesLockedSeat {
         person_id: String,
         locked_seat: usize,

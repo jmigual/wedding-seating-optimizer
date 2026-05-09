@@ -40,24 +40,34 @@
 //! println!("{csv}");
 //! ```
 
+pub mod editing;
 pub mod io;
 pub mod models;
 pub mod optimizer;
+pub mod render;
 pub mod scoring;
 pub mod validation;
 
 // ── Public re-exports ─────────────────────────────────────────────────────────
 
+pub use editing::{
+    build_table_type_map, collect_group_ids, parse_f64_value, parse_optional_usize_value,
+    parse_required_usize_value, reference_id_options, ReferenceIdKind, ReferenceIdOption,
+};
 pub use io::{
     make_project, parse_closeness_csv, parse_people_csv, parse_seating_csv, parse_tables_json,
     write_closeness_csv, write_people_csv, write_seating_csv, write_tables_json,
 };
 pub use models::{
-    ClosenessRule, GroupId, OptimizationConfig, OptimizationResult, Person, PersonId,
-    ProjectInput, SeatingAssignment, SeatingSolution, SeatIndex, TableInstance, TableShape,
-    TableTypeConfig, TableTypeId, ValidationError, ValidationReport,
+    ClosenessRule, GroupId, OptimizationConfig, OptimizationResult, Person, PersonId, ProjectInput,
+    SeatIndex, SeatingAssignment, SeatingSolution, TableInstance, TableShape, TableTypeConfig,
+    TableTypeId, ValidationError, ValidationReport,
 };
 pub use optimizer::{HeuristicOptimizer, SeatingOptimizer};
+pub use render::{
+    build_layout, build_layout_with_options, render_png, render_svg, LayoutSeat, LayoutTable,
+    RenderOptions, RenderingError, SeatingLayout,
+};
 pub use scoring::{
     circular_distance, default_proximity_weight, effective_person_pair_score, perimeter_distance,
     score_solution,

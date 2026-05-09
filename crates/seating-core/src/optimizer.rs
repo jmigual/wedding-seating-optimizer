@@ -107,7 +107,11 @@ impl HeuristicOptimizer {
     ) -> Vec<(usize, usize)> {
         let mut candidates = Vec::new();
         for t in instances {
-            if p.table_type.as_ref().map(|tt| tt != &t.table_type).unwrap_or(false) {
+            if p.table_type
+                .as_ref()
+                .map(|tt| tt != &t.table_type)
+                .unwrap_or(false)
+            {
                 continue;
             }
             if p.locked_table.map(|l| l != t.number).unwrap_or(false) {
@@ -160,7 +164,8 @@ impl HeuristicOptimizer {
             .people
             .iter()
             .map(|p| {
-                let &(table_number, seat_index) = assigned.get(&p.id).expect("every person was assigned");
+                let &(table_number, seat_index) =
+                    assigned.get(&p.id).expect("every person was assigned");
                 SeatingAssignment {
                     table_number,
                     table_type: table_lookup[&table_number].table_type.clone(),
@@ -197,7 +202,8 @@ impl HeuristicOptimizer {
             .map(|p| p.id.as_str())
             .collect();
         let mut best_score =
-            score_solution(project, &assignments, config.recommended_capacity_weight).unwrap_or(f64::NEG_INFINITY);
+            score_solution(project, &assignments, config.recommended_capacity_weight)
+                .unwrap_or(f64::NEG_INFINITY);
 
         for _ in 0..config.iterations.max(50) {
             let i = rng.gen_range(0..assignments.len());
@@ -221,7 +227,9 @@ impl HeuristicOptimizer {
 
             // Accept only improving feasible swaps.
             if validate_seating_solution(project, &assignments).is_ok() {
-                if let Ok(score) = score_solution(project, &assignments, config.recommended_capacity_weight) {
+                if let Ok(score) =
+                    score_solution(project, &assignments, config.recommended_capacity_weight)
+                {
                     if score > best_score {
                         best_score = score;
                         continue; // Keep the swap.
@@ -263,7 +271,8 @@ impl SeatingOptimizer for HeuristicOptimizer {
             // Use a fixed bit-mixing constant to derive a deterministic but
             // decorrelated RNG stream for local improvement from the base seed.
             let improved = self.local_improve(project, config, initial, attempt_seed ^ 0xA5A5_5A5A);
-            let Ok(score) = score_solution(project, &improved, config.recommended_capacity_weight) else {
+            let Ok(score) = score_solution(project, &improved, config.recommended_capacity_weight)
+            else {
                 continue;
             };
             best.push(SeatingSolution {
