@@ -1,0 +1,5 @@
+left_id,right_id,score
+p1,p2,20
+family,family,10
+work,work,8
+family,work,-3
