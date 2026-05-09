@@ -244,6 +244,7 @@ fn integration_style_optimization_test() {
             &project,
             &OptimizationConfig {
                 seed: 1234,
+                attempts: 10,
                 iterations: 80,
                 solutions: 1,
                 recommended_capacity_weight: 0.5,

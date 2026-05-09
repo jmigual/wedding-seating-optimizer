@@ -10,12 +10,18 @@
 //! ## Features
 //!
 //! - Create a new blank project or load existing CSV/JSON files.
-//! - Edit the People CSV, Closeness CSV, and Tables JSON inline.
+//! - Edit the People CSV, Closeness CSV, and Tables JSON in multiline editors.
 //! - Set the RNG seed and run the optimizer.
 //! - View the resulting seating in text form.
 //! - Save / export any file back to disk in the canonical format.
+//!
+//! ## Limitations
+//!
+//! Optimization runs synchronously on the GUI thread (via `iced::Sandbox`).
+//! For large guest lists, a future version should switch to `iced::Application`
+//! with async `Command`s or a background thread so the window stays responsive.
 
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, row, scrollable, text, text_editor};
 use iced::{Alignment, Element, Length, Sandbox, Settings, Theme};
 use rfd::FileDialog;
 use seating_core::{
@@ -35,20 +41,19 @@ fn main() -> iced::Result {
 
 /// Root application state.
 ///
-/// Each text field mirrors one of the three input files (as raw text) or the
-/// seating output.  The `message` field shows the last status message to the
-/// user.
-#[derive(Default)]
+/// Each `Content` field is the multiline editor state for one of the three
+/// input files.  The optimizer output is stored as a plain `String` since it
+/// is read-only in the current UI.
 struct GuiApp {
-    /// Raw text content of the people CSV.
-    people_csv: String,
-    /// Raw text content of the closeness CSV.
-    closeness_csv: String,
-    /// Raw text content of the tables JSON.
-    tables_json: String,
-    /// Raw text content of the seating output CSV (populated after optimization).
+    /// Multiline editor content for the people CSV.
+    people_content: text_editor::Content,
+    /// Multiline editor content for the closeness CSV.
+    closeness_content: text_editor::Content,
+    /// Multiline editor content for the tables JSON.
+    tables_content: text_editor::Content,
+    /// Read-only seating output CSV (populated after optimization).
     output_csv: String,
-    /// Current seed value (shown in the seed input box).
+    /// Current seed value shown in the seed input.
     seed: String,
     /// Last status / error message shown to the user.
     message: String,
@@ -73,16 +78,16 @@ enum Msg {
     LoadTables,
     /// Save the tables JSON to a user-chosen file.
     SaveTables,
-    /// Run the optimizer and populate `output_csv`.
+    /// Run the optimizer and populate the output area.
     Optimize,
     /// Save the seating output CSV to a user-chosen file.
     SaveSeating,
-    /// Update the people CSV text field.
-    PeopleChanged(String),
-    /// Update the closeness CSV text field.
-    ClosenessChanged(String),
-    /// Update the tables JSON text field.
-    TablesChanged(String),
+    /// Text editing action forwarded from the people CSV editor.
+    PeopleEdited(text_editor::Action),
+    /// Text editing action forwarded from the closeness CSV editor.
+    ClosenessEdited(text_editor::Action),
+    /// Text editing action forwarded from the tables JSON editor.
+    TablesEdited(text_editor::Action),
     /// Update the seed text field.
     SeedChanged(String),
 }
@@ -94,9 +99,11 @@ impl Sandbox for GuiApp {
 
     fn new() -> Self {
         Self {
-            people_csv: "id,name,table_type,groups,locked_table,locked_seat\n".to_string(),
-            closeness_csv: "left_id,right_id,score\n".to_string(),
-            tables_json: concat!(
+            people_content: text_editor::Content::with_text(
+                "id,name,table_type,groups,locked_table,locked_seat\n",
+            ),
+            closeness_content: text_editor::Content::with_text("left_id,right_id,score\n"),
+            tables_content: text_editor::Content::with_text(concat!(
                 "{\n",
                 "  \"round_10\": {\n",
                 "    \"shape\": \"round\",\n",
@@ -106,8 +113,7 @@ impl Sandbox for GuiApp {
                 "    \"number_of_tables\": 1\n",
                 "  }\n",
                 "}\n"
-            )
-            .to_string(),
+            )),
             output_csv: String::new(),
             seed: "42".to_string(),
             message: "Create a new project or load files.".to_string(),
@@ -131,46 +137,46 @@ impl Sandbox for GuiApp {
 
             Msg::LoadPeople => match Self::load_file() {
                 Ok(Some(content)) => {
-                    self.people_csv = content;
+                    self.people_content = text_editor::Content::with_text(&content);
                     self.message = "Loaded people CSV.".to_string();
                 }
                 Ok(None) => {}
                 Err(e) => self.message = format!("Load failed: {e}"),
             },
             Msg::SavePeople => {
-                let data = self.people_csv.clone();
+                let data = self.people_content.text();
                 self.save_data(&data, "people.csv");
             }
 
             Msg::LoadCloseness => match Self::load_file() {
                 Ok(Some(content)) => {
-                    self.closeness_csv = content;
+                    self.closeness_content = text_editor::Content::with_text(&content);
                     self.message = "Loaded closeness CSV.".to_string();
                 }
                 Ok(None) => {}
                 Err(e) => self.message = format!("Load failed: {e}"),
             },
             Msg::SaveCloseness => {
-                let data = self.closeness_csv.clone();
+                let data = self.closeness_content.text();
                 self.save_data(&data, "closeness.csv");
             }
 
             Msg::LoadTables => match Self::load_file() {
                 Ok(Some(content)) => {
-                    self.tables_json = content;
+                    self.tables_content = text_editor::Content::with_text(&content);
                     self.message = "Loaded tables JSON.".to_string();
                 }
                 Ok(None) => {}
                 Err(e) => self.message = format!("Load failed: {e}"),
             },
             Msg::SaveTables => {
-                let data = self.tables_json.clone();
+                let data = self.tables_content.text();
                 self.save_data(&data, "tables.json");
             }
 
-            Msg::PeopleChanged(value) => self.people_csv = value,
-            Msg::ClosenessChanged(value) => self.closeness_csv = value,
-            Msg::TablesChanged(value) => self.tables_json = value,
+            Msg::PeopleEdited(action) => self.people_content.perform(action),
+            Msg::ClosenessEdited(action) => self.closeness_content.perform(action),
+            Msg::TablesEdited(action) => self.tables_content.perform(action),
             Msg::SeedChanged(value) => self.seed = value,
 
             Msg::Optimize => self.run_optimize(),
@@ -199,7 +205,7 @@ impl Sandbox for GuiApp {
         // Second row: optimizer controls.
         let optimize_row = row![
             text("Seed:"),
-            text_input("42", &self.seed)
+            iced::widget::text_input("42", &self.seed)
                 .on_input(Msg::SeedChanged)
                 .width(Length::Fixed(100.0)),
             button("Run Optimize").on_press(Msg::Optimize),
@@ -208,34 +214,35 @@ impl Sandbox for GuiApp {
         .spacing(8)
         .align_items(Alignment::Center);
 
-        // Three side-by-side text editors for the input files.
+        // Three side-by-side multiline editors for the input files.
         let editors = row![
             column![
                 text("People CSV"),
-                text_input("", &self.people_csv)
-                    .on_input(Msg::PeopleChanged)
-                    .padding(8)
-                    .size(14)
+                text_editor(&self.people_content)
+                    .on_action(Msg::PeopleEdited)
+                    .height(Length::Fill)
+                    .padding(8),
             ]
             .width(Length::FillPortion(1)),
             column![
                 text("Closeness CSV"),
-                text_input("", &self.closeness_csv)
-                    .on_input(Msg::ClosenessChanged)
-                    .padding(8)
-                    .size(14)
+                text_editor(&self.closeness_content)
+                    .on_action(Msg::ClosenessEdited)
+                    .height(Length::Fill)
+                    .padding(8),
             ]
             .width(Length::FillPortion(1)),
             column![
                 text("Tables JSON"),
-                text_input("", &self.tables_json)
-                    .on_input(Msg::TablesChanged)
-                    .padding(8)
-                    .size(14)
+                text_editor(&self.tables_content)
+                    .on_action(Msg::TablesEdited)
+                    .height(Length::Fill)
+                    .padding(8),
             ]
             .width(Length::FillPortion(1)),
         ]
-        .spacing(12);
+        .spacing(12)
+        .height(Length::FillPortion(3));
 
         // Output area showing the seating CSV and the last status message.
         let output_area = column![
@@ -296,14 +303,21 @@ impl GuiApp {
     }
 
     /// Parse inputs, run the optimizer, and store the result in `output_csv`.
+    ///
+    /// This runs synchronously on the GUI thread.  For large guest lists the
+    /// window will be unresponsive while the optimizer is running.
     fn run_optimize(&mut self) {
         let seed = self.seed.parse::<u64>().unwrap_or(42);
-        match make_project(&self.people_csv, &self.closeness_csv, &self.tables_json) {
+        let people_text = self.people_content.text();
+        let closeness_text = self.closeness_content.text();
+        let tables_text = self.tables_content.text();
+        match make_project(&people_text, &closeness_text, &tables_text) {
             Err(e) => self.message = format!("Input error: {e}"),
             Ok(project) => match HeuristicOptimizer.optimize(
                 &project,
                 &OptimizationConfig {
                     seed,
+                    attempts: 10,
                     iterations: 200,
                     solutions: 1,
                     recommended_capacity_weight: 1.0,

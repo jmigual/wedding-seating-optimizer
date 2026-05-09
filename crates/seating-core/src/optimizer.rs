@@ -35,9 +35,9 @@ pub trait SeatingOptimizer {
 /// Multi-restart hill-climbing optimizer.
 ///
 /// **Algorithm:**
-/// 1. For each of `config.iterations` attempts, build a random feasible
-///    assignment with a deterministic seed derived from `config.seed`.
-/// 2. Apply a greedy pairwise-swap local improvement phase.
+/// 1. For each of `config.attempts` independent random restarts, build a
+///    feasible assignment with a deterministic seed derived from `config.seed`.
+/// 2. Apply `config.iterations` greedy pairwise-swap local improvement steps.
 /// 3. Score the result and keep the top-N solutions.
 ///
 /// Reproducibility is guaranteed: the same `seed` always produces the same
@@ -174,8 +174,13 @@ impl HeuristicOptimizer {
 
     /// Apply greedy pairwise-swap local improvement.
     ///
-    /// At each iteration, a random pair of non-locked guests is chosen and their
-    /// seat positions are swapped if the swap improves the score and remains feasible.
+    /// At each of `config.iterations` steps, a random pair of non-locked guests
+    /// is chosen and their seat positions are swapped if the swap improves the
+    /// score and remains feasible.
+    ///
+    /// Guests are considered locked (and therefore excluded from swapping) when
+    /// they have a `locked_table` **or** a `locked_seat`; swapping them could
+    /// violate hard placement constraints.
     fn local_improve(
         &self,
         project: &ProjectInput,
@@ -184,10 +189,11 @@ impl HeuristicOptimizer {
         seed: u64,
     ) -> Vec<SeatingAssignment> {
         let mut rng = StdRng::seed_from_u64(seed);
+        // Any person with a locked table or seat must not be moved.
         let locked_ids: HashSet<&str> = project
             .people
             .iter()
-            .filter(|p| p.locked_seat.is_some())
+            .filter(|p| p.locked_seat.is_some() || p.locked_table.is_some())
             .map(|p| p.id.as_str())
             .collect();
         let mut best_score =
@@ -233,6 +239,10 @@ impl HeuristicOptimizer {
 impl SeatingOptimizer for HeuristicOptimizer {
     /// Run the multi-restart heuristic and return the best solutions.
     ///
+    /// Runs `config.attempts` independent random restarts. Each attempt
+    /// applies `config.iterations` local improvement steps. Only the top
+    /// `config.solutions` solutions (by score) are returned.
+    ///
     /// Each attempt uses a distinct, deterministic seed derived from
     /// `config.seed` so results are reproducible.
     fn optimize(
@@ -244,7 +254,7 @@ impl SeatingOptimizer for HeuristicOptimizer {
 
         let mut best: Vec<SeatingSolution> = Vec::new();
 
-        for attempt in 0..config.iterations.max(1) {
+        for attempt in 0..config.attempts.max(1) {
             // Derive a per-attempt seed that is deterministic and distinct.
             let attempt_seed = config.seed.wrapping_add((attempt as u64) * 17);
             let Some(initial) = self.random_feasible_assignment(project, attempt_seed) else {

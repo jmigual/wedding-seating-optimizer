@@ -96,10 +96,13 @@ enum Commands {
         /// RNG seed for reproducible runs.
         #[arg(long, default_value_t = 42)]
         seed: u64,
+        /// Number of independent random-restart attempts.
+        #[arg(long, default_value_t = 10)]
+        attempts: usize,
         /// Number of top solutions to keep (only the best is written to output).
         #[arg(long, default_value_t = 1)]
         solutions: usize,
-        /// Local-improvement iterations per optimization attempt.
+        /// Local-improvement swap iterations per attempt.
         #[arg(long, default_value_t = 200)]
         iterations: usize,
         /// Weight applied to the penalty for deviating from recommended table size.
@@ -152,6 +155,7 @@ fn main() -> Result<()> {
             tables,
             output,
             seed,
+            attempts,
             solutions,
             iterations,
             recommended_weight,
@@ -166,6 +170,7 @@ fn main() -> Result<()> {
                 &project,
                 &OptimizationConfig {
                     seed,
+                    attempts,
                     iterations,
                     solutions,
                     recommended_capacity_weight: recommended_weight,

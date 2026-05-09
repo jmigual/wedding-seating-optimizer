@@ -120,7 +120,7 @@ pub struct TableInstance {
     pub max_people: usize,
     /// Minimum occupancy when the table is used (hard constraint).
     pub min_people: Option<usize>,
-    /// Preferred occupancy (soft constraint, penalised in scoring).
+    /// Preferred occupancy (soft constraint, penalized in scoring).
     pub recommended_people: Option<usize>,
 }
 
@@ -157,7 +157,13 @@ pub struct SeatingSolution {
 pub struct OptimizationConfig {
     /// RNG seed for reproducible runs.
     pub seed: u64,
-    /// Number of local-improvement steps per attempt.
+    /// Number of independent random-restart attempts.
+    ///
+    /// More attempts increase the chance of finding a better global optimum.
+    pub attempts: usize,
+    /// Number of local pairwise-swap improvement steps per attempt.
+    ///
+    /// More iterations refine each individual attempt further.
     pub iterations: usize,
     /// How many top solutions to keep and return.
     pub solutions: usize,
@@ -169,6 +175,7 @@ impl Default for OptimizationConfig {
     fn default() -> Self {
         Self {
             seed: 42,
+            attempts: 10,
             iterations: 200,
             solutions: 1,
             recommended_capacity_weight: 1.0,
@@ -295,4 +302,33 @@ pub enum ValidationError {
     },
     #[error("Malformed input: {0}")]
     MalformedInput(String),
+    /// `SeatingAssignment.table_type` does not match the actual type of the resolved table instance.
+    #[error("Seating assignment records table_type '{recorded_type}' for table {table_number}, but the table instance has type '{actual_type}'")]
+    SeatingTableTypeMismatch {
+        table_number: usize,
+        actual_type: String,
+        recorded_type: String,
+    },
+    /// The assigned table type does not satisfy the person's required table type.
+    #[error("Person '{person_id}' requires table type '{required_type}' but is seated at table {table_number} of type '{assigned_type}'")]
+    SeatingPersonTableTypeMismatch {
+        person_id: String,
+        table_number: usize,
+        required_type: String,
+        assigned_type: String,
+    },
+    /// A person with a locked table is assigned to a different table.
+    #[error("Person '{person_id}' must be at table {locked_table} but is seated at table {assigned_table}")]
+    SeatingViolatesLockedTable {
+        person_id: String,
+        locked_table: usize,
+        assigned_table: usize,
+    },
+    /// A person with a locked seat is assigned to a different seat.
+    #[error("Person '{person_id}' must be at seat {locked_seat} but is placed at seat {assigned_seat}")]
+    SeatingViolatesLockedSeat {
+        person_id: String,
+        locked_seat: usize,
+        assigned_seat: usize,
+    },
 }

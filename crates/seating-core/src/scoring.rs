@@ -65,7 +65,7 @@ pub fn default_proximity_weight(distance: usize) -> f64 {
 
 // ── Pair-level scoring ────────────────────────────────────────────────────────
 
-/// Compute the effective closeness score between two guests.
+/// Compute the effective closeness score between two guests using a pre-built lookup.
 ///
 /// The result is the sum of:
 /// 1. The direct person-pair closeness (if a rule exists for `(a.id, b.id)`).
@@ -74,16 +74,11 @@ pub fn default_proximity_weight(distance: usize) -> f64 {
 ///    relationship dominates).
 ///
 /// If no matching rules exist the score is 0.
-///
-/// # Errors
-/// Returns [`ValidationError::DuplicateClosenessRule`] if the rules list
-/// contains contradictory entries for the same pair.
-pub fn effective_person_pair_score(
-    project: &ProjectInput,
+fn pair_score_with_lookup(
+    closeness: &HashMap<(String, String), f64>,
     a: &Person,
     b: &Person,
-) -> Result<f64, ValidationError> {
-    let closeness = build_closeness_lookup(&project.closeness_rules)?;
+) -> f64 {
     let mut score = *closeness.get(&canonical_pair(&a.id, &b.id)).unwrap_or(&0.0);
     let mut best_group: Option<f64> = None;
     for ga in &a.groups {
@@ -96,7 +91,25 @@ pub fn effective_person_pair_score(
     if let Some(gs) = best_group {
         score += gs;
     }
-    Ok(score)
+    score
+}
+
+/// Compute the effective closeness score between two guests.
+///
+/// Builds the closeness lookup from `project.closeness_rules` on every call.
+/// Prefer [`score_solution`] for bulk scoring since it precomputes the lookup
+/// once and reuses it across all pairs.
+///
+/// # Errors
+/// Returns [`ValidationError::DuplicateClosenessRule`] if the rules list
+/// contains contradictory entries for the same pair.
+pub fn effective_person_pair_score(
+    project: &ProjectInput,
+    a: &Person,
+    b: &Person,
+) -> Result<f64, ValidationError> {
+    let closeness = build_closeness_lookup(&project.closeness_rules)?;
+    Ok(pair_score_with_lookup(&closeness, a, b))
 }
 
 // ── Solution-level scoring ────────────────────────────────────────────────────
@@ -116,6 +129,9 @@ pub fn effective_person_pair_score(
 /// penalty = |occupancy - recommended_people| × recommended_weight
 /// ```
 ///
+/// The closeness lookup is built **once** and reused for all pair evaluations,
+/// making this O(rules + n²) rather than O(n² × rules).
+///
 /// # Errors
 /// Returns a [`ValidationReport`] if the solution or project is invalid.
 pub fn score_solution(
@@ -124,6 +140,10 @@ pub fn score_solution(
     recommended_weight: f64,
 ) -> Result<f64, ValidationReport> {
     validate_seating_solution(project, assignments)?;
+
+    // Build the closeness lookup once for all pair evaluations.
+    let closeness = build_closeness_lookup(&project.closeness_rules)
+        .map_err(|e| ValidationReport { errors: vec![e] })?;
 
     let instances = generate_table_instances(project);
     let table_by_number: HashMap<usize, &crate::models::TableInstance> =
@@ -146,8 +166,7 @@ pub fn score_solution(
                 let b = seated[j];
                 let pa = person_map[a.person_id.as_str()];
                 let pb = person_map[b.person_id.as_str()];
-                let pair_score = effective_person_pair_score(project, pa, pb)
-                    .map_err(|e| ValidationReport { errors: vec![e] })?;
+                let pair_score = pair_score_with_lookup(&closeness, pa, pb);
                 let table = table_by_number[&a.table_number];
                 let distance = match table.shape {
                     TableShape::Round => circular_distance(a.seat_index, b.seat_index, table.max_people),

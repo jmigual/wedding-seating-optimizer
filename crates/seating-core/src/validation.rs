@@ -22,10 +22,13 @@ use std::collections::{HashMap, HashSet};
 ///
 /// For each type:
 /// - If `number_of_tables` is specified, exactly that many instances are created.
-/// - Otherwise, the number defaults to `max(person_count, max_locked_table_number)`,
-///   which is a safe upper bound that guarantees every lock can be satisfied.
+/// - Otherwise, the count defaults to `max(ceil(people / max_people), max_locked_table_number)`,
+///   which is a safe upper bound ensuring every lock can be satisfied without
+///   generating an excessive number of instances.
 ///
-/// Instances are numbered sequentially (1-based) in type-declaration order.
+/// Instances are numbered sequentially (1-based). Because [`ProjectInput::table_types`]
+/// is a [`std::collections::BTreeMap`], types are iterated in **lexicographic key order**,
+/// so table numbers are stable and deterministic across platforms.
 pub fn generate_table_instances(project: &ProjectInput) -> Vec<TableInstance> {
     let max_locked = project
         .people
@@ -33,13 +36,17 @@ pub fn generate_table_instances(project: &ProjectInput) -> Vec<TableInstance> {
         .filter_map(|p| p.locked_table)
         .max()
         .unwrap_or(0);
-    let dynamic_count = project.people.len().max(1);
+    let person_count = project.people.len().max(1);
     let mut instances = Vec::new();
     let mut number = 1usize;
     for (table_type_id, cfg) in &project.table_types {
-        let count = cfg
-            .number_of_tables
-            .unwrap_or_else(|| dynamic_count.max(max_locked));
+        // When not specified, generate the minimum number of tables of this
+        // type that could in theory seat everyone (ceiling division), subject
+        // to honouring the highest locked-table number.
+        let count = cfg.number_of_tables.unwrap_or_else(|| {
+            let by_capacity = person_count.div_ceil(cfg.max_people);
+            by_capacity.max(max_locked)
+        });
         for _ in 0..count {
             instances.push(TableInstance {
                 number,
@@ -102,6 +109,15 @@ pub fn validate_project(project: &ProjectInput) -> Result<(), ValidationReport> 
 ///
 /// Also runs [`validate_project`] internally so that caller does not need to
 /// call both functions separately.
+///
+/// Additional checks beyond project validation:
+/// - Every person appears exactly once.
+/// - All table numbers exist.
+/// - No seat collisions.
+/// - `SeatingAssignment.table_type` matches the resolved instance type.
+/// - Person's required `table_type` (if any) is respected.
+/// - Locked-table and locked-seat constraints are honoured.
+/// - Occupancy bounds (`max_people`, `min_people`) are satisfied.
 pub fn validate_seating_solution(
     project: &ProjectInput,
     assignments: &[SeatingAssignment],
@@ -110,17 +126,18 @@ pub fn validate_seating_solution(
 
     let instances = generate_table_instances(project);
     let table_by_number: HashMap<usize, &TableInstance> = instances.iter().map(|t| (t.number, t)).collect();
-    let person_ids: HashSet<&str> = project.people.iter().map(|p| p.id.as_str()).collect();
+    let person_map: HashMap<&str, &crate::models::Person> =
+        project.people.iter().map(|p| (p.id.as_str(), p)).collect();
 
     let mut seen_people: HashSet<String> = HashSet::new();
     let mut seen_seats: HashSet<(usize, usize)> = HashSet::new();
     let mut occupancy: HashMap<usize, usize> = HashMap::new();
 
     for a in assignments {
-        if !person_ids.contains(a.person_id.as_str()) {
+        let Some(person) = person_map.get(a.person_id.as_str()).copied() else {
             errors.push(ValidationError::UnknownPersonInSeating(a.person_id.clone()));
             continue;
-        }
+        };
         if !seen_people.insert(a.person_id.clone()) {
             errors.push(ValidationError::MissingOrDuplicatePerson(a.person_id.clone()));
         }
@@ -128,6 +145,50 @@ pub fn validate_seating_solution(
             errors.push(ValidationError::UnknownTableInSeating(a.table_number));
             continue;
         };
+
+        // The table_type recorded in the assignment must match the instance.
+        if a.table_type != table.table_type {
+            errors.push(ValidationError::SeatingTableTypeMismatch {
+                table_number: a.table_number,
+                actual_type: table.table_type.clone(),
+                recorded_type: a.table_type.clone(),
+            });
+        }
+
+        // The person's required table_type (if any) must match.
+        if let Some(required) = &person.table_type {
+            if *required != table.table_type {
+                errors.push(ValidationError::SeatingPersonTableTypeMismatch {
+                    person_id: a.person_id.clone(),
+                    table_number: a.table_number,
+                    required_type: required.clone(),
+                    assigned_type: table.table_type.clone(),
+                });
+            }
+        }
+
+        // Locked-table constraint.
+        if let Some(locked_table) = person.locked_table {
+            if locked_table != a.table_number {
+                errors.push(ValidationError::SeatingViolatesLockedTable {
+                    person_id: a.person_id.clone(),
+                    locked_table,
+                    assigned_table: a.table_number,
+                });
+            }
+        }
+
+        // Locked-seat constraint.
+        if let Some(locked_seat) = person.locked_seat {
+            if locked_seat != a.seat_index {
+                errors.push(ValidationError::SeatingViolatesLockedSeat {
+                    person_id: a.person_id.clone(),
+                    locked_seat,
+                    assigned_seat: a.seat_index,
+                });
+            }
+        }
+
         if a.seat_index >= table.max_people {
             errors.push(ValidationError::LockedSeatOutOfRange {
                 person_id: a.person_id.clone(),
@@ -354,7 +415,13 @@ fn validate_impossible_assignments(
     }
 }
 
-/// Warn when a group with very high self-closeness is larger than any table.
+/// Hard-error when a group with very high self-closeness is larger than any table.
+///
+/// If a group has `self-closeness ≥ 50` and more members than the largest
+/// table capacity, it is physically impossible to seat all members together,
+/// making the high-priority preference unsatisfiable.  This is treated as a
+/// hard validation error rather than a warning so that users are forced to
+/// resolve the mismatch before running the optimizer.
 fn validate_large_groups(
     project: &ProjectInput,
     group_ids: &HashSet<String>,
