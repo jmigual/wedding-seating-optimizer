@@ -80,10 +80,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item "target/release/${{ matrix.platform.cli_bin }}" dist
           Copy-Item "target/release/${{ matrix.platform.gui_bin }}" dist
-          Compress-Archive \
-            -Path "dist/${{ matrix.platform.cli_bin }}", "dist/${{ matrix.platform.gui_bin }}" \
-            -DestinationPath "${{ matrix.platform.archive_name }}" \
-            -Force
+          Compress-Archive -Path "dist/${{ matrix.platform.cli_bin }}", "dist/${{ matrix.platform.gui_bin }}" -DestinationPath "${{ matrix.platform.archive_name }}" -Force
 
       - name: Upload archive to GitHub release
         uses: softprops/action-gh-release@v2
