@@ -8,7 +8,9 @@
 //! core crate, and only uses CSV/JSON files for import/export/save/load.
 
 use iced::widget::{button, column, container, pick_list, row, scrollable, svg, text, text_input};
-use iced::{Alignment, Element, Length, Sandbox, Settings, Theme};
+use iced::{
+    theme, Alignment, Background, Border, Color, Element, Length, Sandbox, Settings, Theme,
+};
 use rfd::FileDialog;
 use seating_core::{
     build_layout, build_table_type_map, generate_table_instances, parse_closeness_csv,
@@ -104,6 +106,14 @@ impl Tab {
             Tab::Optimize => "Optimize",
             Tab::SeatingPlan => "Seating Plan",
             Tab::Diagnostics => "Validation / Diagnostics",
+        }
+    }
+
+    fn width(self) -> f32 {
+        match self {
+            Tab::Diagnostics => 230.0,
+            Tab::SeatingPlan => 150.0,
+            _ => 140.0,
         }
     }
 }
@@ -444,13 +454,26 @@ impl Sandbox for GuiApp {
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
-        let top_bar = row![button("New Project").on_press(Msg::NewProject)]
-            .spacing(10)
-            .align_items(Alignment::Center);
+        let header = container(
+            row![
+                text("Wedding Seating").size(16),
+                container(row![]).width(Length::Fill),
+                button(text("New Project").size(13))
+                    .on_press(Msg::NewProject)
+                    .padding([8, 14])
+                    .style(theme::Button::custom(AppButtonStyle::secondary())),
+            ]
+            .spacing(16)
+            .align_items(Alignment::Center),
+        )
+        .padding([14, 28])
+        .width(Length::Fill)
+        .style(header_style);
 
-        let tabs = Tab::ALL.into_iter().fold(row![].spacing(8), |tabs, tab| {
-            tabs.push(button(tab.label()).on_press(Msg::SelectTab(tab)))
-        });
+        let tabs = Tab::ALL.into_iter().fold(
+            row![].spacing(8).align_items(Alignment::Center),
+            |tabs, tab| tabs.push(self.tab_button(tab)),
+        );
 
         let content = match self.active_tab {
             Tab::People => self.view_people_tab(),
@@ -461,28 +484,83 @@ impl Sandbox for GuiApp {
             Tab::Diagnostics => self.view_diagnostics_tab(),
         };
 
-        container(
-            column![top_bar, tabs, text(&self.message), content]
-                .spacing(12)
-                .padding(12),
+        let message = container(text(&self.message).size(13))
+            .padding([12, 18])
+            .width(Length::Fill)
+            .style(message_style);
+
+        let shell = container(
+            column![
+                header,
+                container(tabs)
+                    .padding([20, 28, 10, 28])
+                    .width(Length::Fill),
+                container(message)
+                    .padding([0, 28, 10, 28])
+                    .width(Length::Fill),
+                container(content)
+                    .padding([18, 28, 28, 28])
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+            ]
+            .height(Length::Fill),
         )
         .width(Length::Fill)
         .height(Length::Fill)
-        .into()
+        .max_width(1440)
+        .style(shell_style);
+
+        container(shell)
+            .padding(34)
+            .center_x()
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(app_background_style)
+            .into()
     }
 }
 
 impl GuiApp {
+    fn tab_button(&self, tab: Tab) -> Element<'_, Msg> {
+        button(text(tab.label()).size(13))
+            .on_press(Msg::SelectTab(tab))
+            .padding([10, 14])
+            .width(Length::Fixed(tab.width()))
+            .style(theme::Button::custom(AppButtonStyle::tab(
+                tab == self.active_tab,
+            )))
+            .into()
+    }
+
     fn view_people_tab(&self) -> Element<'_, Msg> {
-        let mut content = column![row![
-            button("Import People CSV").on_press(Msg::ImportPeople),
-            button("Save People CSV").on_press(Msg::SavePeople),
-            button("Export People CSV As...").on_press(Msg::ExportPeople),
-            button("Add Person").on_press(Msg::AddPerson),
-        ]
-        .spacing(8)
-        .align_items(Alignment::Center)]
-        .spacing(12);
+        let actions = container(
+            row![
+                button(text("Import People CSV").size(13))
+                    .on_press(Msg::ImportPeople)
+                    .padding([9, 14])
+                    .style(theme::Button::custom(AppButtonStyle::secondary())),
+                button(text("Save People CSV").size(13))
+                    .on_press(Msg::SavePeople)
+                    .padding([9, 14])
+                    .style(theme::Button::custom(AppButtonStyle::secondary())),
+                button(text("Export People CSV As...").size(13))
+                    .on_press(Msg::ExportPeople)
+                    .padding([9, 14])
+                    .style(theme::Button::custom(AppButtonStyle::secondary())),
+                container(row![]).width(Length::Fill),
+                button(text("Add Person").size(13))
+                    .on_press(Msg::AddPerson)
+                    .padding([9, 14])
+                    .style(theme::Button::custom(AppButtonStyle::primary())),
+            ]
+            .spacing(8)
+            .align_items(Alignment::Center),
+        )
+        .padding(10)
+        .width(Length::Fill)
+        .style(toolbar_style);
+
+        let mut content = column![actions].spacing(12);
 
         for (index, row_state) in self.people.iter().enumerate() {
             let table_type_options = self.person_table_type_options(&row_state.person.table_type);
@@ -492,8 +570,10 @@ impl GuiApp {
                 row![].spacing(6),
                 |group_row, (group_index, group)| {
                     group_row.push(
-                        button(text(format!("{group} ✕")))
-                            .on_press(Msg::RemoveGroup(index, group_index)),
+                        button(text(format!("{group} x")).size(12))
+                            .on_press(Msg::RemoveGroup(index, group_index))
+                            .padding([5, 9])
+                            .style(theme::Button::custom(AppButtonStyle::chip())),
                     )
                 },
             );
@@ -529,7 +609,10 @@ impl GuiApp {
                     )
                     .placeholder("locked seat")
                     .width(Length::Fixed(170.0)),
-                    button("Delete").on_press(Msg::DeletePerson(index)),
+                    button(text("Delete").size(13))
+                        .on_press(Msg::DeletePerson(index))
+                        .padding([8, 12])
+                        .style(theme::Button::custom(AppButtonStyle::danger())),
                 ]
                 .spacing(8)
                 .align_items(Alignment::Center),
@@ -539,7 +622,10 @@ impl GuiApp {
                     text_input("new group", &row_state.new_group)
                         .on_input(move |value| Msg::UpdateNewGroup(index, value))
                         .width(Length::Fixed(180.0)),
-                    button("Add Group").on_press(Msg::AddGroup(index)),
+                    button(text("Add Group").size(13))
+                        .on_press(Msg::AddGroup(index))
+                        .padding([8, 12])
+                        .style(theme::Button::custom(AppButtonStyle::secondary())),
                 ]
                 .spacing(8)
                 .align_items(Alignment::Center),
@@ -547,7 +633,12 @@ impl GuiApp {
             ]
             .spacing(8);
 
-            content = content.push(container(card).padding(10).width(Length::Fill));
+            content = content.push(
+                container(card)
+                    .padding(12)
+                    .width(Length::Fill)
+                    .style(row_card_style),
+            );
         }
 
         scrollable(content).into()
@@ -555,15 +646,34 @@ impl GuiApp {
 
     fn view_closeness_tab(&self) -> Element<'_, Msg> {
         let options = reference_id_options(&self.people_data());
-        let mut content = column![row![
-            button("Import Closeness CSV").on_press(Msg::ImportCloseness),
-            button("Save Closeness CSV").on_press(Msg::SaveCloseness),
-            button("Export Closeness CSV As...").on_press(Msg::ExportCloseness),
-            button("Add Rule").on_press(Msg::AddClosenessRule),
-        ]
-        .spacing(8)
-        .align_items(Alignment::Center)]
-        .spacing(12);
+        let actions = container(
+            row![
+                button(text("Import Closeness CSV").size(13))
+                    .on_press(Msg::ImportCloseness)
+                    .padding([9, 14])
+                    .style(theme::Button::custom(AppButtonStyle::secondary())),
+                button(text("Save Closeness CSV").size(13))
+                    .on_press(Msg::SaveCloseness)
+                    .padding([9, 14])
+                    .style(theme::Button::custom(AppButtonStyle::secondary())),
+                button(text("Export Closeness CSV As...").size(13))
+                    .on_press(Msg::ExportCloseness)
+                    .padding([9, 14])
+                    .style(theme::Button::custom(AppButtonStyle::secondary())),
+                container(row![]).width(Length::Fill),
+                button(text("Add Rule").size(13))
+                    .on_press(Msg::AddClosenessRule)
+                    .padding([9, 14])
+                    .style(theme::Button::custom(AppButtonStyle::primary())),
+            ]
+            .spacing(8)
+            .align_items(Alignment::Center),
+        )
+        .padding(10)
+        .width(Length::Fill)
+        .style(toolbar_style);
+
+        let mut content = column![actions].spacing(12);
 
         for (index, row_state) in self.closeness_rules.iter().enumerate() {
             let left_matches = self.reference_matches(&options, &row_state.rule.left_id);
@@ -583,7 +693,10 @@ impl GuiApp {
                         text_input("score", &row_state.score_input)
                             .on_input(move |value| Msg::UpdateClosenessScore(index, value))
                             .width(Length::Fixed(120.0)),
-                        button("Delete").on_press(Msg::DeleteClosenessRule(index)),
+                        button(text("Delete").size(13))
+                            .on_press(Msg::DeleteClosenessRule(index))
+                            .padding([8, 12])
+                            .style(theme::Button::custom(AppButtonStyle::danger())),
                     ]
                     .spacing(8)
                     .align_items(Alignment::Center),
@@ -608,7 +721,9 @@ impl GuiApp {
                     },),
                     self.error_column(errors),
                 ])
-                .padding(10),
+                .padding(12)
+                .width(Length::Fill)
+                .style(row_card_style),
             );
         }
 
@@ -617,18 +732,34 @@ impl GuiApp {
 
     fn view_tables_tab(&self) -> Element<'_, Msg> {
         let generated_instances = self.generated_table_summary();
-        let mut content = column![
+        let actions = container(
             row![
-                button("Import Tables JSON").on_press(Msg::ImportTables),
-                button("Save Tables JSON").on_press(Msg::SaveTables),
-                button("Export Tables JSON As...").on_press(Msg::ExportTables),
-                button("Add Table Type").on_press(Msg::AddTableConfig),
+                button(text("Import Tables JSON").size(13))
+                    .on_press(Msg::ImportTables)
+                    .padding([9, 14])
+                    .style(theme::Button::custom(AppButtonStyle::secondary())),
+                button(text("Save Tables JSON").size(13))
+                    .on_press(Msg::SaveTables)
+                    .padding([9, 14])
+                    .style(theme::Button::custom(AppButtonStyle::secondary())),
+                button(text("Export Tables JSON As...").size(13))
+                    .on_press(Msg::ExportTables)
+                    .padding([9, 14])
+                    .style(theme::Button::custom(AppButtonStyle::secondary())),
+                container(row![]).width(Length::Fill),
+                button(text("Add Table Type").size(13))
+                    .on_press(Msg::AddTableConfig)
+                    .padding([9, 14])
+                    .style(theme::Button::custom(AppButtonStyle::primary())),
             ]
             .spacing(8)
             .align_items(Alignment::Center),
-            text("Generated table instances")
-        ]
-        .spacing(12);
+        )
+        .padding(10)
+        .width(Length::Fill)
+        .style(toolbar_style);
+
+        let mut content = column![actions, text("Generated table instances")].spacing(12);
 
         for summary in generated_instances {
             content = content.push(text(summary));
@@ -672,7 +803,10 @@ impl GuiApp {
                             move |shape| Msg::UpdateTableShape(index, shape),
                         )
                         .width(Length::Fixed(150.0)),
-                        button("Delete").on_press(Msg::DeleteTableConfig(index)),
+                        button(text("Delete").size(13))
+                            .on_press(Msg::DeleteTableConfig(index))
+                            .padding([8, 12])
+                            .style(theme::Button::custom(AppButtonStyle::danger())),
                     ]
                     .spacing(8)
                     .align_items(Alignment::Center),
@@ -694,7 +828,9 @@ impl GuiApp {
                     people_per_side,
                     self.error_column(errors),
                 ])
-                .padding(10),
+                .padding(12)
+                .width(Length::Fill)
+                .style(row_card_style),
             );
         }
 
@@ -708,20 +844,37 @@ impl GuiApp {
             self.seating_csv.clone()
         };
 
+        let actions = container(
+            row![
+                text("Seed").size(13),
+                text_input("42", &self.seed)
+                    .on_input(Msg::SeedChanged)
+                    .width(Length::Fixed(100.0)),
+                container(row![]).width(Length::Fill),
+                button(text("Run Optimize").size(13))
+                    .on_press(Msg::Optimize)
+                    .padding([9, 14])
+                    .style(theme::Button::custom(AppButtonStyle::primary())),
+                button(text("Save Seating CSV").size(13))
+                    .on_press(Msg::SaveSeating)
+                    .padding([9, 14])
+                    .style(theme::Button::custom(AppButtonStyle::secondary())),
+            ]
+            .spacing(8)
+            .align_items(Alignment::Center),
+        )
+        .padding(10)
+        .width(Length::Fill)
+        .style(toolbar_style);
+
         scrollable(
             column![
-                row![
-                    text("Seed"),
-                    text_input("42", &self.seed)
-                        .on_input(Msg::SeedChanged)
-                        .width(Length::Fixed(100.0)),
-                    button("Run Optimize").on_press(Msg::Optimize),
-                    button("Save Seating CSV").on_press(Msg::SaveSeating),
-                ]
-                .spacing(8)
-                .align_items(Alignment::Center),
-                text("Current seating assignments"),
-                text(seating_preview),
+                actions,
+                text("Current seating assignments").size(15),
+                container(text(seating_preview).size(13))
+                    .padding(14)
+                    .width(Length::Fill)
+                    .style(row_card_style),
             ]
             .spacing(12),
         )
@@ -729,15 +882,33 @@ impl GuiApp {
     }
 
     fn view_seating_plan_tab(&self) -> Element<'_, Msg> {
-        let controls = row![
-            button("Export seating plan as SVG").on_press(Msg::ExportPlanSvg),
-            button("Export seating plan as PNG").on_press(Msg::ExportPlanPng),
-            button("Zoom -").on_press(Msg::ZoomOut),
-            button("Zoom +").on_press(Msg::ZoomIn),
-            text(format!("Zoom: {:.1}x", self.zoom)),
-        ]
-        .spacing(8)
-        .align_items(Alignment::Center);
+        let controls = container(
+            row![
+                button(text("Export seating plan as SVG").size(13))
+                    .on_press(Msg::ExportPlanSvg)
+                    .padding([9, 14])
+                    .style(theme::Button::custom(AppButtonStyle::secondary())),
+                button(text("Export seating plan as PNG").size(13))
+                    .on_press(Msg::ExportPlanPng)
+                    .padding([9, 14])
+                    .style(theme::Button::custom(AppButtonStyle::secondary())),
+                container(row![]).width(Length::Fill),
+                button(text("Zoom -").size(13))
+                    .on_press(Msg::ZoomOut)
+                    .padding([9, 12])
+                    .style(theme::Button::custom(AppButtonStyle::secondary())),
+                button(text("Zoom +").size(13))
+                    .on_press(Msg::ZoomIn)
+                    .padding([9, 12])
+                    .style(theme::Button::custom(AppButtonStyle::secondary())),
+                text(format!("Zoom: {:.1}x", self.zoom)).size(13),
+            ]
+            .spacing(8)
+            .align_items(Alignment::Center),
+        )
+        .padding(10)
+        .width(Length::Fill)
+        .style(toolbar_style);
 
         let body: Element<'_, Msg> = match (&self.layout, &self.layout_svg) {
             (Some(layout), Some(svg_markup)) => scrollable(
@@ -753,7 +924,17 @@ impl GuiApp {
             _ => text("No valid seating plan to render yet.").into(),
         };
 
-        column![controls, body].spacing(12).into()
+        column![
+            controls,
+            container(body)
+                .padding(18)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(canvas_style)
+        ]
+        .spacing(12)
+        .height(Length::Fill)
+        .into()
     }
 
     fn view_diagnostics_tab(&self) -> Element<'_, Msg> {
@@ -774,14 +955,21 @@ impl GuiApp {
         ];
 
         let content = paths.into_iter().fold(
-            column![text("Validation errors")].spacing(8),
+            column![text("Validation errors").size(15)].spacing(8),
             |column, entry| column.push(text(entry)),
         );
         let content = errors
             .into_iter()
             .fold(content, |column, error| column.push(text(error)));
 
-        scrollable(content).into()
+        scrollable(
+            column![container(content)
+                .padding(14)
+                .width(Length::Fill)
+                .style(row_card_style)]
+            .spacing(12),
+        )
+        .into()
     }
 
     fn people_data(&self) -> Vec<Person> {
@@ -1503,8 +1691,10 @@ impl GuiApp {
             row![text(label)].spacing(6).align_items(Alignment::Center),
             |suggestion_row, suggestion| {
                 suggestion_row.push(
-                    button(text(suggestion.label.clone()))
-                        .on_press(on_press.clone()(suggestion.id.clone())),
+                    button(text(suggestion.label.clone()).size(12))
+                        .on_press(on_press.clone()(suggestion.id.clone()))
+                        .padding([5, 9])
+                        .style(theme::Button::custom(AppButtonStyle::chip())),
                 )
             },
         );
@@ -1519,6 +1709,185 @@ impl GuiApp {
             })
             .into()
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AppButtonKind {
+    Tab { active: bool },
+    Primary,
+    Secondary,
+    Danger,
+    Chip,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AppButtonStyle {
+    kind: AppButtonKind,
+}
+
+impl AppButtonStyle {
+    fn tab(active: bool) -> Self {
+        Self {
+            kind: AppButtonKind::Tab { active },
+        }
+    }
+
+    fn primary() -> Self {
+        Self {
+            kind: AppButtonKind::Primary,
+        }
+    }
+
+    fn secondary() -> Self {
+        Self {
+            kind: AppButtonKind::Secondary,
+        }
+    }
+
+    fn danger() -> Self {
+        Self {
+            kind: AppButtonKind::Danger,
+        }
+    }
+
+    fn chip() -> Self {
+        Self {
+            kind: AppButtonKind::Chip,
+        }
+    }
+}
+
+impl button::StyleSheet for AppButtonStyle {
+    type Style = Theme;
+
+    fn active(&self, _style: &Self::Style) -> button::Appearance {
+        let (background, text_color, border_color) = match self.kind {
+            AppButtonKind::Tab { active: true } => {
+                (rgb(58, 83, 116), rgb(246, 249, 252), rgb(81, 114, 154))
+            }
+            AppButtonKind::Tab { active: false } => {
+                (rgb(31, 48, 66), rgb(223, 231, 239), rgb(31, 48, 66))
+            }
+            AppButtonKind::Primary => (rgb(73, 112, 154), rgb(249, 252, 255), rgb(88, 134, 184)),
+            AppButtonKind::Secondary => (rgb(32, 49, 67), rgb(230, 236, 243), rgb(42, 62, 82)),
+            AppButtonKind::Danger => (rgb(116, 55, 62), rgb(255, 244, 244), rgb(144, 72, 82)),
+            AppButtonKind::Chip => (rgb(40, 59, 78), rgb(230, 238, 247), rgb(62, 83, 105)),
+        };
+
+        button::Appearance {
+            background: Some(Background::Color(background)),
+            text_color,
+            border: Border {
+                color: border_color,
+                width: 1.0,
+                radius: 6.0.into(),
+            },
+            ..button::Appearance::default()
+        }
+    }
+
+    fn hovered(&self, style: &Self::Style) -> button::Appearance {
+        let mut appearance = self.active(style);
+        appearance.background = Some(Background::Color(match self.kind {
+            AppButtonKind::Tab { active: true } => rgb(67, 96, 132),
+            AppButtonKind::Tab { active: false } => rgb(39, 58, 78),
+            AppButtonKind::Primary => rgb(84, 127, 173),
+            AppButtonKind::Secondary => rgb(41, 60, 80),
+            AppButtonKind::Danger => rgb(133, 63, 72),
+            AppButtonKind::Chip => rgb(48, 70, 92),
+        }));
+        appearance
+    }
+}
+
+fn app_background_style(_theme: &Theme) -> container::Appearance {
+    container::Appearance {
+        background: Some(Background::Color(rgb(12, 20, 28))),
+        text_color: Some(rgb(232, 238, 245)),
+        ..container::Appearance::default()
+    }
+}
+
+fn shell_style(_theme: &Theme) -> container::Appearance {
+    container::Appearance {
+        background: Some(Background::Color(rgb(20, 32, 43))),
+        text_color: Some(rgb(232, 238, 245)),
+        border: Border {
+            color: rgb(61, 88, 116),
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        ..container::Appearance::default()
+    }
+}
+
+fn header_style(_theme: &Theme) -> container::Appearance {
+    container::Appearance {
+        background: Some(Background::Color(rgb(11, 17, 24))),
+        text_color: Some(rgb(238, 243, 248)),
+        border: Border {
+            color: rgb(61, 88, 116),
+            width: 1.0,
+            radius: [8.0, 8.0, 8.0, 8.0].into(),
+        },
+        ..container::Appearance::default()
+    }
+}
+
+fn message_style(_theme: &Theme) -> container::Appearance {
+    container::Appearance {
+        background: Some(Background::Color(rgb(32, 49, 67))),
+        text_color: Some(rgb(229, 237, 246)),
+        border: Border {
+            color: rgb(32, 49, 67),
+            width: 1.0,
+            radius: 7.0.into(),
+        },
+        ..container::Appearance::default()
+    }
+}
+
+fn toolbar_style(_theme: &Theme) -> container::Appearance {
+    container::Appearance {
+        background: Some(Background::Color(rgb(18, 29, 39))),
+        text_color: Some(rgb(232, 238, 245)),
+        border: Border {
+            color: rgb(42, 63, 84),
+            width: 1.0,
+            radius: 7.0.into(),
+        },
+        ..container::Appearance::default()
+    }
+}
+
+fn row_card_style(_theme: &Theme) -> container::Appearance {
+    container::Appearance {
+        background: Some(Background::Color(rgb(17, 28, 38))),
+        text_color: Some(rgb(232, 238, 245)),
+        border: Border {
+            color: rgb(44, 66, 88),
+            width: 1.0,
+            radius: 7.0.into(),
+        },
+        ..container::Appearance::default()
+    }
+}
+
+fn canvas_style(_theme: &Theme) -> container::Appearance {
+    container::Appearance {
+        background: Some(Background::Color(rgb(10, 17, 24))),
+        text_color: Some(rgb(232, 238, 245)),
+        border: Border {
+            color: rgb(61, 88, 116),
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        ..container::Appearance::default()
+    }
+}
+
+fn rgb(r: u8, g: u8, b: u8) -> Color {
+    Color::from_rgb8(r, g, b)
 }
 
 impl Default for PersonRowState {
