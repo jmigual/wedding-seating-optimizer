@@ -6,6 +6,6 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-iced = { workspace = true, features = ["svg"] }
+iced = { workspace = true, features = ["svg", "image"] }
 rfd.workspace = true
 seating-core = { path = "../seating-core" }

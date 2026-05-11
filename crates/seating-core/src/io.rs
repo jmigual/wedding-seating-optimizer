@@ -5,11 +5,12 @@
 //! - [`parse_closeness_csv`] / [`write_closeness_csv`]
 //! - [`parse_tables_csv`] / [`write_tables_csv`]
 //! - [`parse_seating_csv`] / [`write_seating_csv`]
+//! - [`parse_project_file`] / [`write_project_file`]
 //! - [`make_project`] – convenience constructor that parses all three inputs
 
 use crate::models::{
-    ClosenessRule, Person, ProjectInput, SeatingAssignment, TableShape, TableTypeConfig,
-    TableTypeId, ValidationError,
+    ClosenessRule, Person, ProjectFile, ProjectInput, SeatingAssignment, TableShape,
+    TableTypeConfig, TableTypeId, ValidationError, PROJECT_FILE_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -222,6 +223,23 @@ pub fn parse_seating_csv(input: &str) -> Result<Vec<SeatingAssignment>, Validati
     Ok(rows)
 }
 
+/// Parse a `.wseat` JSON project file.
+///
+/// # Errors
+/// Returns [`ValidationError::MalformedInput`] when the JSON is invalid or the
+/// project file schema version is unsupported.
+pub fn parse_project_file(input: &str) -> Result<ProjectFile, ValidationError> {
+    let project: ProjectFile = serde_json::from_str(input)
+        .map_err(|e| ValidationError::MalformedInput(format!("project file JSON: {e}")))?;
+    if project.version != PROJECT_FILE_VERSION {
+        return Err(ValidationError::MalformedInput(format!(
+            "unsupported project file version {} (expected {PROJECT_FILE_VERSION})",
+            project.version
+        )));
+    }
+    Ok(project)
+}
+
 // ── Serialization ─────────────────────────────────────────────────────────────
 
 /// Serialize a list of [`Person`] records to a UTF-8 CSV string.
@@ -332,6 +350,22 @@ pub fn write_seating_csv(assignments: &[SeatingAssignment]) -> Result<String, Va
         .map_err(|e| ValidationError::MalformedInput(format!("seating CSV serialization: {e}")))?;
     }
     finish_writer(wtr, "seating CSV")
+}
+
+/// Serialize a `.wseat` JSON project file.
+///
+/// # Errors
+/// Returns [`ValidationError::MalformedInput`] on any serialization error or
+/// when the project file schema version is unsupported.
+pub fn write_project_file(project: &ProjectFile) -> Result<String, ValidationError> {
+    if project.version != PROJECT_FILE_VERSION {
+        return Err(ValidationError::MalformedInput(format!(
+            "unsupported project file version {} (expected {PROJECT_FILE_VERSION})",
+            project.version
+        )));
+    }
+    serde_json::to_string_pretty(project)
+        .map_err(|e| ValidationError::MalformedInput(format!("project file serialization: {e}")))
 }
 
 // ── Convenience constructor ───────────────────────────────────────────────────

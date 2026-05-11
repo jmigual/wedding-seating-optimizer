@@ -58,7 +58,7 @@ pub struct TableTypeConfig {
 // ── Guest model ───────────────────────────────────────────────────────────────
 
 /// A single wedding guest.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Person {
     /// Unique guest identifier.
     pub id: PersonId,
@@ -80,7 +80,7 @@ pub struct Person {
 /// A single pairwise closeness preference between two people or groups.
 ///
 /// Positive scores encourage proximity; negative scores encourage separation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ClosenessRule {
     /// Left-hand identifier (person ID or group ID).
     pub left_id: String,
@@ -93,7 +93,7 @@ pub struct ClosenessRule {
 // ── Project input ─────────────────────────────────────────────────────────────
 
 /// The complete set of inputs required for validation and optimization.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectInput {
     /// All guests.
     pub people: Vec<Person>,
@@ -127,7 +127,7 @@ pub struct TableInstance {
 // ── Seating assignment and solution ──────────────────────────────────────────
 
 /// Placement of one guest at a specific seat.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SeatingAssignment {
     /// Number of the table this guest is assigned to.
     pub table_number: usize,
@@ -153,7 +153,8 @@ pub struct SeatingSolution {
 // ── Optimization configuration ────────────────────────────────────────────────
 
 /// Configuration parameters forwarded to the optimizer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OptimizationConfig {
     /// RNG seed for reproducible runs.
     pub seed: u64,
@@ -185,6 +186,55 @@ impl Default for OptimizationConfig {
             proximity_weight: 1.0,
             used_table_weight: 0.0,
             optimal_table_size_weight: 1.0,
+        }
+    }
+}
+
+/// Schema version used by `.wseat` project files.
+pub const PROJECT_FILE_VERSION: u32 = 1;
+
+/// A complete persisted application project.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectFile {
+    /// Project file schema version.
+    pub version: u32,
+    /// All guests.
+    pub people: Vec<Person>,
+    /// All pairwise closeness rules.
+    pub closeness_rules: Vec<ClosenessRule>,
+    /// All table type configurations keyed by type name.
+    pub table_types: BTreeMap<TableTypeId, TableTypeConfig>,
+    /// Optimization settings last used by the project.
+    #[serde(default)]
+    pub optimization: OptimizationConfig,
+    /// Optional generated seating assignments.
+    #[serde(default)]
+    pub seating: Vec<SeatingAssignment>,
+}
+
+impl ProjectFile {
+    /// Build a project file from a project input and runtime settings.
+    pub fn new(
+        project: ProjectInput,
+        optimization: OptimizationConfig,
+        seating: Vec<SeatingAssignment>,
+    ) -> Self {
+        Self {
+            version: PROJECT_FILE_VERSION,
+            people: project.people,
+            closeness_rules: project.closeness_rules,
+            table_types: project.table_types,
+            optimization,
+            seating,
+        }
+    }
+
+    /// Return the editable project input contained in this file.
+    pub fn project_input(&self) -> ProjectInput {
+        ProjectInput {
+            people: self.people.clone(),
+            closeness_rules: self.closeness_rules.clone(),
+            table_types: self.table_types.clone(),
         }
     }
 }

@@ -5,7 +5,13 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub(crate) enum Msg {
     SelectTab(Tab),
+    FocusNext,
+    FocusPrevious,
     NewProject,
+    OpenProject,
+    SaveProject,
+    SaveProjectAs,
+    ExportProjectCsv,
     ImportPeople,
     SavePeople,
     ExportPeople,

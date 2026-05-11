@@ -71,6 +71,14 @@ fn sample_table_map() -> BTreeMap<TableTypeId, TableTypeConfig> {
     .unwrap()
 }
 
+fn sample_project() -> ProjectInput {
+    ProjectInput {
+        people: sample_people(),
+        closeness_rules: sample_closeness_rules(),
+        table_types: sample_table_map(),
+    }
+}
+
 fn round_project() -> ProjectInput {
     ProjectInput {
         people: vec![
@@ -289,6 +297,77 @@ fn tables_csv_parsing_works() {
 fn structured_table_configs_round_trip_csv_works() {
     let csv = write_tables_csv(&sample_table_map()).unwrap();
     assert_eq!(parse_tables_csv(&csv).unwrap(), sample_table_map());
+}
+
+#[test]
+fn project_file_round_trip_works() {
+    let project = sample_project();
+    let project_file = ProjectFile::new(
+        project.clone(),
+        OptimizationConfig {
+            seed: 77,
+            attempts: 12,
+            used_table_weight: 2.5,
+            ..OptimizationConfig::default()
+        },
+        round_assignments(),
+    );
+
+    let json = write_project_file(&project_file).unwrap();
+    let parsed = parse_project_file(&json).unwrap();
+
+    assert_eq!(parsed.version, PROJECT_FILE_VERSION);
+    assert_eq!(parsed.project_input().people, project.people);
+    assert_eq!(
+        parsed.project_input().closeness_rules,
+        project.closeness_rules
+    );
+    assert_eq!(parsed.project_input().table_types, project.table_types);
+    assert_eq!(parsed.optimization.seed, 77);
+    assert_eq!(parsed.optimization.used_table_weight, 2.5);
+    assert_eq!(parsed.seating, round_assignments());
+}
+
+#[test]
+fn project_file_rejects_unsupported_version() {
+    let json = r#"{
+        "version": 999,
+        "people": [],
+        "closeness_rules": [],
+        "table_types": {},
+        "optimization": {},
+        "seating": []
+    }"#;
+
+    let err = parse_project_file(json).unwrap_err();
+    assert!(
+        matches!(err, ValidationError::MalformedInput(message) if message.contains("unsupported project file version"))
+    );
+}
+
+#[test]
+fn project_file_preserves_csv_representations() {
+    let project = make_project(
+        &write_people_csv(&sample_people()).unwrap(),
+        &write_closeness_csv(&sample_closeness_rules()).unwrap(),
+        &write_tables_csv(&sample_table_map()).unwrap(),
+    )
+    .unwrap();
+    let project_file = ProjectFile::new(project, OptimizationConfig::default(), Vec::new());
+    let parsed = parse_project_file(&write_project_file(&project_file).unwrap()).unwrap();
+
+    assert_eq!(
+        parse_people_csv(&write_people_csv(&parsed.people).unwrap()).unwrap(),
+        sample_people()
+    );
+    assert_eq!(
+        parse_closeness_csv(&write_closeness_csv(&parsed.closeness_rules).unwrap()).unwrap(),
+        sample_closeness_rules()
+    );
+    assert_eq!(
+        parse_tables_csv(&write_tables_csv(&parsed.table_types).unwrap()).unwrap(),
+        sample_table_map()
+    );
 }
 
 #[test]

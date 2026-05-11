@@ -49,9 +49,11 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use seating_core::{
-    build_layout, parse_people_csv, parse_seating_csv, parse_tables_csv, render_png, render_svg,
-    score_solution, validate_project, write_seating_csv, HeuristicOptimizer, OptimizationConfig,
-    ProjectInput, RenderOptions, SeatingOptimizer,
+    build_layout, make_project, parse_people_csv, parse_project_file, parse_seating_csv,
+    parse_tables_csv, render_png, render_svg, score_solution, validate_project,
+    write_closeness_csv, write_people_csv, write_project_file, write_seating_csv, write_tables_csv,
+    HeuristicOptimizer, OptimizationConfig, ProjectFile, ProjectInput, RenderOptions,
+    SeatingOptimizer,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -73,30 +75,36 @@ enum Commands {
     ///
     /// Exits with a non-zero status code when validation fails.
     Validate {
+        /// Path to a `.wseat` project file.
+        #[arg(long, conflicts_with_all = ["people", "closeness", "tables"])]
+        project: Option<PathBuf>,
         /// Path to the people CSV file.
         #[arg(long)]
-        people: PathBuf,
+        people: Option<PathBuf>,
         /// Path to the closeness CSV file.
         #[arg(long)]
-        closeness: PathBuf,
+        closeness: Option<PathBuf>,
         /// Path to the tables CSV file.
         #[arg(long)]
-        tables: PathBuf,
+        tables: Option<PathBuf>,
     },
 
     /// Optimize the seating assignment and write the result CSV.
     ///
     /// Exits with a non-zero status code when optimization fails.
     Optimize {
+        /// Path to a `.wseat` project file.
+        #[arg(long, conflicts_with_all = ["people", "closeness", "tables"])]
+        project: Option<PathBuf>,
         /// Path to the people CSV file.
         #[arg(long)]
-        people: PathBuf,
+        people: Option<PathBuf>,
         /// Path to the closeness CSV file.
         #[arg(long)]
-        closeness: PathBuf,
+        closeness: Option<PathBuf>,
         /// Path to the tables CSV file.
         #[arg(long)]
-        tables: PathBuf,
+        tables: Option<PathBuf>,
         /// Destination path for the output seating CSV.
         #[arg(long)]
         output: PathBuf,
@@ -125,15 +133,18 @@ enum Commands {
 
     /// Score a pre-existing seating CSV and print the aggregate score.
     Score {
+        /// Path to a `.wseat` project file.
+        #[arg(long, conflicts_with_all = ["people", "closeness", "tables"])]
+        project: Option<PathBuf>,
         /// Path to the people CSV file.
         #[arg(long)]
-        people: PathBuf,
+        people: Option<PathBuf>,
         /// Path to the closeness CSV file.
         #[arg(long)]
-        closeness: PathBuf,
+        closeness: Option<PathBuf>,
         /// Path to the tables CSV file.
         #[arg(long)]
-        tables: PathBuf,
+        tables: Option<PathBuf>,
         /// Path to the seating CSV to score.
         #[arg(long)]
         seating: PathBuf,
@@ -150,12 +161,15 @@ enum Commands {
 
     /// Render a seating CSV as an SVG or PNG seating plan.
     Render {
+        /// Path to a `.wseat` project file.
+        #[arg(long, conflicts_with_all = ["people", "tables"])]
+        project: Option<PathBuf>,
         /// Path to the people CSV file.
         #[arg(long)]
-        people: PathBuf,
+        people: Option<PathBuf>,
         /// Path to the tables CSV file.
         #[arg(long)]
-        tables: PathBuf,
+        tables: Option<PathBuf>,
         /// Path to the seating CSV to render.
         #[arg(long)]
         seating: PathBuf,
@@ -163,25 +177,60 @@ enum Commands {
         #[arg(long)]
         output: PathBuf,
     },
+
+    /// Create a `.wseat` project file from the three CSV input files.
+    ProjectFromCsv {
+        /// Path to the people CSV file.
+        #[arg(long)]
+        people: PathBuf,
+        /// Path to the closeness CSV file.
+        #[arg(long)]
+        closeness: PathBuf,
+        /// Path to the tables CSV file.
+        #[arg(long)]
+        tables: PathBuf,
+        /// Destination `.wseat` project file.
+        #[arg(long)]
+        output: PathBuf,
+    },
+
+    /// Export the editable CSV files from a `.wseat` project.
+    ExportCsv {
+        /// Path to a `.wseat` project file.
+        #[arg(long)]
+        project: PathBuf,
+        /// Destination people CSV file.
+        #[arg(long)]
+        people: PathBuf,
+        /// Destination closeness CSV file.
+        #[arg(long)]
+        closeness: PathBuf,
+        /// Destination tables CSV file.
+        #[arg(long)]
+        tables: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Validate {
+            project,
             people,
             closeness,
             tables,
         } => {
-            let project = seating_core::make_project(
-                &read_file(&people, "people")?,
-                &read_file(&closeness, "closeness")?,
-                &read_file(&tables, "tables")?,
+            let project = load_project_input(
+                project.as_ref(),
+                people.as_ref(),
+                closeness.as_ref(),
+                tables.as_ref(),
             )?;
             validate_project(&project).map_err(|error| anyhow::anyhow!(error.to_string()))?;
             println!("Validation passed.");
         }
         Commands::Optimize {
+            project,
             people,
             closeness,
             tables,
@@ -194,10 +243,11 @@ fn main() -> Result<()> {
             used_table_weight,
             optimal_table_size_weight,
         } => {
-            let project = seating_core::make_project(
-                &read_file(&people, "people")?,
-                &read_file(&closeness, "closeness")?,
-                &read_file(&tables, "tables")?,
+            let project = load_project_input(
+                project.as_ref(),
+                people.as_ref(),
+                closeness.as_ref(),
+                tables.as_ref(),
             )?;
             validate_project(&project).map_err(|error| anyhow::anyhow!(error.to_string()))?;
             let result = HeuristicOptimizer.optimize(
@@ -225,6 +275,7 @@ fn main() -> Result<()> {
             );
         }
         Commands::Score {
+            project,
             people,
             closeness,
             tables,
@@ -233,10 +284,11 @@ fn main() -> Result<()> {
             used_table_weight,
             optimal_table_size_weight,
         } => {
-            let project = seating_core::make_project(
-                &read_file(&people, "people")?,
-                &read_file(&closeness, "closeness")?,
-                &read_file(&tables, "tables")?,
+            let project = load_project_input(
+                project.as_ref(),
+                people.as_ref(),
+                closeness.as_ref(),
+                tables.as_ref(),
             )?;
             let assignments = parse_seating_csv(&read_file(&seating, "seating")?)?;
             let score = score_solution(
@@ -253,16 +305,13 @@ fn main() -> Result<()> {
             println!("Score: {score}");
         }
         Commands::Render {
+            project,
             people,
             tables,
             seating,
             output,
         } => {
-            let project = ProjectInput {
-                people: parse_people_csv(&read_file(&people, "people")?)?,
-                closeness_rules: Vec::new(),
-                table_types: parse_tables_csv(&read_file(&tables, "tables")?)?,
-            };
+            let project = load_render_project(project.as_ref(), people.as_ref(), tables.as_ref())?;
             let assignments = parse_seating_csv(&read_file(&seating, "seating")?)?;
             let layout = build_layout(&project, &assignments)
                 .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -281,12 +330,177 @@ fn main() -> Result<()> {
             }
             println!("Rendered seating plan to {}", output.display());
         }
+        Commands::ProjectFromCsv {
+            people,
+            closeness,
+            tables,
+            output,
+        } => {
+            let project = make_project(
+                &read_file(&people, "people")?,
+                &read_file(&closeness, "closeness")?,
+                &read_file(&tables, "tables")?,
+            )?;
+            let project_file = ProjectFile::new(project, OptimizationConfig::default(), Vec::new());
+            fs::write(&output, write_project_file(&project_file)?)
+                .with_context(|| format!("failed writing output {}", output.display()))?;
+            println!("Wrote project to {}", output.display());
+        }
+        Commands::ExportCsv {
+            project,
+            people,
+            closeness,
+            tables,
+        } => {
+            let project_file = read_project_file(&project)?;
+            fs::write(&people, write_people_csv(&project_file.people)?)
+                .with_context(|| format!("failed writing people CSV {}", people.display()))?;
+            fs::write(
+                &closeness,
+                write_closeness_csv(&project_file.closeness_rules)?,
+            )
+            .with_context(|| format!("failed writing closeness CSV {}", closeness.display()))?;
+            fs::write(&tables, write_tables_csv(&project_file.table_types)?)
+                .with_context(|| format!("failed writing tables CSV {}", tables.display()))?;
+            println!("Exported CSV files from {}", project.display());
+        }
     }
     Ok(())
+}
+
+fn load_project_input(
+    project: Option<&PathBuf>,
+    people: Option<&PathBuf>,
+    closeness: Option<&PathBuf>,
+    tables: Option<&PathBuf>,
+) -> Result<ProjectInput> {
+    if let Some(project) = project {
+        return Ok(read_project_file(project)?.project_input());
+    }
+
+    let (people, closeness, tables) = required_csv_inputs(people, closeness, tables)?;
+    make_project(
+        &read_file(people, "people")?,
+        &read_file(closeness, "closeness")?,
+        &read_file(tables, "tables")?,
+    )
+    .map_err(Into::into)
+}
+
+fn load_render_project(
+    project: Option<&PathBuf>,
+    people: Option<&PathBuf>,
+    tables: Option<&PathBuf>,
+) -> Result<ProjectInput> {
+    if let Some(project) = project {
+        return Ok(read_project_file(project)?.project_input());
+    }
+
+    let people = people.ok_or_else(|| anyhow::anyhow!("missing --people or --project"))?;
+    let tables = tables.ok_or_else(|| anyhow::anyhow!("missing --tables or --project"))?;
+    Ok(ProjectInput {
+        people: parse_people_csv(&read_file(people, "people")?)?,
+        closeness_rules: Vec::new(),
+        table_types: parse_tables_csv(&read_file(tables, "tables")?)?,
+    })
+}
+
+fn required_csv_inputs<'a>(
+    people: Option<&'a PathBuf>,
+    closeness: Option<&'a PathBuf>,
+    tables: Option<&'a PathBuf>,
+) -> Result<(&'a PathBuf, &'a PathBuf, &'a PathBuf)> {
+    let people = people.ok_or_else(|| anyhow::anyhow!("missing --people or --project"))?;
+    let closeness = closeness.ok_or_else(|| anyhow::anyhow!("missing --closeness or --project"))?;
+    let tables = tables.ok_or_else(|| anyhow::anyhow!("missing --tables or --project"))?;
+    Ok((people, closeness, tables))
+}
+
+fn read_project_file(path: &PathBuf) -> Result<ProjectFile> {
+    parse_project_file(&read_file(path, "project")?).map_err(Into::into)
 }
 
 /// Read a text file, providing a helpful error message on failure.
 fn read_file(path: &PathBuf, label: &str) -> Result<String> {
     fs::read_to_string(path)
         .with_context(|| format!("failed reading {label} file {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_accepts_project_file() {
+        let cli =
+            Cli::try_parse_from(["wedding-seating", "validate", "--project", "wedding.wseat"])
+                .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Validate {
+                project: Some(_),
+                people: None,
+                closeness: None,
+                tables: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn optimize_accepts_existing_csv_shape() {
+        let cli = Cli::try_parse_from([
+            "wedding-seating",
+            "optimize",
+            "--people",
+            "people.csv",
+            "--closeness",
+            "closeness.csv",
+            "--tables",
+            "tables.csv",
+            "--output",
+            "seating.csv",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Optimize {
+                project: None,
+                people: Some(_),
+                closeness: Some(_),
+                tables: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn project_conversion_commands_parse() {
+        Cli::try_parse_from([
+            "wedding-seating",
+            "project-from-csv",
+            "--people",
+            "people.csv",
+            "--closeness",
+            "closeness.csv",
+            "--tables",
+            "tables.csv",
+            "--output",
+            "wedding.wseat",
+        ])
+        .unwrap();
+
+        Cli::try_parse_from([
+            "wedding-seating",
+            "export-csv",
+            "--project",
+            "wedding.wseat",
+            "--people",
+            "people.csv",
+            "--closeness",
+            "closeness.csv",
+            "--tables",
+            "tables.csv",
+        ])
+        .unwrap();
+    }
 }

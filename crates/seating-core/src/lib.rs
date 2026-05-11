@@ -55,13 +55,14 @@ pub use editing::{
     parse_required_usize_value, reference_id_options, ReferenceIdKind, ReferenceIdOption,
 };
 pub use io::{
-    make_project, parse_closeness_csv, parse_people_csv, parse_seating_csv, parse_tables_csv,
-    write_closeness_csv, write_people_csv, write_seating_csv, write_tables_csv,
+    make_project, parse_closeness_csv, parse_people_csv, parse_project_file, parse_seating_csv,
+    parse_tables_csv, write_closeness_csv, write_people_csv, write_project_file, write_seating_csv,
+    write_tables_csv,
 };
 pub use models::{
-    ClosenessRule, GroupId, OptimizationConfig, OptimizationResult, Person, PersonId, ProjectInput,
-    SeatIndex, SeatingAssignment, SeatingSolution, TableInstance, TableShape, TableTypeConfig,
-    TableTypeId, ValidationError, ValidationReport,
+    ClosenessRule, GroupId, OptimizationConfig, OptimizationResult, Person, PersonId, ProjectFile,
+    ProjectInput, SeatIndex, SeatingAssignment, SeatingSolution, TableInstance, TableShape,
+    TableTypeConfig, TableTypeId, ValidationError, ValidationReport, PROJECT_FILE_VERSION,
 };
 pub use optimizer::{HeuristicOptimizer, SeatingOptimizer};
 pub use render::{

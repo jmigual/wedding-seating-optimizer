@@ -1,362 +1,13 @@
-//! # wedding-seating GUI application
-//!
-//! Native desktop application for the wedding seating optimizer, built with
-//! [iced](https://github.com/iced-rs/iced).
-//!
-//! The GUI edits typed `seating-core` domain data, delegates all parsing,
-//! serialization, validation, optimization, and seating-plan rendering to the
-//! core crate, and only uses CSV files for import/export/save/load.
-
-use crate::state::{
-    display_path, same_pair, selected_string_choice, selected_usize_choice, ClosenessRowState,
-    MaybeStringChoice, MaybeUsizeChoice, Msg, PersonRowState, ShapeChoice, Tab, TableConfigState,
-};
-use crate::styles::{
-    app_background_style, canvas_style, header_style, message_style, row_card_style, shell_style,
-    toolbar_style, AppButtonStyle,
-};
-use iced::widget::{button, column, container, pick_list, row, scrollable, svg, text, text_input};
-use iced::{theme, Alignment, Element, Length, Sandbox, Theme};
-use rfd::FileDialog;
-use seating_core::{
-    build_layout, build_table_type_map, generate_table_instances, parse_closeness_csv,
-    parse_f64_value, parse_optional_usize_value, parse_people_csv, parse_required_usize_value,
-    parse_tables_csv, reference_id_options, render_png, render_svg, validate_project,
-    write_closeness_csv, write_people_csv, write_seating_csv, write_tables_csv, ClosenessRule,
-    HeuristicOptimizer, OptimizationConfig, Person, ProjectInput, RenderOptions, SeatingAssignment,
-    SeatingLayout, SeatingOptimizer, TableShape, TableTypeConfig, ValidationError,
-    ValidationReport,
-};
-use std::collections::BTreeMap;
-use std::fs;
-use std::path::PathBuf;
-
-mod tabs;
-
-pub(crate) struct GuiApp {
-    active_tab: Tab,
-    people: Vec<PersonRowState>,
-    closeness_rules: Vec<ClosenessRowState>,
-    table_configs: Vec<TableConfigState>,
-    assignments: Vec<SeatingAssignment>,
-    seating_csv: String,
-    layout: Option<SeatingLayout>,
-    layout_svg: Option<String>,
-    seed: String,
-    proximity_weight: String,
-    used_table_weight: String,
-    optimal_table_size_weight: String,
-    zoom: f32,
-    validation_errors: Vec<ValidationError>,
-    message: String,
-    people_path: Option<PathBuf>,
-    closeness_path: Option<PathBuf>,
-    tables_path: Option<PathBuf>,
-    seating_path: Option<PathBuf>,
-}
-
-impl Sandbox for GuiApp {
-    type Message = Msg;
-
-    fn new() -> Self {
-        let mut app = Self {
-            active_tab: Tab::People,
-            people: Vec::new(),
-            closeness_rules: Vec::new(),
-            table_configs: Vec::new(),
-            assignments: Vec::new(),
-            seating_csv: String::new(),
-            layout: None,
-            layout_svg: None,
-            seed: "42".to_string(),
-            proximity_weight: "1.0".to_string(),
-            used_table_weight: "0.0".to_string(),
-            optimal_table_size_weight: "1.0".to_string(),
-            zoom: 1.0,
-            validation_errors: Vec::new(),
-            message: "Create a new project or import CSV files.".to_string(),
-            people_path: None,
-            closeness_path: None,
-            tables_path: None,
-            seating_path: None,
-        };
-        app.refresh_validation_and_layout();
-        app
-    }
-
-    fn title(&self) -> String {
-        "Wedding Seating".to_string()
-    }
-
-    fn theme(&self) -> Theme {
-        Theme::Dark
-    }
-
-    fn update(&mut self, message: Self::Message) {
-        match message {
-            Msg::SelectTab(tab) => self.active_tab = tab,
-            Msg::NewProject => {
-                *self = Self::new();
-                self.message = "Started a new empty project.".to_string();
-            }
-            Msg::ImportPeople => self.import_people(),
-            Msg::SavePeople => self.save_people(false),
-            Msg::ExportPeople => self.save_people(true),
-            Msg::ImportCloseness => self.import_closeness(),
-            Msg::SaveCloseness => self.save_closeness(false),
-            Msg::ExportCloseness => self.save_closeness(true),
-            Msg::ImportTables => self.import_tables(),
-            Msg::SaveTables => self.save_tables(false),
-            Msg::ExportTables => self.save_tables(true),
-            Msg::AddPerson => {
-                self.people.push(PersonRowState::default());
-                self.refresh_validation_and_layout();
-            }
-            Msg::DeletePerson(index) => {
-                if index < self.people.len() {
-                    self.people.remove(index);
-                    self.refresh_validation_and_layout();
-                }
-            }
-            Msg::UpdatePersonId(index, value) => {
-                if let Some(row) = self.people.get_mut(index) {
-                    row.person.id = value;
-                    self.refresh_validation_and_layout();
-                }
-            }
-            Msg::UpdatePersonName(index, value) => {
-                if let Some(row) = self.people.get_mut(index) {
-                    row.person.name = value;
-                    self.refresh_validation_and_layout();
-                }
-            }
-            Msg::UpdatePersonTableType(index, choice) => {
-                if let Some(row) = self.people.get_mut(index) {
-                    row.person.table_type = choice.value;
-                    self.refresh_validation_and_layout();
-                }
-            }
-            Msg::UpdatePersonLockedTable(index, choice) => {
-                if let Some(row) = self.people.get_mut(index) {
-                    row.person.locked_table = choice.value;
-                    if row.person.locked_table.is_none() {
-                        row.person.locked_seat = None;
-                    }
-                    self.refresh_validation_and_layout();
-                }
-            }
-            Msg::UpdatePersonLockedSeat(index, choice) => {
-                if let Some(row) = self.people.get_mut(index) {
-                    row.person.locked_seat = choice.value;
-                    self.refresh_validation_and_layout();
-                }
-            }
-            Msg::UpdateNewGroup(index, value) => {
-                if let Some(row) = self.people.get_mut(index) {
-                    row.new_group = value;
-                }
-            }
-            Msg::AddGroup(index) => {
-                if let Some(row) = self.people.get_mut(index) {
-                    let group = row.new_group.trim();
-                    if !group.is_empty()
-                        && !row.person.groups.iter().any(|existing| existing == group)
-                    {
-                        row.person.groups.push(group.to_string());
-                    }
-                    row.new_group.clear();
-                    self.refresh_validation_and_layout();
-                }
-            }
-            Msg::RemoveGroup(person_index, group_index) => {
-                if let Some(row) = self.people.get_mut(person_index) {
-                    if group_index < row.person.groups.len() {
-                        row.person.groups.remove(group_index);
-                        self.refresh_validation_and_layout();
-                    }
-                }
-            }
-            Msg::AddClosenessRule => {
-                self.closeness_rules.push(ClosenessRowState::default());
-                self.refresh_validation_and_layout();
-            }
-            Msg::DeleteClosenessRule(index) => {
-                if index < self.closeness_rules.len() {
-                    self.closeness_rules.remove(index);
-                    self.refresh_validation_and_layout();
-                }
-            }
-            Msg::UpdateClosenessLeft(index, value) => {
-                if let Some(row) = self.closeness_rules.get_mut(index) {
-                    row.rule.left_id = value;
-                    self.refresh_validation_and_layout();
-                }
-            }
-            Msg::UpdateClosenessRight(index, value) => {
-                if let Some(row) = self.closeness_rules.get_mut(index) {
-                    row.rule.right_id = value;
-                    self.refresh_validation_and_layout();
-                }
-            }
-            Msg::SelectClosenessLeft(index, value) => {
-                if let Some(row) = self.closeness_rules.get_mut(index) {
-                    row.rule.left_id = value;
-                    self.refresh_validation_and_layout();
-                }
-            }
-            Msg::SelectClosenessRight(index, value) => {
-                if let Some(row) = self.closeness_rules.get_mut(index) {
-                    row.rule.right_id = value;
-                    self.refresh_validation_and_layout();
-                }
-            }
-            Msg::UpdateClosenessScore(index, value) => {
-                if let Some(row) = self.closeness_rules.get_mut(index) {
-                    row.score_input = value;
-                    if let Ok(score) = parse_f64_value(&row.score_input, "score") {
-                        row.rule.score = score;
-                    }
-                    self.refresh_validation_and_layout();
-                }
-            }
-            Msg::AddTableConfig => {
-                self.table_configs.push(TableConfigState::default());
-                self.refresh_validation_and_layout();
-            }
-            Msg::DeleteTableConfig(index) => {
-                if index < self.table_configs.len() {
-                    self.table_configs.remove(index);
-                    self.refresh_validation_and_layout();
-                }
-            }
-            Msg::UpdateTableTypeId(index, value) => {
-                if let Some(row) = self.table_configs.get_mut(index) {
-                    row.table_type_id = value;
-                    self.refresh_validation_and_layout();
-                }
-            }
-            Msg::UpdateTableShape(index, shape) => {
-                if let Some(row) = self.table_configs.get_mut(index) {
-                    row.shape = shape;
-                    self.refresh_validation_and_layout();
-                }
-            }
-            Msg::UpdateMaxPeople(index, value) => {
-                if let Some(row) = self.table_configs.get_mut(index) {
-                    row.max_people_input = value;
-                    self.refresh_validation_and_layout();
-                }
-            }
-            Msg::UpdateMinPeople(index, value) => {
-                if let Some(row) = self.table_configs.get_mut(index) {
-                    row.min_people_input = value;
-                    self.refresh_validation_and_layout();
-                }
-            }
-            Msg::UpdateRecommendedPeople(index, value) => {
-                if let Some(row) = self.table_configs.get_mut(index) {
-                    row.recommended_people_input = value;
-                    self.refresh_validation_and_layout();
-                }
-            }
-            Msg::UpdateNumberOfTables(index, value) => {
-                if let Some(row) = self.table_configs.get_mut(index) {
-                    row.number_of_tables_input = value;
-                    self.refresh_validation_and_layout();
-                }
-            }
-            Msg::UpdatePeoplePerSide(index, value) => {
-                if let Some(row) = self.table_configs.get_mut(index) {
-                    row.people_per_side_input = value;
-                    self.refresh_validation_and_layout();
-                }
-            }
-            Msg::SeedChanged(value) => self.seed = value,
-            Msg::ProximityWeightChanged(value) => self.proximity_weight = value,
-            Msg::UsedTableWeightChanged(value) => self.used_table_weight = value,
-            Msg::OptimalTableSizeWeightChanged(value) => self.optimal_table_size_weight = value,
-            Msg::Optimize => self.run_optimize(),
-            Msg::SaveSeating => self.save_seating(),
-            Msg::ExportPlanSvg => self.export_plan_svg(),
-            Msg::ExportPlanPng => self.export_plan_png(),
-            Msg::ZoomIn => self.zoom = (self.zoom + 0.2).min(3.0),
-            Msg::ZoomOut => self.zoom = (self.zoom - 0.2).max(0.4),
-        }
-    }
-
-    fn view(&self) -> Element<'_, Self::Message> {
-        let header = container(
-            row![
-                text("Wedding Seating").size(16),
-                container(row![]).width(Length::Fill),
-                button(text("New Project").size(13))
-                    .on_press(Msg::NewProject)
-                    .padding([8, 14])
-                    .style(theme::Button::custom(AppButtonStyle::secondary())),
-            ]
-            .spacing(16)
-            .align_items(Alignment::Center),
-        )
-        .padding([14, 28])
-        .width(Length::Fill)
-        .style(header_style);
-
-        let tabs = Tab::ALL.into_iter().fold(
-            row![].spacing(8).align_items(Alignment::Center),
-            |tabs, tab| tabs.push(self.tab_button(tab)),
-        );
-
-        let content = match self.active_tab {
-            Tab::People => self.view_people_tab(),
-            Tab::Closeness => self.view_closeness_tab(),
-            Tab::Tables => self.view_tables_tab(),
-            Tab::Optimize => self.view_optimize_tab(),
-            Tab::SeatingPlan => self.view_seating_plan_tab(),
-            Tab::Diagnostics => self.view_diagnostics_tab(),
-        };
-
-        let message = container(text(&self.message).size(13))
-            .padding([12, 18])
-            .width(Length::Fill)
-            .style(message_style);
-
-        let shell = container(
-            column![
-                header,
-                container(tabs)
-                    .padding([20, 28, 10, 28])
-                    .width(Length::Fill),
-                container(message)
-                    .padding([0, 28, 10, 28])
-                    .width(Length::Fill),
-                container(content)
-                    .padding([18, 28, 28, 28])
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-            ]
-            .height(Length::Fill),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .max_width(1440)
-        .style(shell_style);
-
-        container(shell)
-            .padding(34)
-            .center_x()
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(app_background_style)
-            .into()
-    }
-}
+use super::*;
 
 impl GuiApp {
-    fn people_data(&self) -> Vec<Person> {
+    pub(super) fn people_data(&self) -> Vec<Person> {
         self.people.iter().map(|row| row.person.clone()).collect()
     }
 
-    fn materialize_closeness_rules(&self) -> Result<Vec<ClosenessRule>, ValidationReport> {
+    pub(super) fn materialize_closeness_rules(
+        &self,
+    ) -> Result<Vec<ClosenessRule>, ValidationReport> {
         let mut errors = Vec::new();
         let mut rules = Vec::new();
         for row in &self.closeness_rules {
@@ -376,7 +27,7 @@ impl GuiApp {
         }
     }
 
-    fn materialize_table_entries(
+    pub(super) fn materialize_table_entries(
         &self,
     ) -> Result<Vec<(String, TableTypeConfig)>, ValidationReport> {
         let mut errors = Vec::new();
@@ -452,7 +103,7 @@ impl GuiApp {
         }
     }
 
-    fn current_project(&self) -> Result<ProjectInput, ValidationReport> {
+    pub(super) fn current_project(&self) -> Result<ProjectInput, ValidationReport> {
         let mut errors = Vec::new();
 
         let closeness_rules = match self.materialize_closeness_rules() {
@@ -490,7 +141,112 @@ impl GuiApp {
         }
     }
 
-    fn refresh_validation_and_layout(&mut self) {
+    pub(super) fn optimization_config(&self) -> Result<OptimizationConfig, ValidationReport> {
+        let mut errors = Vec::new();
+        let seed = match parse_optional_usize_value(&self.seed, "seed") {
+            Ok(Some(value)) => value as u64,
+            Ok(None) => 42,
+            Err(error) => {
+                errors.push(error);
+                42
+            }
+        };
+        let proximity_weight = match parse_f64_value(&self.proximity_weight, "proximity_weight") {
+            Ok(value) => value,
+            Err(error) => {
+                errors.push(error);
+                1.0
+            }
+        };
+        let used_table_weight = match parse_f64_value(&self.used_table_weight, "used_table_weight")
+        {
+            Ok(value) => value,
+            Err(error) => {
+                errors.push(error);
+                0.0
+            }
+        };
+        let optimal_table_size_weight =
+            match parse_f64_value(&self.optimal_table_size_weight, "optimal_table_size_weight") {
+                Ok(value) => value,
+                Err(error) => {
+                    errors.push(error);
+                    1.0
+                }
+            };
+
+        if errors.is_empty() {
+            Ok(OptimizationConfig {
+                seed,
+                attempts: 10,
+                iterations: 200,
+                solutions: 1,
+                proximity_weight,
+                used_table_weight,
+                optimal_table_size_weight,
+            })
+        } else {
+            Err(ValidationReport { errors })
+        }
+    }
+
+    pub(super) fn current_project_file(&self) -> Result<ProjectFile, ValidationReport> {
+        let mut errors = Vec::new();
+        let project = match self.current_project() {
+            Ok(project) => Some(project),
+            Err(report) => {
+                errors.extend(report.errors);
+                None
+            }
+        };
+        let optimization = match self.optimization_config() {
+            Ok(config) => Some(config),
+            Err(report) => {
+                errors.extend(report.errors);
+                None
+            }
+        };
+
+        match (project, optimization) {
+            (Some(project), Some(optimization)) if errors.is_empty() => Ok(ProjectFile::new(
+                project,
+                optimization,
+                self.assignments.clone(),
+            )),
+            _ => Err(ValidationReport { errors }),
+        }
+    }
+
+    pub(super) fn apply_project_file(&mut self, project: ProjectFile) {
+        self.people = project
+            .people
+            .into_iter()
+            .map(PersonRowState::from)
+            .collect();
+        self.closeness_rules = project
+            .closeness_rules
+            .into_iter()
+            .map(ClosenessRowState::from)
+            .collect();
+        self.table_configs = project
+            .table_types
+            .into_iter()
+            .map(|(table_type_id, config)| TableConfigState::from_pair(table_type_id, config))
+            .collect();
+        self.assignments = project.seating;
+        self.seating_csv = write_seating_csv(&self.assignments).unwrap_or_default();
+        self.seed = project.optimization.seed.to_string();
+        self.proximity_weight = project.optimization.proximity_weight.to_string();
+        self.used_table_weight = project.optimization.used_table_weight.to_string();
+        self.optimal_table_size_weight = project.optimization.optimal_table_size_weight.to_string();
+        self.people_path = None;
+        self.closeness_path = None;
+        self.tables_path = None;
+        self.seating_path = None;
+        self.refresh_validation_and_layout();
+    }
+
+    pub(super) fn refresh_validation_and_layout(&mut self) {
         self.layout = None;
         self.layout_svg = None;
         self.seating_csv = write_seating_csv(&self.assignments).unwrap_or_default();
@@ -515,85 +271,83 @@ impl GuiApp {
         }
     }
 
-    fn run_optimize(&mut self) {
-        let seed = match parse_optional_usize_value(&self.seed, "seed") {
-            Ok(Some(value)) => value as u64,
-            Ok(None) => 42,
-            Err(error) => {
-                self.message = error.to_string();
-                return;
-            }
-        };
-        let proximity_weight = match parse_f64_value(&self.proximity_weight, "proximity_weight") {
-            Ok(value) => value,
-            Err(error) => {
-                self.message = error.to_string();
-                return;
-            }
-        };
-        let used_table_weight = match parse_f64_value(&self.used_table_weight, "used_table_weight")
-        {
-            Ok(value) => value,
-            Err(error) => {
-                self.message = error.to_string();
-                return;
-            }
-        };
-        let optimal_table_size_weight =
-            match parse_f64_value(&self.optimal_table_size_weight, "optimal_table_size_weight") {
-                Ok(value) => value,
-                Err(error) => {
-                    self.message = error.to_string();
-                    return;
+    pub(super) fn open_project(&mut self) {
+        match Self::load_text_file() {
+            Ok(Some((path, contents))) => match parse_project_file(&contents) {
+                Ok(project) => {
+                    self.apply_project_file(project);
+                    self.project_path = Some(path.clone());
+                    self.message = format!("Opened project {}", path.display());
                 }
-            };
-        let project = match self.current_project() {
-            Ok(project) => project,
-            Err(report) => {
-                self.message = format!("Cannot optimize invalid data:\n{report}");
-                return;
-            }
-        };
-        if let Err(report) = validate_project(&project) {
-            self.validation_errors = report.errors.clone();
-            self.message = format!("Cannot optimize invalid data:\n{report}");
-            return;
-        }
-        match HeuristicOptimizer.optimize(
-            &project,
-            &OptimizationConfig {
-                seed,
-                attempts: 10,
-                iterations: 200,
-                solutions: 1,
-                proximity_weight,
-                used_table_weight,
-                optimal_table_size_weight,
+                Err(error) => self.message = format!("Project open failed: {error}"),
             },
-        ) {
-            Err(report) => self.message = format!("Optimization failed:\n{report}"),
-            Ok(result) => match result.solutions.first() {
-                Some(solution) => {
-                    self.assignments = solution.assignments.clone();
-                    self.seating_csv = write_seating_csv(&self.assignments).unwrap_or_default();
-                    self.validation_errors.clear();
-                    if let Ok(layout) = build_layout(&project, &self.assignments) {
-                        let svg_markup = render_svg(&layout, &RenderOptions::default());
-                        self.layout = Some(layout);
-                        self.layout_svg = Some(svg_markup);
-                    } else {
-                        self.layout = None;
-                        self.layout_svg = None;
-                    }
-                    self.active_tab = Tab::SeatingPlan;
-                    self.message = format!("Optimization complete. Score: {:.3}", solution.score);
-                }
-                None => self.message = "Optimizer returned no solutions.".to_string(),
-            },
+            Ok(None) => {}
+            Err(error) => self.message = format!("Project open failed: {error}"),
         }
     }
 
-    fn import_people(&mut self) {
+    pub(super) fn save_project(&mut self, save_as: bool) {
+        let Some(path) = self.resolve_save_path(save_as, &self.project_path, "wedding.wseat")
+        else {
+            return;
+        };
+        match self.current_project_file() {
+            Ok(project) => match write_project_file(&project) {
+                Ok(contents) => match fs::write(&path, contents) {
+                    Ok(_) => {
+                        self.project_path = Some(path.clone());
+                        self.message = format!("Saved project to {}", path.display());
+                    }
+                    Err(error) => self.message = format!("Project save failed: {error}"),
+                },
+                Err(error) => self.message = format!("Project save failed: {error}"),
+            },
+            Err(report) => self.message = format!("Project save failed:\n{report}"),
+        }
+    }
+
+    pub(super) fn export_project_csv(&mut self) {
+        let Some(folder) = FileDialog::new().pick_folder() else {
+            return;
+        };
+        let project = match self.current_project() {
+            Ok(project) => project,
+            Err(report) => {
+                self.message = format!("CSV export failed:\n{report}");
+                return;
+            }
+        };
+
+        let outputs = [
+            (
+                folder.join("people.csv"),
+                write_people_csv(&project.people).map_err(|error| error.to_string()),
+            ),
+            (
+                folder.join("closeness.csv"),
+                write_closeness_csv(&project.closeness_rules).map_err(|error| error.to_string()),
+            ),
+            (
+                folder.join("tables.csv"),
+                write_tables_csv(&project.table_types).map_err(|error| error.to_string()),
+            ),
+        ];
+
+        for (path, contents) in outputs {
+            match contents
+                .and_then(|contents| fs::write(&path, contents).map_err(|e| e.to_string()))
+            {
+                Ok(_) => {}
+                Err(error) => {
+                    self.message = format!("CSV export failed for {}: {error}", path.display());
+                    return;
+                }
+            }
+        }
+        self.message = format!("Exported project CSV files to {}", folder.display());
+    }
+
+    pub(super) fn import_people(&mut self) {
         match Self::load_text_file() {
             Ok(Some((path, contents))) => match parse_people_csv(&contents) {
                 Ok(people) => {
@@ -609,7 +363,7 @@ impl GuiApp {
         }
     }
 
-    fn import_closeness(&mut self) {
+    pub(super) fn import_closeness(&mut self) {
         match Self::load_text_file() {
             Ok(Some((path, contents))) => match parse_closeness_csv(&contents) {
                 Ok(rules) => {
@@ -625,7 +379,7 @@ impl GuiApp {
         }
     }
 
-    fn import_tables(&mut self) {
+    pub(super) fn import_tables(&mut self) {
         match Self::load_text_file() {
             Ok(Some((path, contents))) => match parse_tables_csv(&contents) {
                 Ok(table_types) => {
@@ -646,7 +400,7 @@ impl GuiApp {
         }
     }
 
-    fn save_people(&mut self, export_as: bool) {
+    pub(super) fn save_people(&mut self, export_as: bool) {
         if let Some(path) = self.resolve_save_path(export_as, &self.people_path, "people.csv") {
             match write_people_csv(&self.people_data()) {
                 Ok(contents) => match fs::write(&path, contents) {
@@ -667,7 +421,7 @@ impl GuiApp {
         }
     }
 
-    fn save_closeness(&mut self, export_as: bool) {
+    pub(super) fn save_closeness(&mut self, export_as: bool) {
         if let Some(path) = self.resolve_save_path(export_as, &self.closeness_path, "closeness.csv")
         {
             match self.materialize_closeness_rules() {
@@ -692,7 +446,7 @@ impl GuiApp {
         }
     }
 
-    fn save_tables(&mut self, export_as: bool) {
+    pub(super) fn save_tables(&mut self, export_as: bool) {
         if let Some(path) = self.resolve_save_path(export_as, &self.tables_path, "tables.csv") {
             let table_map = self
                 .materialize_table_entries()
@@ -719,7 +473,7 @@ impl GuiApp {
         }
     }
 
-    fn save_seating(&mut self) {
+    pub(super) fn save_seating(&mut self) {
         if self.assignments.is_empty() {
             self.message = "No seating assignment to save yet.".to_string();
             return;
@@ -738,7 +492,7 @@ impl GuiApp {
         }
     }
 
-    fn export_plan_svg(&mut self) {
+    pub(super) fn export_plan_svg(&mut self) {
         let Some(layout) = &self.layout else {
             self.message = "No valid seating plan available for SVG export.".to_string();
             return;
@@ -755,7 +509,7 @@ impl GuiApp {
         }
     }
 
-    fn export_plan_png(&mut self) {
+    pub(super) fn export_plan_png(&mut self) {
         let Some(layout) = &self.layout else {
             self.message = "No valid seating plan available for PNG export.".to_string();
             return;
@@ -783,11 +537,11 @@ impl GuiApp {
 
     fn resolve_save_path(
         &self,
-        export_as: bool,
+        save_as: bool,
         current_path: &Option<PathBuf>,
         default_name: &str,
     ) -> Option<PathBuf> {
-        if export_as {
+        if save_as {
             FileDialog::new().set_file_name(default_name).save_file()
         } else {
             current_path
@@ -796,7 +550,10 @@ impl GuiApp {
         }
     }
 
-    fn person_table_type_options(&self, current: &Option<String>) -> Vec<MaybeStringChoice> {
+    pub(super) fn person_table_type_options(
+        &self,
+        current: &Option<String>,
+    ) -> Vec<MaybeStringChoice> {
         let mut values = self
             .table_configs
             .iter()
@@ -833,7 +590,7 @@ impl GuiApp {
         choices
     }
 
-    fn locked_table_options(&self, current: Option<usize>) -> Vec<MaybeUsizeChoice> {
+    pub(super) fn locked_table_options(&self, current: Option<usize>) -> Vec<MaybeUsizeChoice> {
         let mut choices = vec![MaybeUsizeChoice {
             label: "No lock".to_string(),
             value: None,
@@ -857,7 +614,7 @@ impl GuiApp {
         choices
     }
 
-    fn locked_seat_options(&self, person: &Person) -> Vec<MaybeUsizeChoice> {
+    pub(super) fn locked_seat_options(&self, person: &Person) -> Vec<MaybeUsizeChoice> {
         let mut choices = vec![MaybeUsizeChoice {
             label: "No seat lock".to_string(),
             value: None,
@@ -882,7 +639,7 @@ impl GuiApp {
         choices
     }
 
-    fn generated_table_numbers(&self) -> Vec<usize> {
+    pub(super) fn generated_table_numbers(&self) -> Vec<usize> {
         self.current_project()
             .ok()
             .map(|project| {
@@ -894,7 +651,7 @@ impl GuiApp {
             .unwrap_or_default()
     }
 
-    fn table_capacity_for_number(&self, table_number: usize) -> Option<usize> {
+    pub(super) fn table_capacity_for_number(&self, table_number: usize) -> Option<usize> {
         self.current_project().ok().and_then(|project| {
             generate_table_instances(&project)
                 .into_iter()
@@ -903,7 +660,7 @@ impl GuiApp {
         })
     }
 
-    fn generated_table_summary(&self) -> Vec<String> {
+    pub(super) fn generated_table_summary(&self) -> Vec<String> {
         self.current_project()
             .ok()
             .map(|project| {
@@ -917,7 +674,7 @@ impl GuiApp {
             })
     }
 
-    fn person_errors(&self, person: &Person) -> Vec<String> {
+    pub(super) fn person_errors(&self, person: &Person) -> Vec<String> {
         self.validation_errors
             .iter()
             .filter_map(|error| match error {
@@ -960,7 +717,7 @@ impl GuiApp {
             .collect()
     }
 
-    fn closeness_errors(&self, rule: &ClosenessRule, score_input: &str) -> Vec<String> {
+    pub(super) fn closeness_errors(&self, rule: &ClosenessRule, score_input: &str) -> Vec<String> {
         let mut errors: Vec<String> = self
             .validation_errors
             .iter()
@@ -989,7 +746,7 @@ impl GuiApp {
         errors
     }
 
-    fn table_errors(&self, row: &TableConfigState) -> Vec<String> {
+    pub(super) fn table_errors(&self, row: &TableConfigState) -> Vec<String> {
         let mut errors: Vec<String> = self
             .validation_errors
             .iter()
@@ -1065,7 +822,7 @@ impl GuiApp {
         errors
     }
 
-    fn reference_matches(
+    pub(super) fn reference_matches(
         &self,
         options: &[seating_core::ReferenceIdOption],
         query: &str,
@@ -1083,43 +840,15 @@ impl GuiApp {
             .collect()
     }
 
-    fn reference_label(&self, id: &str, options: &[seating_core::ReferenceIdOption]) -> String {
+    pub(super) fn reference_label(
+        &self,
+        id: &str,
+        options: &[seating_core::ReferenceIdOption],
+    ) -> String {
         options
             .iter()
             .find(|option| option.id == id)
             .map(|option| option.label.clone())
             .unwrap_or_else(|| format!("{id} — unknown"))
-    }
-
-    fn suggestion_row<F>(
-        &self,
-        label: &str,
-        suggestions: Vec<seating_core::ReferenceIdOption>,
-        on_press: F,
-    ) -> Element<'_, Msg>
-    where
-        F: 'static + Clone + Fn(String) -> Msg,
-    {
-        let row = suggestions.into_iter().fold(
-            row![text(label)].spacing(6).align_items(Alignment::Center),
-            |suggestion_row, suggestion| {
-                suggestion_row.push(
-                    button(text(suggestion.label.clone()).size(12))
-                        .on_press(on_press.clone()(suggestion.id.clone()))
-                        .padding([5, 9])
-                        .style(theme::Button::custom(AppButtonStyle::chip())),
-                )
-            },
-        );
-        row.into()
-    }
-
-    fn error_column(&self, errors: Vec<String>) -> Element<'_, Msg> {
-        errors
-            .into_iter()
-            .fold(column![].spacing(4), |column, error| {
-                column.push(text(format!("⚠ {error}")))
-            })
-            .into()
     }
 }

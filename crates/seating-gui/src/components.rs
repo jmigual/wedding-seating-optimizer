@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use iced::widget::{button, container, row, text, Button, Container};
+use iced::widget::{button, container, row, svg, text, Button, Container};
 use iced::{theme, Element, Length, Theme};
 
 use crate::state::Msg;
@@ -36,4 +36,16 @@ pub(crate) fn toolbar<'a>(content: impl Into<Element<'a, Msg>>) -> Container<'a,
         .padding(10)
         .width(Length::Fill)
         .style(toolbar_style)
+}
+
+pub(crate) fn logo_mark<'a>() -> Container<'a, Msg, Theme> {
+    container(
+        svg(svg::Handle::from_memory(
+            include_bytes!("../assets/app-icon.svg").to_vec(),
+        ))
+        .width(Length::Fixed(28.0))
+        .height(Length::Fixed(28.0)),
+    )
+    .width(Length::Fixed(32.0))
+    .height(Length::Fixed(32.0))
 }
