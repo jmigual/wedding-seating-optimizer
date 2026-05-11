@@ -114,29 +114,41 @@ pub fn build_layout_with_options(
     validate_seating_solution(project, assignments)?;
 
     let instances = generate_table_instances(project);
-    let assignment_lookup: HashMap<(usize, usize), &SeatingAssignment> = assignments
-        .iter()
-        .map(|assignment| ((assignment.table_number, assignment.seat_index), assignment))
-        .collect();
+    let mut assignments_by_table: HashMap<usize, Vec<&SeatingAssignment>> = HashMap::new();
+    for assignment in assignments {
+        assignments_by_table
+            .entry(assignment.table_number)
+            .or_default()
+            .push(assignment);
+    }
+    for table_assignments in assignments_by_table.values_mut() {
+        table_assignments.sort_by_key(|assignment| assignment.seat_index);
+    }
 
-    let columns = columns_for(instances.len());
+    let used_instances = instances
+        .iter()
+        .filter(|table| assignments_by_table.contains_key(&table.number))
+        .collect::<Vec<_>>();
+    let columns = columns_for(used_instances.len());
     let mut tables = Vec::new();
 
-    for (index, table) in instances.iter().enumerate() {
+    for (index, table) in used_instances.iter().enumerate() {
         let column = index % columns;
         let row = index / columns;
         let x = options.margin + column as f32 * (options.table_width + options.column_gap);
         let y = options.margin + row as f32 * (options.table_height + options.row_gap);
         let config = &project.table_types[&table.table_type];
+        let table_assignments = assignments_by_table
+            .get(&table.number)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let seats = build_seat_positions(
             table.shape.clone(),
             config.people_per_side.as_deref(),
-            table.max_people,
             x,
             y,
             options,
-            &assignment_lookup,
-            table.number,
+            table_assignments,
         );
         tables.push(LayoutTable {
             table_number: table.number,
@@ -239,17 +251,14 @@ pub fn render_svg(layout: &SeatingLayout, options: &RenderOptions) -> String {
                 seat.y + 0.5,
                 seat.seat_index
             ));
-            let guest_label = seat
-                .person_name
-                .as_deref()
-                .map(escape_xml)
-                .unwrap_or_else(|| format!("Seat {}", seat.seat_index));
-            svg.push_str(&format!(
-                "<text class=\"guest\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text>",
-                seat.x,
-                seat.y + options.seat_radius + 16.0,
-                guest_label
-            ));
+            if let Some(guest_label) = seat.person_name.as_deref().map(escape_xml) {
+                svg.push_str(&format!(
+                    "<text class=\"guest\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text>",
+                    seat.x,
+                    seat.y + options.seat_radius + 16.0,
+                    guest_label
+                ));
+            }
         }
         svg.push_str("</g>");
     }
@@ -298,51 +307,43 @@ fn columns_for(table_count: usize) -> usize {
 fn build_seat_positions(
     shape: TableShape,
     people_per_side: Option<&[usize]>,
-    seat_count: usize,
     x: f32,
     y: f32,
     options: &RenderOptions,
-    assignment_lookup: &HashMap<(usize, usize), &SeatingAssignment>,
-    table_number: usize,
+    table_assignments: &[&SeatingAssignment],
 ) -> Vec<LayoutSeat> {
     match shape {
-        TableShape::Round => {
-            build_round_seats(seat_count, x, y, options, assignment_lookup, table_number)
-        }
+        TableShape::Round => build_round_seats(table_assignments, x, y, options),
         TableShape::Rectangular | TableShape::Square => build_rectangular_seats(
             people_per_side.unwrap_or(&[]),
-            seat_count,
             x,
             y,
             options,
-            assignment_lookup,
-            table_number,
+            table_assignments,
         ),
     }
 }
 
 fn build_round_seats(
-    seat_count: usize,
+    table_assignments: &[&SeatingAssignment],
     x: f32,
     y: f32,
     options: &RenderOptions,
-    assignment_lookup: &HashMap<(usize, usize), &SeatingAssignment>,
-    table_number: usize,
 ) -> Vec<LayoutSeat> {
     let center_x = x + options.table_width / 2.0;
     let center_y = y + options.table_height / 2.0 + 6.0;
     let radius = 78.0;
+    let seat_count = table_assignments.len();
     (0..seat_count)
         .map(|seat_index| {
+            let assignment = table_assignments[seat_index];
             let angle = std::f32::consts::TAU * seat_index as f32 / seat_count.max(1) as f32
                 - std::f32::consts::FRAC_PI_2;
             LayoutSeat {
-                seat_index,
+                seat_index: assignment.seat_index,
                 x: center_x + radius * angle.cos(),
                 y: center_y + radius * angle.sin(),
-                person_name: assignment_lookup
-                    .get(&(table_number, seat_index))
-                    .map(|assignment| assignment.person_name.clone()),
+                person_name: Some(assignment.person_name.clone()),
             }
         })
         .collect()
@@ -350,23 +351,23 @@ fn build_round_seats(
 
 fn build_rectangular_seats(
     people_per_side: &[usize],
-    seat_count: usize,
     x: f32,
     y: f32,
     options: &RenderOptions,
-    assignment_lookup: &HashMap<(usize, usize), &SeatingAssignment>,
-    table_number: usize,
+    table_assignments: &[&SeatingAssignment],
 ) -> Vec<LayoutSeat> {
     let mut points = Vec::new();
+    let seat_count = table_assignments.len();
     let left = x + 52.0;
     let right = x + options.table_width - 52.0;
     let top = y + 68.0;
     let bottom = y + options.table_height - 58.0;
-    let counts = if people_per_side.len() == 4 {
-        people_per_side.to_vec()
-    } else {
-        spread_evenly(seat_count)
-    };
+    let counts =
+        if people_per_side.len() == 4 && people_per_side.iter().sum::<usize>() == seat_count {
+            people_per_side.to_vec()
+        } else {
+            spread_evenly(seat_count)
+        };
 
     points.extend(line_points(counts[0], left + 14.0, right - 14.0, top, top));
     points.extend(line_points(
@@ -396,12 +397,10 @@ fn build_rectangular_seats(
         .take(seat_count)
         .enumerate()
         .map(|(seat_index, (seat_x, seat_y))| LayoutSeat {
-            seat_index,
+            seat_index: table_assignments[seat_index].seat_index,
             x: seat_x,
             y: seat_y,
-            person_name: assignment_lookup
-                .get(&(table_number, seat_index))
-                .map(|assignment| assignment.person_name.clone()),
+            person_name: Some(table_assignments[seat_index].person_name.clone()),
         })
         .collect()
 }

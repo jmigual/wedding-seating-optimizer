@@ -15,7 +15,7 @@ pub type PersonId = String;
 /// Identifier for a group of guests (must be distinct from all person IDs).
 pub type GroupId = String;
 
-/// Identifier for a table type (key in the tables JSON file).
+/// Identifier for a table type (key in the tables CSV file).
 pub type TableTypeId = String;
 
 /// Zero-based position index within a table.
@@ -36,10 +36,10 @@ pub enum TableShape {
     Square,
 }
 
-/// Configuration for one table type, as parsed from the tables JSON file.
+/// Configuration for one table type, as parsed from the tables CSV file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TableTypeConfig {
-    /// Physical shape; defaults to [`TableShape::Round`] when absent in JSON.
+    /// Physical shape; defaults to [`TableShape::Round`] when absent in CSV.
     #[serde(default)]
     pub shape: TableShape,
     /// Number of seats per side, required for rectangular and square tables.
@@ -167,8 +167,12 @@ pub struct OptimizationConfig {
     pub iterations: usize,
     /// How many top solutions to keep and return.
     pub solutions: usize,
+    /// Global multiplier for closeness and proximity contributions.
+    pub proximity_weight: f64,
+    /// Penalty subtracted for every table used by a solution.
+    pub used_table_weight: f64,
     /// Weight applied to the penalty for deviating from `recommended_people`.
-    pub recommended_capacity_weight: f64,
+    pub optimal_table_size_weight: f64,
 }
 
 impl Default for OptimizationConfig {
@@ -178,7 +182,9 @@ impl Default for OptimizationConfig {
             attempts: 10,
             iterations: 200,
             solutions: 1,
-            recommended_capacity_weight: 1.0,
+            proximity_weight: 1.0,
+            used_table_weight: 0.0,
+            optimal_table_size_weight: 1.0,
         }
     }
 }

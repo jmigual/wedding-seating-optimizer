@@ -11,7 +11,7 @@
 //! | Module | Responsibility |
 //! |--------|---------------|
 //! | [`models`] | Domain types: guests, table configs, closeness rules, solutions, errors |
-//! | [`io`] | CSV/JSON parsing and serialization |
+//! | [`io`] | CSV parsing and serialization |
 //! | [`validation`] | Pre-optimization project validation and seating-solution validation |
 //! | [`scoring`] | Distance functions, proximity weights, pairwise and solution scoring |
 //! | [`optimizer`] | [`SeatingOptimizer`] trait and [`HeuristicOptimizer`] implementation |
@@ -27,7 +27,7 @@
 //! let project = make_project(
 //!     include_str!("../../../examples/people.csv"),
 //!     include_str!("../../../examples/closeness.csv"),
-//!     include_str!("../../../examples/tables.json"),
+//!     include_str!("../../../examples/tables.csv"),
 //! )
 //! .expect("parse inputs");
 //!
@@ -55,8 +55,8 @@ pub use editing::{
     parse_required_usize_value, reference_id_options, ReferenceIdKind, ReferenceIdOption,
 };
 pub use io::{
-    make_project, parse_closeness_csv, parse_people_csv, parse_seating_csv, parse_tables_json,
-    write_closeness_csv, write_people_csv, write_seating_csv, write_tables_json,
+    make_project, parse_closeness_csv, parse_people_csv, parse_seating_csv, parse_tables_csv,
+    write_closeness_csv, write_people_csv, write_seating_csv, write_tables_csv,
 };
 pub use models::{
     ClosenessRule, GroupId, OptimizationConfig, OptimizationResult, Person, PersonId, ProjectInput,

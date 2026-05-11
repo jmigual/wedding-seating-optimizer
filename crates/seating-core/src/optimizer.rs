@@ -202,8 +202,7 @@ impl HeuristicOptimizer {
             .map(|p| p.id.as_str())
             .collect();
         let mut best_score =
-            score_solution(project, &assignments, config.recommended_capacity_weight)
-                .unwrap_or(f64::NEG_INFINITY);
+            score_solution(project, &assignments, config).unwrap_or(f64::NEG_INFINITY);
 
         for _ in 0..config.iterations.max(50) {
             let i = rng.gen_range(0..assignments.len());
@@ -227,9 +226,7 @@ impl HeuristicOptimizer {
 
             // Accept only improving feasible swaps.
             if validate_seating_solution(project, &assignments).is_ok() {
-                if let Ok(score) =
-                    score_solution(project, &assignments, config.recommended_capacity_weight)
-                {
+                if let Ok(score) = score_solution(project, &assignments, config) {
                     if score > best_score {
                         best_score = score;
                         continue; // Keep the swap.
@@ -239,6 +236,55 @@ impl HeuristicOptimizer {
             // Revert.
             assignments[i] = a;
             assignments[j] = b;
+        }
+
+        let instances = generate_table_instances(project);
+        for _ in 0..config.iterations.max(50) {
+            let i = rng.gen_range(0..assignments.len());
+            if locked_ids.contains(assignments[i].person_id.as_str()) {
+                continue;
+            }
+
+            let mut occupied: HashSet<(usize, usize)> = assignments
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != i)
+                .map(|(_, assignment)| (assignment.table_number, assignment.seat_index))
+                .collect();
+            let Some(person) = project
+                .people
+                .iter()
+                .find(|person| person.id == assignments[i].person_id)
+            else {
+                continue;
+            };
+            let candidates = self.seat_candidates(person, &instances, &occupied);
+            if candidates.is_empty() {
+                continue;
+            }
+            let chosen = candidates[rng.gen_range(0..candidates.len())];
+            let original = assignments[i].clone();
+            let table_lookup: HashMap<usize, &crate::models::TableInstance> = instances
+                .iter()
+                .map(|table| (table.number, table))
+                .collect();
+            let Some(table) = table_lookup.get(&chosen.0) else {
+                continue;
+            };
+            assignments[i].table_number = chosen.0;
+            assignments[i].table_type = table.table_type.clone();
+            assignments[i].seat_index = chosen.1;
+            occupied.insert(chosen);
+
+            if validate_seating_solution(project, &assignments).is_ok() {
+                if let Ok(score) = score_solution(project, &assignments, config) {
+                    if score > best_score {
+                        best_score = score;
+                        continue; // Keep the move.
+                    }
+                }
+            }
+            assignments[i] = original;
         }
         assignments
     }
@@ -271,8 +317,7 @@ impl SeatingOptimizer for HeuristicOptimizer {
             // Use a fixed bit-mixing constant to derive a deterministic but
             // decorrelated RNG stream for local improvement from the base seed.
             let improved = self.local_improve(project, config, initial, attempt_seed ^ 0xA5A5_5A5A);
-            let Ok(score) = score_solution(project, &improved, config.recommended_capacity_weight)
-            else {
+            let Ok(score) = score_solution(project, &improved, config) else {
                 continue;
             };
             best.push(SeatingSolution {

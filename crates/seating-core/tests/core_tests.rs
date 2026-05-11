@@ -3,24 +3,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-fn sample_tables_json() -> &'static str {
-    r#"{
-      "round_4": {
-        "shape": "round",
-        "max_people": 4,
-        "recommended_people": 4,
-        "min_people": 2,
-        "number_of_tables": 2
-      },
-      "rect_4": {
-        "shape": "rectangular",
-        "people_per_side": [1,1,1,1],
-        "max_people": 4,
-        "recommended_people": 4,
-        "min_people": 2,
-        "number_of_tables": 1
-      }
-    }"#
+fn sample_tables_csv() -> &'static str {
+    "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_4,round,4,4,2,2,\nrect_4,rectangular,4,4,2,1,1|1|1|1\n"
 }
 
 fn sample_people() -> Vec<Person> {
@@ -287,8 +271,8 @@ fn structured_closeness_round_trip_csv_works() {
 }
 
 #[test]
-fn tables_json_parsing_works() {
-    let tables = parse_tables_json(sample_tables_json()).unwrap();
+fn tables_csv_parsing_works() {
+    let tables = parse_tables_csv(sample_tables_csv()).unwrap();
     assert!(tables.contains_key("round_4"));
     assert_eq!(
         tables["rect_4"]
@@ -302,9 +286,9 @@ fn tables_json_parsing_works() {
 }
 
 #[test]
-fn structured_table_configs_round_trip_json_works() {
-    let json = write_tables_json(&sample_table_map()).unwrap();
-    assert_eq!(parse_tables_json(&json).unwrap(), sample_table_map());
+fn structured_table_configs_round_trip_csv_works() {
+    let csv = write_tables_csv(&sample_table_map()).unwrap();
+    assert_eq!(parse_tables_csv(&csv).unwrap(), sample_table_map());
 }
 
 #[test]
@@ -352,6 +336,41 @@ fn svg_rendering_contains_table_labels_types_and_guest_names() {
     assert!(svg.contains("Shape: round"));
     assert!(svg.contains("Alice"));
     assert!(svg.contains("Dan"));
+}
+
+#[test]
+fn layout_and_svg_skip_unused_tables_and_empty_seats() {
+    let project = ProjectInput {
+        people: sample_people(),
+        closeness_rules: vec![],
+        table_types: sample_table_map(),
+    };
+    let assignments = vec![
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 0,
+            person_id: "p1".to_string(),
+            person_name: "Alice".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 3,
+            person_id: "p2".to_string(),
+            person_name: "Bob".to_string(),
+        },
+    ];
+
+    let layout = build_layout(&project, &assignments).unwrap();
+    assert_eq!(layout.tables.len(), 1);
+    assert_eq!(layout.tables[0].seats.len(), 2);
+
+    let svg = render_svg(&layout, &RenderOptions::default());
+    assert!(svg.contains("Alice"));
+    assert!(svg.contains("Bob"));
+    assert!(!svg.contains("Table 2"));
+    assert!(!svg.contains(">Seat "));
 }
 
 #[test]
@@ -434,7 +453,7 @@ fn id_namespace_collision_is_rejected() {
     let project = make_project(
         "id,name,table_type,groups,locked_table,locked_seat\np1,Alice,,p1,,\n",
         "left_id,right_id,score\n",
-        sample_tables_json(),
+        sample_tables_csv(),
     )
     .unwrap();
     let err = validate_project(&project).unwrap_err();
@@ -449,7 +468,7 @@ fn group_pair_scores_apply() {
     let project = make_project(
         "id,name,table_type,groups,locked_table,locked_seat\na1,A1,,family,,\na2,A2,,family,,\n",
         "left_id,right_id,score\nfamily,family,10\n",
-        sample_tables_json(),
+        sample_tables_csv(),
     )
     .unwrap();
     let score =
@@ -462,7 +481,7 @@ fn multiple_group_maximum_rule_applies() {
     let project = make_project(
         "id,name,table_type,groups,locked_table,locked_seat\na1,A1,,g1|g2,,\na2,A2,,g3|g4,,\n",
         "left_id,right_id,score\ng1,g3,5\ng2,g4,9\n",
-        sample_tables_json(),
+        sample_tables_csv(),
     )
     .unwrap();
     let score =
@@ -475,7 +494,7 @@ fn person_pair_score_adds_to_group_score() {
     let project = make_project(
         "id,name,table_type,groups,locked_table,locked_seat\na1,A1,,fam,,\na2,A2,,fam,,\n",
         "left_id,right_id,score\na1,a2,5\nfam,fam,10\n",
-        sample_tables_json(),
+        sample_tables_csv(),
     )
     .unwrap();
     let score =
@@ -501,9 +520,7 @@ fn capacity_validation_catches_insufficient_space() {
     let project = make_project(
         "id,name,table_type,groups,locked_table,locked_seat\np1,A,,g,,\np2,B,,g,,\np3,C,,g,,\np4,D,,g,,\np5,E,,g,,\n",
         "left_id,right_id,score\n",
-        r#"{
-          "round_4": {"shape":"round","max_people":4,"number_of_tables":1}
-        }"#,
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_4,round,4,,,1,\n",
     )
     .unwrap();
     let err = validate_project(&project).unwrap_err();
@@ -518,7 +535,7 @@ fn locked_table_validation_works() {
     let project = make_project(
         "id,name,table_type,groups,locked_table,locked_seat\np1,A,,g,999,\n",
         "left_id,right_id,score\n",
-        sample_tables_json(),
+        sample_tables_csv(),
     )
     .unwrap();
     let err = validate_project(&project).unwrap_err();
@@ -533,7 +550,7 @@ fn locked_seat_validation_works() {
     let project = make_project(
         "id,name,table_type,groups,locked_table,locked_seat\np1,A,round_4,g,1,99\n",
         "left_id,right_id,score\n",
-        sample_tables_json(),
+        sample_tables_csv(),
     )
     .unwrap();
     let err = validate_project(&project).unwrap_err();
@@ -548,7 +565,7 @@ fn impossible_assignment_is_detected() {
     let project = make_project(
         "id,name,table_type,groups,locked_table,locked_seat\np1,A,missing,g,,\n",
         "left_id,right_id,score\n",
-        sample_tables_json(),
+        sample_tables_csv(),
     )
     .unwrap();
     let err = validate_project(&project).unwrap_err();
@@ -568,9 +585,7 @@ fn known_seating_scoring_works() {
     let project = make_project(
         "id,name,table_type,groups,locked_table,locked_seat\np1,A,,g,,\np2,B,,g,,\np3,C,,x,,\n",
         "left_id,right_id,score\np1,p2,10\ng,g,5\n",
-        r#"{
-          "round_4": {"shape":"round","max_people":4,"recommended_people":3,"number_of_tables":1}
-        }"#,
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_4,round,4,3,,1,\n",
     )
     .unwrap();
 
@@ -599,8 +614,19 @@ fn known_seating_scoring_works() {
         },
     ];
 
-    let score = score_solution(&project, &seating, 1.0).unwrap();
+    let score = score_solution(&project, &seating, &OptimizationConfig::default()).unwrap();
     assert!(score > 10.0);
+
+    let no_proximity_score = score_solution(
+        &project,
+        &seating,
+        &OptimizationConfig {
+            proximity_weight: 0.0,
+            ..OptimizationConfig::default()
+        },
+    )
+    .unwrap();
+    assert!(score > no_proximity_score);
 }
 
 #[test]
@@ -608,9 +634,7 @@ fn integration_style_optimization_test() {
     let project = make_project(
         "id,name,table_type,groups,locked_table,locked_seat\np1,A,,fam,,\np2,B,,fam,,\np3,C,,work,,\np4,D,,work,,\n",
         "left_id,right_id,score\np1,p2,15\np3,p4,15\nfam,work,-2\n",
-        r#"{
-          "round_4": {"shape":"round","max_people":4,"recommended_people":4,"number_of_tables":1}
-        }"#,
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_4,round,4,4,,1,\n",
     )
     .unwrap();
 
@@ -624,7 +648,8 @@ fn integration_style_optimization_test() {
                 attempts: 10,
                 iterations: 80,
                 solutions: 1,
-                recommended_capacity_weight: 0.5,
+                optimal_table_size_weight: 0.5,
+                ..OptimizationConfig::default()
             },
         )
         .unwrap();
@@ -632,4 +657,43 @@ fn integration_style_optimization_test() {
     assert_eq!(result.solutions.len(), 1);
     assert_eq!(result.solutions[0].assignments.len(), 4);
     assert!(result.solutions[0].score.is_finite());
+}
+
+#[test]
+fn used_table_penalty_prefers_needed_table_count() {
+    let people_csv = (1..=8)
+        .map(|index| format!("p{index},Person {index},round_2,,,\n"))
+        .fold(
+            "id,name,table_type,groups,locked_table,locked_seat\n".to_string(),
+            |mut csv, row| {
+                csv.push_str(&row);
+                csv
+            },
+        );
+    let project = make_project(
+        &people_csv,
+        "left_id,right_id,score\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_2,round,2,2,,5,\n",
+    )
+    .unwrap();
+    let result = HeuristicOptimizer
+        .optimize(
+            &project,
+            &OptimizationConfig {
+                seed: 9,
+                attempts: 30,
+                iterations: 800,
+                solutions: 1,
+                used_table_weight: 10.0,
+                optimal_table_size_weight: 2.0,
+                ..OptimizationConfig::default()
+            },
+        )
+        .unwrap();
+    let used_tables = result.solutions[0]
+        .assignments
+        .iter()
+        .map(|assignment| assignment.table_number)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(used_tables.len(), 4);
 }

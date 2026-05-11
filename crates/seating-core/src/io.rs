@@ -1,15 +1,15 @@
-//! CSV and JSON parsing and serialization for all input/output file formats.
+//! CSV parsing and serialization for all input/output file formats.
 //!
 //! Public API:
 //! - [`parse_people_csv`] / [`write_people_csv`]
 //! - [`parse_closeness_csv`] / [`write_closeness_csv`]
-//! - [`parse_tables_json`] / [`write_tables_json`]
+//! - [`parse_tables_csv`] / [`write_tables_csv`]
 //! - [`parse_seating_csv`] / [`write_seating_csv`]
 //! - [`make_project`] – convenience constructor that parses all three inputs
 
 use crate::models::{
-    ClosenessRule, Person, ProjectInput, SeatingAssignment, TableTypeConfig, TableTypeId,
-    ValidationError,
+    ClosenessRule, Person, ProjectInput, SeatingAssignment, TableShape, TableTypeConfig,
+    TableTypeId, ValidationError,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -39,6 +39,21 @@ struct ClosenessCsvRow {
 }
 
 #[derive(Debug, Deserialize)]
+struct TableCsvRow {
+    table_type_id: String,
+    shape: String,
+    max_people: String,
+    #[serde(default)]
+    recommended_people: String,
+    #[serde(default)]
+    min_people: String,
+    #[serde(default)]
+    number_of_tables: String,
+    #[serde(default)]
+    people_per_side: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct SeatingCsvRow {
     table_number: usize,
     table_type: String,
@@ -64,6 +79,17 @@ struct ClosenessCsvOut<'a> {
     left_id: &'a str,
     right_id: &'a str,
     score: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct TableCsvOut<'a> {
+    table_type_id: &'a str,
+    shape: &'a str,
+    max_people: usize,
+    recommended_people: String,
+    min_people: String,
+    number_of_tables: String,
+    people_per_side: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -130,15 +156,48 @@ pub fn parse_closeness_csv(input: &str) -> Result<Vec<ClosenessRule>, Validation
     Ok(rules)
 }
 
-/// Parse the tables JSON file into a map of type name → [`TableTypeConfig`].
+/// Parse the tables CSV file into a map of type name → [`TableTypeConfig`].
 ///
 /// # Errors
-/// Returns [`ValidationError::MalformedInput`] on any JSON deserialization error.
-pub fn parse_tables_json(
+/// Returns [`ValidationError::MalformedInput`] on any CSV or field-parsing error.
+pub fn parse_tables_csv(
     input: &str,
 ) -> Result<BTreeMap<TableTypeId, TableTypeConfig>, ValidationError> {
-    serde_json::from_str(input)
-        .map_err(|e| ValidationError::MalformedInput(format!("tables JSON: {e}")))
+    let mut rdr = csv::ReaderBuilder::new()
+        .trim(csv::Trim::All)
+        .from_reader(input.as_bytes());
+    let mut tables = BTreeMap::new();
+    for row in rdr.deserialize::<TableCsvRow>() {
+        let row = row.map_err(|e| ValidationError::MalformedInput(format!("tables CSV: {e}")))?;
+        let table_type_id = row.table_type_id.trim().to_string();
+        if table_type_id.is_empty() {
+            return Err(ValidationError::EmptyTableTypeId);
+        }
+        let shape = parse_table_shape(&row.shape)?;
+        let max_people = parse_required_usize(&row.max_people, "max_people")?;
+        let recommended_people =
+            parse_optional_usize(&row.recommended_people, "recommended_people")?;
+        let min_people = parse_optional_usize(&row.min_people, "min_people")?;
+        let number_of_tables = parse_optional_usize(&row.number_of_tables, "number_of_tables")?;
+        let people_per_side = parse_optional_usize_list(&row.people_per_side, "people_per_side")?;
+        if tables
+            .insert(
+                table_type_id.clone(),
+                TableTypeConfig {
+                    shape,
+                    people_per_side,
+                    max_people,
+                    recommended_people,
+                    min_people,
+                    number_of_tables,
+                },
+            )
+            .is_some()
+        {
+            return Err(ValidationError::DuplicateTableTypeId(table_type_id));
+        }
+    }
+    Ok(tables)
 }
 
 /// Parse the seating output CSV into a list of [`SeatingAssignment`] records.
@@ -204,15 +263,46 @@ pub fn write_closeness_csv(rules: &[ClosenessRule]) -> Result<String, Validation
     finish_writer(wtr, "closeness CSV")
 }
 
-/// Serialize a table-type configuration map to a pretty-printed JSON string.
+/// Serialize a table-type configuration map to a UTF-8 CSV string.
 ///
 /// # Errors
 /// Returns [`ValidationError::MalformedInput`] on any serialization error.
-pub fn write_tables_json(
+pub fn write_tables_csv(
     tables: &BTreeMap<TableTypeId, TableTypeConfig>,
 ) -> Result<String, ValidationError> {
-    serde_json::to_string_pretty(tables)
-        .map_err(|e| ValidationError::MalformedInput(format!("tables JSON serialization: {e}")))
+    let mut wtr = csv::Writer::from_writer(vec![]);
+    for (table_type_id, table) in tables {
+        wtr.serialize(TableCsvOut {
+            table_type_id,
+            shape: table_shape_label(&table.shape),
+            max_people: table.max_people,
+            recommended_people: table
+                .recommended_people
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            min_people: table
+                .min_people
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            number_of_tables: table
+                .number_of_tables
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            people_per_side: table
+                .people_per_side
+                .as_ref()
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(|value| value.to_string())
+                        .collect::<Vec<_>>()
+                        .join("|")
+                })
+                .unwrap_or_default(),
+        })
+        .map_err(|e| ValidationError::MalformedInput(format!("tables CSV serialization: {e}")))?;
+    }
+    finish_writer(wtr, "tables CSV")
 }
 
 /// Serialize a list of [`SeatingAssignment`] records to a UTF-8 CSV string.
@@ -253,12 +343,12 @@ pub fn write_seating_csv(assignments: &[SeatingAssignment]) -> Result<String, Va
 pub fn make_project(
     people_csv: &str,
     closeness_csv: &str,
-    tables_json: &str,
+    tables_csv: &str,
 ) -> Result<ProjectInput, ValidationError> {
     Ok(ProjectInput {
         people: parse_people_csv(people_csv)?,
         closeness_rules: parse_closeness_csv(closeness_csv)?,
-        table_types: parse_tables_json(tables_json)?,
+        table_types: parse_tables_csv(tables_csv)?,
     })
 }
 
@@ -281,6 +371,53 @@ fn parse_optional_usize(s: &str, field: &str) -> Result<Option<usize>, Validatio
         s.parse::<usize>()
             .map(Some)
             .map_err(|e| ValidationError::MalformedInput(format!("invalid {field} '{s}': {e}")))
+    }
+}
+
+fn parse_required_usize(s: &str, field: &str) -> Result<usize, ValidationError> {
+    if s.is_empty() {
+        Err(ValidationError::MalformedInput(format!(
+            "missing required {field}"
+        )))
+    } else {
+        s.parse::<usize>()
+            .map_err(|e| ValidationError::MalformedInput(format!("invalid {field} '{s}': {e}")))
+    }
+}
+
+fn parse_optional_usize_list(s: &str, field: &str) -> Result<Option<Vec<usize>>, ValidationError> {
+    if s.is_empty() {
+        return Ok(None);
+    }
+    let mut values = Vec::new();
+    for value in s.split('|') {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        values.push(trimmed.parse::<usize>().map_err(|e| {
+            ValidationError::MalformedInput(format!("invalid {field} value '{trimmed}': {e}"))
+        })?);
+    }
+    Ok(Some(values))
+}
+
+fn parse_table_shape(s: &str) -> Result<TableShape, ValidationError> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "" | "round" => Ok(TableShape::Round),
+        "rectangular" | "rectangle" | "rect" => Ok(TableShape::Rectangular),
+        "square" => Ok(TableShape::Square),
+        other => Err(ValidationError::MalformedInput(format!(
+            "invalid table shape '{other}'"
+        ))),
+    }
+}
+
+fn table_shape_label(shape: &TableShape) -> &'static str {
+    match shape {
+        TableShape::Round => "round",
+        TableShape::Rectangular => "rectangular",
+        TableShape::Square => "square",
     }
 }
 

@@ -21,13 +21,13 @@
 //! wedding-seating validate \
 //!     --people people.csv \
 //!     --closeness closeness.csv \
-//!     --tables tables.json
+//!     --tables tables.csv
 //!
 //! # Optimize and write result
 //! wedding-seating optimize \
 //!     --people people.csv \
 //!     --closeness closeness.csv \
-//!     --tables tables.json \
+//!     --tables tables.csv \
 //!     --output seating.csv \
 //!     --seed 1234
 //!
@@ -35,13 +35,13 @@
 //! wedding-seating score \
 //!     --people people.csv \
 //!     --closeness closeness.csv \
-//!     --tables tables.json \
+//!     --tables tables.csv \
 //!     --seating seating.csv
 //!
 //! # Render an existing seating plan
 //! wedding-seating render \
 //!     --people people.csv \
-//!     --tables tables.json \
+//!     --tables tables.csv \
 //!     --seating seating.csv \
 //!     --output seating-plan.svg
 //! ```
@@ -49,7 +49,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use seating_core::{
-    build_layout, parse_people_csv, parse_seating_csv, parse_tables_json, render_png, render_svg,
+    build_layout, parse_people_csv, parse_seating_csv, parse_tables_csv, render_png, render_svg,
     score_solution, validate_project, write_seating_csv, HeuristicOptimizer, OptimizationConfig,
     ProjectInput, RenderOptions, SeatingOptimizer,
 };
@@ -79,7 +79,7 @@ enum Commands {
         /// Path to the closeness CSV file.
         #[arg(long)]
         closeness: PathBuf,
-        /// Path to the tables JSON file.
+        /// Path to the tables CSV file.
         #[arg(long)]
         tables: PathBuf,
     },
@@ -94,7 +94,7 @@ enum Commands {
         /// Path to the closeness CSV file.
         #[arg(long)]
         closeness: PathBuf,
-        /// Path to the tables JSON file.
+        /// Path to the tables CSV file.
         #[arg(long)]
         tables: PathBuf,
         /// Destination path for the output seating CSV.
@@ -112,9 +112,15 @@ enum Commands {
         /// Local-improvement swap iterations per attempt.
         #[arg(long, default_value_t = 200)]
         iterations: usize,
+        /// Global multiplier for closeness and proximity scoring.
+        #[arg(long, default_value_t = 1.0)]
+        proximity_weight: f64,
+        /// Penalty subtracted for every used table.
+        #[arg(long, default_value_t = 0.0)]
+        used_table_weight: f64,
         /// Weight applied to the penalty for deviating from recommended table size.
         #[arg(long, default_value_t = 1.0)]
-        recommended_weight: f64,
+        optimal_table_size_weight: f64,
     },
 
     /// Score a pre-existing seating CSV and print the aggregate score.
@@ -125,15 +131,21 @@ enum Commands {
         /// Path to the closeness CSV file.
         #[arg(long)]
         closeness: PathBuf,
-        /// Path to the tables JSON file.
+        /// Path to the tables CSV file.
         #[arg(long)]
         tables: PathBuf,
         /// Path to the seating CSV to score.
         #[arg(long)]
         seating: PathBuf,
+        /// Global multiplier for closeness and proximity scoring.
+        #[arg(long, default_value_t = 1.0)]
+        proximity_weight: f64,
+        /// Penalty subtracted for every used table.
+        #[arg(long, default_value_t = 0.0)]
+        used_table_weight: f64,
         /// Weight applied to the penalty for deviating from recommended table size.
         #[arg(long, default_value_t = 1.0)]
-        recommended_weight: f64,
+        optimal_table_size_weight: f64,
     },
 
     /// Render a seating CSV as an SVG or PNG seating plan.
@@ -141,7 +153,7 @@ enum Commands {
         /// Path to the people CSV file.
         #[arg(long)]
         people: PathBuf,
-        /// Path to the tables JSON file.
+        /// Path to the tables CSV file.
         #[arg(long)]
         tables: PathBuf,
         /// Path to the seating CSV to render.
@@ -178,7 +190,9 @@ fn main() -> Result<()> {
             attempts,
             solutions,
             iterations,
-            recommended_weight,
+            proximity_weight,
+            used_table_weight,
+            optimal_table_size_weight,
         } => {
             let project = seating_core::make_project(
                 &read_file(&people, "people")?,
@@ -193,7 +207,9 @@ fn main() -> Result<()> {
                     attempts,
                     iterations,
                     solutions,
-                    recommended_capacity_weight: recommended_weight,
+                    proximity_weight,
+                    used_table_weight,
+                    optimal_table_size_weight,
                 },
             )?;
             let best = result
@@ -213,7 +229,9 @@ fn main() -> Result<()> {
             closeness,
             tables,
             seating,
-            recommended_weight,
+            proximity_weight,
+            used_table_weight,
+            optimal_table_size_weight,
         } => {
             let project = seating_core::make_project(
                 &read_file(&people, "people")?,
@@ -221,8 +239,17 @@ fn main() -> Result<()> {
                 &read_file(&tables, "tables")?,
             )?;
             let assignments = parse_seating_csv(&read_file(&seating, "seating")?)?;
-            let score = score_solution(&project, &assignments, recommended_weight)
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let score = score_solution(
+                &project,
+                &assignments,
+                &OptimizationConfig {
+                    proximity_weight,
+                    used_table_weight,
+                    optimal_table_size_weight,
+                    ..OptimizationConfig::default()
+                },
+            )
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
             println!("Score: {score}");
         }
         Commands::Render {
@@ -234,7 +261,7 @@ fn main() -> Result<()> {
             let project = ProjectInput {
                 people: parse_people_csv(&read_file(&people, "people")?)?,
                 closeness_rules: Vec::new(),
-                table_types: parse_tables_json(&read_file(&tables, "tables")?)?,
+                table_types: parse_tables_csv(&read_file(&tables, "tables")?)?,
             };
             let assignments = parse_seating_csv(&read_file(&seating, "seating")?)?;
             let layout = build_layout(&project, &assignments)

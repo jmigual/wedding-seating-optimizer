@@ -4,12 +4,12 @@
 //!
 //! 1. **Effective pair score** – resolves person-pair and group-pair closeness
 //!    rules into a single scalar via [`effective_person_pair_score`].
-//! 2. **Solution score** – sums `effective_pair_score × proximity_weight(distance)`
-//!    across all same-table pairs via [`score_solution`], then applies a soft
-//!    penalty for deviation from recommended table occupancy.
+//! 2. **Solution score** – sums weighted same-table pair scores via
+//!    [`score_solution`], then applies global table-use and occupancy penalties.
 
 use crate::models::{
-    Person, ProjectInput, SeatingAssignment, TableShape, ValidationError, ValidationReport,
+    OptimizationConfig, Person, ProjectInput, SeatingAssignment, TableShape, ValidationError,
+    ValidationReport,
 };
 use crate::validation::{
     build_closeness_lookup, canonical_pair, generate_table_instances, validate_seating_solution,
@@ -122,15 +122,16 @@ pub fn effective_person_pair_score(
 ///
 /// For each pair of guests at the **same** table the contribution is:
 /// ```text
-/// effective_pair_score × proximity_weight(seat_distance)
+/// effective_pair_score × proximity_weight(seat_distance) × config.proximity_weight
 /// ```
 ///
 /// Pairs at **different** tables contribute 0 regardless of their closeness.
 ///
-/// Additionally, a soft penalty is applied for each table where the occupancy
-/// deviates from `recommended_people`:
+/// Additional global penalties are applied for every used table and for each
+/// used table where the occupancy deviates from `recommended_people`:
 /// ```text
-/// penalty = |occupancy - recommended_people| × recommended_weight
+/// table_penalty = used_table_count × config.used_table_weight
+/// size_penalty = |occupancy - recommended_people| × config.optimal_table_size_weight
 /// ```
 ///
 /// The closeness lookup is built **once** and reused for all pair evaluations,
@@ -141,7 +142,7 @@ pub fn effective_person_pair_score(
 pub fn score_solution(
     project: &ProjectInput,
     assignments: &[SeatingAssignment],
-    recommended_weight: f64,
+    config: &OptimizationConfig,
 ) -> Result<f64, ValidationReport> {
     validate_seating_solution(project, assignments)?;
 
@@ -180,10 +181,12 @@ pub fn score_solution(
                         perimeter_distance(a.seat_index, b.seat_index, table.max_people)
                     }
                 };
-                total += pair_score * default_proximity_weight(distance);
+                total += pair_score * default_proximity_weight(distance) * config.proximity_weight;
             }
         }
     }
+
+    total -= by_table.len() as f64 * config.used_table_weight;
 
     // Soft penalty for deviation from recommended occupancy.
     for table in &instances {
@@ -191,7 +194,7 @@ pub fn score_solution(
             let count = by_table.get(&table.number).map(|v| v.len()).unwrap_or(0);
             if count > 0 {
                 total -= (count as isize - recommended as isize).unsigned_abs() as f64
-                    * recommended_weight;
+                    * config.optimal_table_size_weight;
             }
         }
     }
