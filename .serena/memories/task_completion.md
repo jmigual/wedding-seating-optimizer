@@ -1,0 +1,1 @@
+After code changes, prefer the narrowest executable validation first. For Rust changes or release/build automation, run focused checks when possible, then at minimum cargo fmt --all, cargo clippy --workspace --all-targets -- -D warnings when relevant, and cargo test --workspace when behavior may be affected. Preserve existing style and do not revert unrelated user changes.

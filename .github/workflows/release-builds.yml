@@ -1,0 +1,92 @@
+name: Release Builds
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform.label }}
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - label: Linux
+            runner: ubuntu-latest
+            os: linux
+            archive_name: wedding-seating-optimizer-linux-x86_64.tar.gz
+            cli_bin: seating-cli
+            gui_bin: seating-gui
+          - label: Windows
+            runner: windows-latest
+            os: windows
+            archive_name: wedding-seating-optimizer-windows-x86_64.zip
+            cli_bin: seating-cli.exe
+            gui_bin: seating-gui.exe
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux GUI build dependencies
+        if: matrix.platform.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            libfontconfig1-dev \
+            libgl1-mesa-dev \
+            libudev-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxinerama-dev \
+            libxi-dev \
+            libxkbcommon-dev \
+            libxrandr-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      - name: Build release binaries
+        run: cargo build --release -p seating-cli -p seating-gui
+
+      - name: Package release archive (Linux)
+        if: matrix.platform.os == 'linux'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/${{ matrix.platform.cli_bin }} dist/
+          cp target/release/${{ matrix.platform.gui_bin }} dist/
+          tar -C dist -czf ${{ matrix.platform.archive_name }} \
+            ${{ matrix.platform.cli_bin }} \
+            ${{ matrix.platform.gui_bin }}
+
+      - name: Package release archive (Windows)
+        if: matrix.platform.os == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/release/${{ matrix.platform.cli_bin }}" dist
+          Copy-Item "target/release/${{ matrix.platform.gui_bin }}" dist
+          Compress-Archive \
+            -Path "dist/${{ matrix.platform.cli_bin }}", "dist/${{ matrix.platform.gui_bin }}" \
+            -DestinationPath "${{ matrix.platform.archive_name }}" \
+            -Force
+
+      - name: Upload archive to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.platform.archive_name }}
+          overwrite_files: true

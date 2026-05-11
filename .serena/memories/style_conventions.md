@@ -1,0 +1,1 @@
+Rust code follows idiomatic community conventions plus .github/instructions/rust.instructions.md: prioritize readability/safety/maintainability, prefer Result-based error handling, avoid unwrap/expect in normal paths, keep main.rs/lib.rs thin, use rustfmt and clippy, prefer borrowing over cloning, and maintain descriptive naming/docs/tests.
