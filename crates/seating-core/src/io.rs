@@ -16,7 +16,7 @@ use crate::models::{
     TableTypeConfig, TableTypeId, ValidationError, PROJECT_FILE_VERSION,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 // ── Internal deserialization structs ──────────────────────────────────────────
 // These are intentionally private; callers always receive the public domain types.
@@ -422,16 +422,21 @@ fn table_shape_label(shape: &TableShape) -> &'static str {
     }
 }
 
-/// Split a pipe-separated string into trimmed, non-empty tokens.
+/// Split a pipe-separated string into trimmed, non-empty tokens, deduped
+/// order-preservingly. Its only caller parses a person's `groups` field,
+/// where a repeated group (e.g. `"family|family"`) must not produce a
+/// person holding the same group twice.
 fn parse_pipe_separated(s: &str) -> Vec<String> {
     if s.is_empty() {
-        vec![]
-    } else {
-        s.split('|')
-            .filter(|g| !g.trim().is_empty())
-            .map(|g| g.trim().to_string())
-            .collect()
+        return vec![];
     }
+    let mut seen = HashSet::new();
+    s.split('|')
+        .map(str::trim)
+        .filter(|g| !g.is_empty())
+        .filter(|&g| seen.insert(g))
+        .map(str::to_string)
+        .collect()
 }
 
 /// Return `Some(s.to_string())` if `s` is non-empty, otherwise `None`.

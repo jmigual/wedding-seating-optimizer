@@ -4,8 +4,10 @@
 //! parsing or project-inspection logic outside `seating-core`.
 
 use crate::models::{
-    GroupId, Person, TableTypeConfig, TableTypeId, ValidationError, ValidationReport,
+    ClosenessRule, GroupId, Person, ProjectInput, SeatingAssignment, TableTypeConfig, TableTypeId,
+    ValidationError, ValidationReport,
 };
+use crate::validation::{generate_table_instances, validate_seating_solution};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Describes an identifier that can be referenced by a closeness rule.
@@ -49,7 +51,7 @@ where
 }
 
 /// Collect the distinct group IDs present across all people in sorted order.
-pub(crate) fn collect_group_ids(people: &[Person]) -> Vec<GroupId> {
+pub fn collect_group_ids(people: &[Person]) -> Vec<GroupId> {
     let mut groups = BTreeSet::new();
     for person in people {
         for group in &person.groups {
@@ -76,6 +78,44 @@ pub fn reference_id_options(people: &[Person]) -> Vec<ReferenceIdOption> {
     }
     options.sort_by(|left, right| left.label.cmp(&right.label));
     options
+}
+
+/// Rename group `old` to `new` everywhere it is referenced.
+///
+/// Updates every person's `groups` list — deduping if the person already
+/// belongs to `new` — and rewrites any closeness rule id (`left_id`/
+/// `right_id`) equal to `old`. A no-op if `new` is blank or equal to `old`.
+pub fn rename_group(people: &mut [Person], rules: &mut [ClosenessRule], old: &str, new: &str) {
+    let new = new.trim();
+    if new.is_empty() || new == old {
+        return;
+    }
+    for person in people.iter_mut() {
+        if person.groups.iter().any(|group| group == old) {
+            person.groups.retain(|group| group != old);
+            if !person.groups.iter().any(|group| group == new) {
+                person.groups.push(new.to_string());
+            }
+        }
+    }
+    for rule in rules.iter_mut() {
+        if rule.left_id == old {
+            rule.left_id = new.to_string();
+        }
+        if rule.right_id == old {
+            rule.right_id = new.to_string();
+        }
+    }
+}
+
+/// Remove group `group` everywhere it is referenced: from every person's
+/// `groups` list, and any closeness rule that names it as `left_id` or
+/// `right_id`.
+pub fn remove_group(people: &mut [Person], rules: &mut Vec<ClosenessRule>, group: &str) {
+    for person in people.iter_mut() {
+        person.groups.retain(|g| g != group);
+    }
+    rules.retain(|rule| rule.left_id != group && rule.right_id != group);
 }
 
 /// Parse an optional non-negative integer field from structured-editor input.
@@ -187,6 +227,88 @@ pub fn reference_label(id: &str, options: &[ReferenceIdOption]) -> String {
         .find(|option| option.id == id)
         .map(|option| option.label.clone())
         .unwrap_or_else(|| format!("{id} — unknown"))
+}
+
+// ── Seat drag-and-drop ────────────────────────────────────────────────────────
+
+/// Outcome of [`apply_seat_drop`]: whether the target seat was empty (a plain
+/// move) or occupied (a swap of the two guests' positions).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeatDropOutcome {
+    /// The target seat was empty; the dragged guest was placed there.
+    Moved,
+    /// The target seat was occupied; the two guests swapped positions.
+    Swapped,
+}
+
+/// Apply a drag-and-drop of `person_id` onto (`target_table`, `target_seat`).
+///
+/// An empty target seat results in a move; an occupied one results in a swap
+/// of the two guests' `(table, seat)` positions. The candidate result is
+/// validated via [`validate_seating_solution`], so locks, table_type
+/// compatibility, capacity, and seat range are all enforced by that call.
+/// The input `assignments` is not mutated on failure.
+///
+/// A no-op drop (dropping a guest onto their own current seat) always
+/// succeeds and returns [`SeatDropOutcome::Moved`] with `assignments`
+/// unchanged.
+pub fn apply_seat_drop(
+    project: &ProjectInput,
+    assignments: &[SeatingAssignment],
+    person_id: &str,
+    target_table: usize,
+    target_seat: usize,
+) -> Result<(Vec<SeatingAssignment>, SeatDropOutcome), ValidationReport> {
+    let Some(mover_index) = assignments.iter().position(|a| a.person_id == person_id) else {
+        return Err(ValidationReport {
+            errors: vec![ValidationError::MissingOrDuplicatePerson(
+                person_id.to_string(),
+            )],
+        });
+    };
+
+    if assignments[mover_index].table_number == target_table
+        && assignments[mover_index].seat_index == target_seat
+    {
+        return Ok((assignments.to_vec(), SeatDropOutcome::Moved));
+    }
+
+    let instances = generate_table_instances(project);
+    let target_table_type = instances
+        .iter()
+        .find(|instance| instance.number == target_table)
+        .map(|instance| instance.table_type.clone())
+        .unwrap_or_else(|| assignments[mover_index].table_type.clone());
+
+    let occupant_index = assignments
+        .iter()
+        .position(|a| a.table_number == target_table && a.seat_index == target_seat);
+
+    let mut updated = assignments.to_vec();
+    let outcome = if let Some(occupant_index) = occupant_index {
+        let mover_table = updated[mover_index].table_number;
+        let mover_seat = updated[mover_index].seat_index;
+        let mover_table_type = updated[mover_index].table_type.clone();
+
+        updated[mover_index].table_number = target_table;
+        updated[mover_index].seat_index = target_seat;
+        updated[mover_index].table_type = target_table_type;
+
+        updated[occupant_index].table_number = mover_table;
+        updated[occupant_index].seat_index = mover_seat;
+        updated[occupant_index].table_type = mover_table_type;
+
+        SeatDropOutcome::Swapped
+    } else {
+        updated[mover_index].table_number = target_table;
+        updated[mover_index].seat_index = target_seat;
+        updated[mover_index].table_type = target_table_type;
+
+        SeatDropOutcome::Moved
+    };
+
+    validate_seating_solution(project, &updated)?;
+    Ok((updated, outcome))
 }
 
 // ── ValidationError association helpers ───────────────────────────────────────
@@ -390,6 +512,64 @@ mod tests {
         }];
         assert_eq!(reference_label("p1", &options), "p1 — Alice — person");
         assert_eq!(reference_label("missing", &options), "missing — unknown");
+    }
+
+    fn person(id: &str, groups: &[&str]) -> Person {
+        Person {
+            id: id.to_string(),
+            name: id.to_string(),
+            table_type: None,
+            groups: groups.iter().map(|g| g.to_string()).collect(),
+            locked_table: None,
+            locked_seat: None,
+        }
+    }
+
+    #[test]
+    fn rename_group_updates_people_and_rules() {
+        let mut people = vec![person("p1", &["family"]), person("p2", &["friends"])];
+        let mut rules = vec![ClosenessRule {
+            left_id: "family".to_string(),
+            right_id: "p2".to_string(),
+            score: 2.0,
+        }];
+        rename_group(&mut people, &mut rules, "family", "relatives");
+        assert_eq!(people[0].groups, vec!["relatives".to_string()]);
+        assert_eq!(people[1].groups, vec!["friends".to_string()]);
+        assert_eq!(rules[0].left_id, "relatives");
+    }
+
+    #[test]
+    fn rename_group_dedupes_when_person_already_has_new_name() {
+        let mut people = vec![person("p1", &["family", "relatives"])];
+        let mut rules: Vec<ClosenessRule> = Vec::new();
+        rename_group(&mut people, &mut rules, "family", "relatives");
+        assert_eq!(people[0].groups, vec!["relatives".to_string()]);
+    }
+
+    #[test]
+    fn remove_group_drops_from_people_and_rules() {
+        let mut people = vec![
+            person("p1", &["family", "friends"]),
+            person("p2", &["family"]),
+        ];
+        let mut rules = vec![
+            ClosenessRule {
+                left_id: "family".to_string(),
+                right_id: "p2".to_string(),
+                score: 2.0,
+            },
+            ClosenessRule {
+                left_id: "p1".to_string(),
+                right_id: "p2".to_string(),
+                score: 1.0,
+            },
+        ];
+        remove_group(&mut people, &mut rules, "family");
+        assert_eq!(people[0].groups, vec!["friends".to_string()]);
+        assert!(people[1].groups.is_empty());
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].left_id, "p1");
     }
 
     #[test]

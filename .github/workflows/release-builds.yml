@@ -22,12 +22,21 @@ jobs:
             archive_name: wedding-seating-optimizer-linux-x86_64.tar.gz
             cli_bin: seating-cli
             gui_bin: seating-gui
+            egui_bin: seating-gui-egui
           - label: Windows
             runner: windows-latest
             os: windows
             archive_name: wedding-seating-optimizer-windows-x86_64.zip
             cli_bin: seating-cli.exe
             gui_bin: seating-gui.exe
+            egui_bin: seating-gui-egui.exe
+          - label: macOS
+            runner: macos-latest
+            os: macos
+            archive_name: wedding-seating-optimizer-macos-aarch64.tar.gz
+            cli_bin: seating-cli
+            gui_bin: seating-gui
+            egui_bin: seating-gui-egui
 
     steps:
       - name: Check out repository
@@ -60,18 +69,20 @@ jobs:
             . -> target
 
       - name: Build release binaries
-        run: cargo build --release -p seating-cli -p seating-gui
+        run: cargo build --release -p seating-cli -p seating-gui -p seating-gui-egui
 
-      - name: Package release archive (Linux)
-        if: matrix.platform.os == 'linux'
+      - name: Package release archive (Linux/macOS)
+        if: matrix.platform.os != 'windows'
         shell: bash
         run: |
           mkdir -p dist
           cp target/release/${{ matrix.platform.cli_bin }} dist/
           cp target/release/${{ matrix.platform.gui_bin }} dist/
+          cp target/release/${{ matrix.platform.egui_bin }} dist/
           tar -C dist -czf ${{ matrix.platform.archive_name }} \
             ${{ matrix.platform.cli_bin }} \
-            ${{ matrix.platform.gui_bin }}
+            ${{ matrix.platform.gui_bin }} \
+            ${{ matrix.platform.egui_bin }}
 
       - name: Package release archive (Windows)
         if: matrix.platform.os == 'windows'
@@ -80,7 +91,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item "target/release/${{ matrix.platform.cli_bin }}" dist
           Copy-Item "target/release/${{ matrix.platform.gui_bin }}" dist
-          Compress-Archive -Path "dist/${{ matrix.platform.cli_bin }}", "dist/${{ matrix.platform.gui_bin }}" -DestinationPath "${{ matrix.platform.archive_name }}" -Force
+          Copy-Item "target/release/${{ matrix.platform.egui_bin }}" dist
+          Compress-Archive -Path "dist/${{ matrix.platform.cli_bin }}", "dist/${{ matrix.platform.gui_bin }}", "dist/${{ matrix.platform.egui_bin }}" -DestinationPath "${{ matrix.platform.archive_name }}" -Force
 
       - name: Upload archive to GitHub release
         uses: softprops/action-gh-release@v2

@@ -44,6 +44,31 @@ impl Default for RenderOptions {
     }
 }
 
+/// Navy color palette shared by SVG/PNG rendering and the GUI canvas, so both
+/// draw the same plan in the same colors. RGB components, `0..=255`.
+pub const COLOR_BACKGROUND: (u8, u8, u8) = (0x10, 0x15, 0x1c);
+/// Table card fill.
+pub const COLOR_CARD: (u8, u8, u8) = (0x17, 0x21, 0x2b);
+/// Card and unoccupied-seat stroke.
+pub const COLOR_STROKE: (u8, u8, u8) = (0x3f, 0x53, 0x68);
+/// Table surface fill.
+pub const COLOR_TABLE_FILL: (u8, u8, u8) = (0x35, 0x50, 0x70);
+/// Table surface stroke.
+pub const COLOR_TABLE_STROKE: (u8, u8, u8) = (0x90, 0xe0, 0xef);
+/// Occupied-seat fill; also the default label text color.
+pub const COLOR_SEAT_FILL: (u8, u8, u8) = (0xf5, 0xf7, 0xfa);
+/// Occupied-seat stroke.
+pub const COLOR_SEAT_STROKE: (u8, u8, u8) = (0x5c, 0x67, 0x73);
+/// Guest-name label text.
+pub const COLOR_GUEST_TEXT: (u8, u8, u8) = (0xdb, 0xe7, 0xff);
+/// Muted/secondary text.
+pub const COLOR_MUTED: (u8, u8, u8) = (0xb8, 0xc1, 0xcc);
+
+/// Format an RGB tuple as a `#rrggbb` SVG color.
+fn hex(color: (u8, u8, u8)) -> String {
+    format!("#{:02x}{:02x}{:02x}", color.0, color.1, color.2)
+}
+
 /// A computed seating-plan layout.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SeatingLayout {
@@ -74,6 +99,26 @@ pub struct LayoutTable {
     pub height: f32,
     /// Concrete seat positions around the table, one per capacity slot.
     pub seats: Vec<LayoutSeat>,
+    /// Geometry of the table surface itself, computed from the same center
+    /// used to place `seats` so renderers never re-derive divergent geometry.
+    pub surface: TableSurface,
+}
+
+/// Table-surface geometry for one [`LayoutTable`], computed once in
+/// [`build_layout`] and consumed by both `render_svg` and any UI drawing the
+/// same layout, so the surface and its seats never drift apart.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TableSurface {
+    /// Round table: center and radius. `cx`/`cy` are the same center used to
+    /// place the table's seats.
+    Round { cx: f32, cy: f32, radius: f32 },
+    /// Rectangular/square table: an inset surface rect.
+    Rect {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    },
 }
 
 /// One rendered seat marker within a table layout.
@@ -149,6 +194,7 @@ pub fn build_layout(
             &options,
             table_assignments,
         );
+        let surface = build_surface(&table.shape, x, y, &options);
         tables.push(LayoutTable {
             table_number: table.number,
             table_type: table.table_type.clone(),
@@ -158,6 +204,7 @@ pub fn build_layout(
             width: options.table_width,
             height: options.table_height,
             seats,
+            surface,
         });
     }
 
@@ -195,11 +242,18 @@ pub fn render_svg(layout: &SeatingLayout, options: &RenderOptions) -> String {
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{:.0}" height="{:.0}" viewBox="0 0 {:.0} {:.0}">"#,
         layout.width, layout.height, layout.width, layout.height
     ));
-    svg.push_str("<rect width=\"100%\" height=\"100%\" fill=\"#10151c\"/>");
     svg.push_str(&format!(
-        "<style>text {{ fill: #f5f7fa; font-family: Arial, Helvetica, sans-serif; font-size: {}px; }} .muted {{ fill: #b8c1cc; }} .seat-index {{ fill: #10151c; font-size: {}px; font-weight: bold; }} .guest {{ fill: #dbe7ff; font-size: {}px; }}</style>",
+        "<rect width=\"100%\" height=\"100%\" fill=\"{}\"/>",
+        hex(COLOR_BACKGROUND)
+    ));
+    svg.push_str(&format!(
+        "<style>text {{ fill: {}; font-family: Arial, Helvetica, sans-serif; font-size: {}px; }} .muted {{ fill: {}; }} .seat-index {{ fill: {}; font-size: {}px; font-weight: bold; }} .guest {{ fill: {}; font-size: {}px; }}</style>",
+        hex(COLOR_SEAT_FILL),
         options.font_size,
+        hex(COLOR_MUTED),
+        hex(COLOR_BACKGROUND),
         options.font_size - 3.0,
+        hex(COLOR_GUEST_TEXT),
         options.font_size - 1.0
     ));
 
@@ -207,8 +261,8 @@ pub fn render_svg(layout: &SeatingLayout, options: &RenderOptions) -> String {
         let label_x = table.x + table.width / 2.0;
         let (title_y, subtitle_y) = header_positions(table.y, options);
         svg.push_str(&format!(
-            "<g><rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"18\" fill=\"#17212b\" stroke=\"#3f5368\" stroke-width=\"1.5\"/>",
-            table.x, table.y, table.width, table.height
+            "<g><rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"18\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1.5\"/>",
+            table.x, table.y, table.width, table.height, hex(COLOR_CARD), hex(COLOR_STROKE)
         ));
         svg.push_str(&format!(
             "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">Table {} — {}</text>",
@@ -224,28 +278,21 @@ pub fn render_svg(layout: &SeatingLayout, options: &RenderOptions) -> String {
             shape_label(&table.shape)
         ));
 
-        match table.shape {
-            TableShape::Round => {
-                let (center_x, center_y, ring_radius) =
-                    round_table_metrics(table.x, table.y, options);
-                // The table surface sits inside the seat ring, leaving room
-                // for the seat markers themselves.
-                let surface_radius = (ring_radius - options.seat_radius - 6.0).max(20.0);
+        match &table.surface {
+            TableSurface::Round { cx, cy, radius } => {
                 svg.push_str(&format!(
-                    "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"#355070\" stroke=\"#90e0ef\" stroke-width=\"2\"/>",
-                    center_x, center_y, surface_radius
+                    "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"{}\" stroke=\"{}\" stroke-width=\"2\"/>",
+                    cx, cy, radius, hex(COLOR_TABLE_FILL), hex(COLOR_TABLE_STROKE)
                 ));
             }
-            // Rectangular/square insets are fixed proportions of the default
-            // 240x220 card rather than derived from RenderOptions; a
-            // table_width/table_height far below the defaults can crowd
-            // seats against the card edge.
-            TableShape::Rectangular | TableShape::Square => svg.push_str(&format!(
-                "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"12\" fill=\"#355070\" stroke=\"#90e0ef\" stroke-width=\"2\"/>",
-                table.x + 60.0,
-                table.y + 72.0,
-                table.width - 120.0,
-                table.height - 110.0,
+            TableSurface::Rect {
+                x,
+                y,
+                width,
+                height,
+            } => svg.push_str(&format!(
+                "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"12\" fill=\"{}\" stroke=\"{}\" stroke-width=\"2\"/>",
+                x, y, width, height, hex(COLOR_TABLE_FILL), hex(COLOR_TABLE_STROKE)
             )),
         }
 
@@ -258,8 +305,8 @@ pub fn render_svg(layout: &SeatingLayout, options: &RenderOptions) -> String {
             }
             if let Some(person_name) = seat.person_name.as_deref() {
                 svg.push_str(&format!(
-                    "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"#f5f7fa\" stroke=\"#5c6773\" stroke-width=\"1.5\"/>",
-                    seat.x, seat.y, options.seat_radius
+                    "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1.5\"/>",
+                    seat.x, seat.y, options.seat_radius, hex(COLOR_SEAT_FILL), hex(COLOR_SEAT_STROKE)
                 ));
                 svg.push_str(&format!(
                     "<text class=\"seat-index\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" dominant-baseline=\"middle\">{}</text>",
@@ -277,8 +324,8 @@ pub fn render_svg(layout: &SeatingLayout, options: &RenderOptions) -> String {
             } else {
                 // Unoccupied capacity slot: hollow, dimmed marker.
                 svg.push_str(&format!(
-                    "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"none\" stroke=\"#3f5368\" stroke-width=\"1.5\" stroke-dasharray=\"3,3\" opacity=\"0.6\"/>",
-                    seat.x, seat.y, options.seat_radius
+                    "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"none\" stroke=\"{}\" stroke-width=\"1.5\" stroke-dasharray=\"3,3\" opacity=\"0.6\"/>",
+                    seat.x, seat.y, options.seat_radius, hex(COLOR_STROKE)
                 ));
                 svg.push_str(&format!(
                     "<text class=\"muted\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" dominant-baseline=\"middle\" font-size=\"{:.1}\">{}</text>",
@@ -369,6 +416,35 @@ fn round_table_metrics(x: f32, y: f32, options: &RenderOptions) -> (f32, f32, f3
     let horizontal_radius = (options.table_width / 2.0 - options.seat_radius - 20.0).max(20.0);
     let radius = vertical_radius.min(horizontal_radius);
     (center_x, center_y, radius)
+}
+
+/// Table-surface geometry for `shape`, using the same center/insets as the
+/// corresponding `build_*_seats` function so the drawn surface never drifts
+/// from the seat ring/perimeter.
+fn build_surface(shape: &TableShape, x: f32, y: f32, options: &RenderOptions) -> TableSurface {
+    match shape {
+        TableShape::Round => {
+            let (center_x, center_y, ring_radius) = round_table_metrics(x, y, options);
+            // The table surface sits inside the seat ring, leaving room for
+            // the seat markers themselves.
+            let surface_radius = (ring_radius - options.seat_radius - 6.0).max(20.0);
+            TableSurface::Round {
+                cx: center_x,
+                cy: center_y,
+                radius: surface_radius,
+            }
+        }
+        // Rectangular/square insets are fixed proportions of the default
+        // 240x220 card rather than derived from RenderOptions; a
+        // table_width/table_height far below the defaults can crowd seats
+        // against the card edge.
+        TableShape::Rectangular | TableShape::Square => TableSurface::Rect {
+            x: x + 60.0,
+            y: y + 72.0,
+            width: options.table_width - 120.0,
+            height: options.table_height - 110.0,
+        },
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

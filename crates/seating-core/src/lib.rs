@@ -51,9 +51,10 @@ pub mod validation;
 // ── Public re-exports ─────────────────────────────────────────────────────────
 
 pub use editing::{
-    build_table_type_map, parse_f64_value, parse_optional_usize_value, parse_people_per_side,
-    parse_required_usize_value, reference_id_options, reference_label, reference_matches,
-    rules_match, ReferenceIdOption,
+    apply_seat_drop, build_table_type_map, collect_group_ids, parse_f64_value,
+    parse_optional_usize_value, parse_people_per_side, parse_required_usize_value,
+    reference_id_options, reference_label, reference_matches, remove_group, rename_group,
+    rules_match, ReferenceIdOption, SeatDropOutcome,
 };
 pub use io::{
     make_project, parse_closeness_csv, parse_people_csv, parse_project_file, parse_seating_csv,
@@ -68,7 +69,8 @@ pub use models::{
 pub use optimizer::{HeuristicOptimizer, SeatingOptimizer};
 pub use render::{
     build_layout, render_png, render_svg, LayoutSeat, LayoutTable, RenderOptions, RenderingError,
-    SeatingLayout,
+    SeatingLayout, TableSurface, COLOR_BACKGROUND, COLOR_CARD, COLOR_GUEST_TEXT, COLOR_MUTED,
+    COLOR_SEAT_FILL, COLOR_SEAT_STROKE, COLOR_STROKE, COLOR_TABLE_FILL, COLOR_TABLE_STROKE,
 };
 pub use scoring::{
     circular_distance, default_proximity_weight, effective_person_pair_score, perimeter_distance,

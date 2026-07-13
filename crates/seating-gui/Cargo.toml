@@ -8,3 +8,6 @@ license.workspace = true
 iced = { workspace = true, features = ["svg", "image"] }
 rfd.workspace = true
 seating-core = { path = "../seating-core" }
+
+[build-dependencies]
+winresource = { workspace = true }

@@ -2,6 +2,7 @@
 //!
 //! Native desktop application for the wedding seating optimizer, built with
 //! [iced](https://github.com/iced-rs/iced).
+#![windows_subsystem = "windows"]
 
 mod app;
 mod components;

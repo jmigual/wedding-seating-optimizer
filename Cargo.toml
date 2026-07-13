@@ -3,6 +3,7 @@ members = [
   "crates/seating-core",
   "crates/seating-cli",
   "crates/seating-gui",
+  "crates/seating-gui-egui",
 ]
 resolver = "2"
 
@@ -13,9 +14,11 @@ license = "MIT"
 authors = ["wedding-seating contributors"]
 
 [workspace.dependencies]
+winresource = "0.1"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 csv = "1.4"
+eframe = { version = "0.27.2", default-features = false }
 iced = "0.12"
 rand = "0.8"
 rfd = "0.15"

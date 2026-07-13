@@ -282,6 +282,14 @@ fn people_csv_parsing_works() {
 }
 
 #[test]
+fn people_csv_dedupes_repeated_groups() {
+    let csv =
+        "id,name,table_type,groups,locked_table,locked_seat\np1,Alice,,family|family|friends,,\n";
+    let people = parse_people_csv(csv).unwrap();
+    assert_eq!(people[0].groups, vec!["family", "friends"]);
+}
+
+#[test]
 fn structured_people_round_trip_csv_works() {
     let csv = write_people_csv(&sample_people()).unwrap();
     assert_eq!(parse_people_csv(&csv).unwrap(), sample_people());
@@ -422,6 +430,33 @@ fn round_table_layout_generation_places_seats_circularly() {
     assert!(table.seats[0].y < table.seats[1].y);
     assert!(table.seats[0].y < table.seats[3].y);
     assert_eq!(table.seats[0].person_name.as_deref(), Some("Alice"));
+}
+
+/// Regression test: the canvas used to re-derive a round table's surface
+/// center from the card rect instead of reusing the seat-ring center,
+/// visibly offsetting the drawn table from its seats. `build_layout` must
+/// expose one surface center that both the seat ring and the surface use.
+#[test]
+fn round_table_surface_center_matches_seat_ring_center() {
+    let layout = build_layout(&round_project(), &round_assignments()).unwrap();
+    let table = &layout.tables[0];
+    let TableSurface::Round { cx, cy, .. } = &table.surface else {
+        panic!("expected a round surface for a round table");
+    };
+
+    assert_eq!(table.seats.len(), 4);
+    let distances: Vec<f32> = table
+        .seats
+        .iter()
+        .map(|seat| ((seat.x - cx).powi(2) + (seat.y - cy).powi(2)).sqrt())
+        .collect();
+    let first = distances[0];
+    for distance in &distances {
+        assert!(
+            (distance - first).abs() < 0.01,
+            "seat distances from surface center should be equal: {distances:?}"
+        );
+    }
 }
 
 #[test]
@@ -625,6 +660,11 @@ fn png_rendering_includes_guest_text_when_fonts_are_loaded() {
         width: 240.0,
         height: 220.0,
         seats: vec![occupied_seat],
+        surface: TableSurface::Round {
+            cx: 144.0,
+            cy: 134.0,
+            radius: 80.0,
+        },
     };
     let layout_with_name = SeatingLayout {
         width: 288.0,
@@ -1560,6 +1600,233 @@ fn svg_escapes_special_characters_in_names() {
 }
 
 // ── Seating CSV round-trip ───────────────────────────────────────────────
+
+// ── apply_seat_drop ───────────────────────────────────────────────────────
+
+/// Fixture covering the drag-and-drop scenarios below: two round_4 tables
+/// (1, 2) and one square_4 table (3). p3/p4 are locked at table 1 seats 0/1;
+/// p1 (table 1 seat 2) and table 1 seat 3 are free to move; p2 sits alone at
+/// table 2; p5 requires the square table type.
+fn drop_project() -> ProjectInput {
+    let people = vec![
+        Person {
+            id: "p1".to_string(),
+            name: "Alice".to_string(),
+            table_type: None,
+            groups: vec![],
+            locked_table: None,
+            locked_seat: None,
+        },
+        Person {
+            id: "p2".to_string(),
+            name: "Bob".to_string(),
+            table_type: None,
+            groups: vec![],
+            locked_table: None,
+            locked_seat: None,
+        },
+        Person {
+            id: "p3".to_string(),
+            name: "Cara".to_string(),
+            table_type: None,
+            groups: vec![],
+            locked_table: Some(1),
+            locked_seat: Some(0),
+        },
+        Person {
+            id: "p4".to_string(),
+            name: "Dan".to_string(),
+            table_type: None,
+            groups: vec![],
+            locked_table: Some(1),
+            locked_seat: Some(1),
+        },
+        Person {
+            id: "p5".to_string(),
+            name: "Eve".to_string(),
+            table_type: Some("square_4".to_string()),
+            groups: vec![],
+            locked_table: None,
+            locked_seat: None,
+        },
+    ];
+    let table_types = build_table_type_map(vec![
+        (
+            "round_4".to_string(),
+            TableTypeConfig {
+                shape: TableShape::Round,
+                people_per_side: None,
+                max_people: 4,
+                recommended_people: None,
+                min_people: None,
+                number_of_tables: Some(2),
+            },
+        ),
+        (
+            "square_4".to_string(),
+            TableTypeConfig {
+                shape: TableShape::Square,
+                people_per_side: Some(vec![1, 1, 1, 1]),
+                max_people: 4,
+                recommended_people: None,
+                min_people: None,
+                number_of_tables: Some(1),
+            },
+        ),
+    ])
+    .unwrap();
+    ProjectInput {
+        people,
+        closeness_rules: vec![],
+        table_types,
+    }
+}
+
+fn drop_assignments() -> Vec<SeatingAssignment> {
+    vec![
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 2,
+            person_id: "p1".to_string(),
+            person_name: "Alice".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 2,
+            table_type: "round_4".to_string(),
+            seat_index: 0,
+            person_id: "p2".to_string(),
+            person_name: "Bob".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 0,
+            person_id: "p3".to_string(),
+            person_name: "Cara".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 1,
+            person_id: "p4".to_string(),
+            person_name: "Dan".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 3,
+            table_type: "square_4".to_string(),
+            seat_index: 0,
+            person_id: "p5".to_string(),
+            person_name: "Eve".to_string(),
+        },
+    ]
+}
+
+#[test]
+fn apply_seat_drop_moves_into_empty_seat() {
+    let project = drop_project();
+    let assignments = drop_assignments();
+
+    let (updated, outcome) = apply_seat_drop(&project, &assignments, "p1", 1, 3).unwrap();
+
+    assert_eq!(outcome, SeatDropOutcome::Moved);
+    let p1 = updated.iter().find(|a| a.person_id == "p1").unwrap();
+    assert_eq!((p1.table_number, p1.seat_index), (1, 3));
+    // Original slice is untouched.
+    assert_eq!(assignments, drop_assignments());
+}
+
+#[test]
+fn apply_seat_drop_swaps_occupied_seat() {
+    let project = drop_project();
+    let assignments = drop_assignments();
+
+    let (updated, outcome) = apply_seat_drop(&project, &assignments, "p1", 2, 0).unwrap();
+
+    assert_eq!(outcome, SeatDropOutcome::Swapped);
+    let p1 = updated.iter().find(|a| a.person_id == "p1").unwrap();
+    let p2 = updated.iter().find(|a| a.person_id == "p2").unwrap();
+    assert_eq!((p1.table_number, p1.seat_index), (2, 0));
+    assert_eq!((p2.table_number, p2.seat_index), (1, 2));
+}
+
+#[test]
+fn apply_seat_drop_onto_own_seat_is_a_no_op() {
+    let project = drop_project();
+    let assignments = drop_assignments();
+
+    let (updated, outcome) = apply_seat_drop(&project, &assignments, "p1", 1, 2).unwrap();
+
+    assert_eq!(outcome, SeatDropOutcome::Moved);
+    assert_eq!(updated, assignments);
+}
+
+#[test]
+fn apply_seat_drop_refuses_moving_a_locked_seat_guest() {
+    let project = drop_project();
+    let assignments = drop_assignments();
+
+    let err = apply_seat_drop(&project, &assignments, "p3", 1, 3).unwrap_err();
+
+    assert!(err.errors.iter().any(|e| matches!(
+        e,
+        ValidationError::SeatingViolatesLockedSeat {
+            person_id,
+            locked_seat: 0,
+            assigned_seat: 3,
+        } if person_id == "p3"
+    )));
+}
+
+#[test]
+fn apply_seat_drop_refuses_swap_that_breaks_other_guests_locked_seat() {
+    let project = drop_project();
+    let assignments = drop_assignments();
+
+    // p4 is locked to (table 1, seat 1); swapping p1 onto p4's seat would
+    // relocate p4 to p1's old seat (table 1, seat 2), breaking their lock.
+    let err = apply_seat_drop(&project, &assignments, "p1", 1, 1).unwrap_err();
+
+    assert!(err.errors.iter().any(|e| matches!(
+        e,
+        ValidationError::SeatingViolatesLockedSeat {
+            person_id,
+            locked_seat: 1,
+            assigned_seat: 2,
+        } if person_id == "p4"
+    )));
+}
+
+#[test]
+fn apply_seat_drop_refuses_table_type_mismatch() {
+    let project = drop_project();
+    let assignments = drop_assignments();
+
+    // p5 requires square_4 but the drop target is a round_4 table.
+    let err = apply_seat_drop(&project, &assignments, "p5", 1, 3).unwrap_err();
+
+    assert!(err
+        .errors
+        .iter()
+        .any(|e| matches!(e, ValidationError::SeatingPersonTableTypeMismatch { person_id, .. } if person_id == "p5")));
+}
+
+#[test]
+fn apply_seat_drop_refuses_out_of_range_seat_index() {
+    let project = drop_project();
+    let assignments = drop_assignments();
+
+    let err = apply_seat_drop(&project, &assignments, "p1", 1, 99).unwrap_err();
+
+    assert!(err.errors.iter().any(|e| matches!(
+        e,
+        ValidationError::SeatIndexOutOfRange {
+            person_id,
+            seat: 99,
+            capacity: 4,
+        } if person_id == "p1"
+    )));
+}
 
 #[test]
 fn seating_csv_round_trip_is_sorted() {
