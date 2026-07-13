@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use iced::widget::{button, container, row, svg, text, Button, Container};
 use iced::{theme, Element, Length, Theme};
 
@@ -25,6 +23,13 @@ pub(crate) fn danger_button<'a>(label: &'a str, message: Msg) -> Button<'a, Msg,
         .on_press(message)
         .padding([8, 12])
         .style(theme::Button::custom(AppButtonStyle::danger()))
+}
+
+pub(crate) fn chip_button<'a>(label: String, message: Msg) -> Button<'a, Msg, Theme> {
+    button(text(label).size(12))
+        .on_press(message)
+        .padding([5, 9])
+        .style(theme::Button::custom(AppButtonStyle::chip()))
 }
 
 pub(crate) fn spacer<'a>() -> Container<'a, Msg, Theme> {

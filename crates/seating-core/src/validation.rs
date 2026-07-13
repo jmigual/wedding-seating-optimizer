@@ -11,7 +11,8 @@
 //! between validation, scoring, and the optimizer.
 
 use crate::models::{
-    ProjectInput, SeatingAssignment, TableInstance, TableShape, ValidationError, ValidationReport,
+    ClosenessRule, Person, ProjectInput, SeatingAssignment, TableInstance, TableShape, TableTypeId,
+    ValidationError, ValidationReport,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -21,9 +22,16 @@ use std::collections::{HashMap, HashSet};
 ///
 /// For each type:
 /// - If `number_of_tables` is specified, exactly that many instances are created.
-/// - Otherwise, the count defaults to `max(ceil(person_count / max_people), max_locked_table_number)`,
-///   which is a safe upper bound ensuring every lock can be satisfied without
-///   generating an excessive number of instances.
+/// - Otherwise, the count defaults to `ceil(person_count / max_people)`.
+///
+/// After sizing every type, if the combined instance count would still fall
+/// short of the highest locked-table number, the shortfall is added to the
+/// last type without an explicit `number_of_tables` (rather than applying the
+/// full shortfall to *every* auto-sized type), so a single guest locked to a
+/// high table number doesn't inflate every other type's instance count. If
+/// every type has an explicit `number_of_tables`, the shortfall cannot be
+/// covered here; [`validate_locked_assignments`] reports the dangling lock as
+/// [`ValidationError::LockedTableDoesNotExist`].
 ///
 /// Instances are numbered sequentially (1-based). Because [`ProjectInput::table_types`]
 /// is a [`std::collections::BTreeMap`], types are iterated in **lexicographic key order**,
@@ -36,16 +44,34 @@ pub fn generate_table_instances(project: &ProjectInput) -> Vec<TableInstance> {
         .max()
         .unwrap_or(0);
     let person_count = project.people.len().max(1);
+
+    let mut counts: Vec<(&TableTypeId, usize)> = project
+        .table_types
+        .iter()
+        .map(|(table_type_id, cfg)| {
+            let count = cfg
+                .number_of_tables
+                .unwrap_or_else(|| person_count.div_ceil(cfg.max_people));
+            (table_type_id, count)
+        })
+        .collect();
+
+    let total: usize = counts.iter().map(|(_, count)| count).sum();
+    if total < max_locked {
+        let shortfall = max_locked - total;
+        if let Some(entry) = counts.iter_mut().rev().find(|(table_type_id, _)| {
+            project.table_types[*table_type_id]
+                .number_of_tables
+                .is_none()
+        }) {
+            entry.1 += shortfall;
+        }
+    }
+
     let mut instances = Vec::new();
     let mut number = 1usize;
-    for (table_type_id, cfg) in &project.table_types {
-        // When not specified, generate the minimum number of tables of this
-        // type that could in theory seat everyone (ceiling division), subject
-        // to honouring the highest locked-table number.
-        let count = cfg.number_of_tables.unwrap_or_else(|| {
-            let by_capacity = person_count.div_ceil(cfg.max_people);
-            by_capacity.max(max_locked)
-        });
+    for (table_type_id, count) in counts {
+        let cfg = &project.table_types[table_type_id];
         for _ in 0..count {
             instances.push(TableInstance {
                 number,
@@ -77,8 +103,10 @@ pub fn generate_table_instances(project: &ProjectInput) -> Vec<TableInstance> {
 /// - Duplicate closeness rules
 /// - Non-finite closeness scores
 /// - Sufficient total seat capacity
+/// - Sufficient per-table-type capacity for guests requiring that type
 /// - Valid and compatible locked table / seat assignments
 /// - Seat collision among locked guests
+/// - Guests locked to the same table not exceeding its capacity
 /// - Impossible person assignments (no compatible table exists)
 /// - High-priority groups larger than any compatible table
 pub fn validate_project(project: &ProjectInput) -> Result<(), ValidationReport> {
@@ -92,7 +120,9 @@ pub fn validate_project(project: &ProjectInput) -> Result<(), ValidationReport> 
     let table_by_number: HashMap<usize, &TableInstance> =
         instances.iter().map(|t| (t.number, t)).collect();
     validate_capacity(&instances, project.people.len(), &mut errors);
+    validate_table_type_capacity(project, &instances, &mut errors);
     validate_locked_assignments(project, &table_by_number, &mut errors);
+    validate_locked_table_capacity(project, &table_by_number, &mut errors);
     validate_impossible_assignments(project, &instances, &mut errors);
     validate_large_groups(project, &group_ids, &instances, &mut errors);
 
@@ -130,7 +160,7 @@ pub fn validate_seating_solution(
     let instances = generate_table_instances(project);
     let table_by_number: HashMap<usize, &TableInstance> =
         instances.iter().map(|t| (t.number, t)).collect();
-    let person_map: HashMap<&str, &crate::models::Person> =
+    let person_map: HashMap<&str, &Person> =
         project.people.iter().map(|p| (p.id.as_str(), p)).collect();
 
     let mut seen_people: HashSet<String> = HashSet::new();
@@ -196,7 +226,7 @@ pub fn validate_seating_solution(
         }
 
         if a.seat_index >= table.max_people {
-            errors.push(ValidationError::LockedSeatOutOfRange {
+            errors.push(ValidationError::SeatIndexOutOfRange {
                 person_id: a.person_id.clone(),
                 seat: a.seat_index,
                 capacity: table.max_people,
@@ -257,6 +287,9 @@ fn collect_id_sets(
     let mut group_ids = HashSet::new();
 
     for p in &project.people {
+        if p.id.trim().is_empty() {
+            errors.push(ValidationError::EmptyPersonId);
+        }
         if !person_ids.insert(p.id.clone()) {
             errors.push(ValidationError::DuplicatePersonId(p.id.clone()));
         }
@@ -364,6 +397,9 @@ fn validate_closeness_rules(
         if !known_ids.contains(&r.right_id) {
             errors.push(ValidationError::UnknownIdInCloseness(r.right_id.clone()));
         }
+        if r.left_id == r.right_id && person_ids.contains(&r.left_id) {
+            errors.push(ValidationError::PersonSelfClosenessRule(r.left_id.clone()));
+        }
         let pair = canonical_pair(&r.left_id, &r.right_id);
         if !seen_pairs.insert(pair.clone()) {
             errors.push(ValidationError::DuplicateClosenessRule(pair.0, pair.1));
@@ -383,6 +419,64 @@ fn validate_capacity(
             required: person_count,
             available: total_capacity,
         });
+    }
+}
+
+/// Check that each required `table_type` has enough total capacity for the
+/// people who require it specifically (total capacity alone can be
+/// sufficient while a single type is oversubscribed).
+fn validate_table_type_capacity(
+    project: &ProjectInput,
+    instances: &[TableInstance],
+    errors: &mut Vec<ValidationError>,
+) {
+    let mut capacity_by_type: HashMap<&str, usize> = HashMap::new();
+    for table in instances {
+        *capacity_by_type
+            .entry(table.table_type.as_str())
+            .or_insert(0) += table.max_people;
+    }
+    let mut required_by_type: HashMap<&str, usize> = HashMap::new();
+    for p in &project.people {
+        if let Some(table_type) = &p.table_type {
+            *required_by_type.entry(table_type.as_str()).or_insert(0) += 1;
+        }
+    }
+    for (table_type, required) in required_by_type {
+        let available = capacity_by_type.get(table_type).copied().unwrap_or(0);
+        if required > available {
+            errors.push(ValidationError::NotEnoughSeatsForTableType {
+                table_type: table_type.to_string(),
+                required,
+                available,
+            });
+        }
+    }
+}
+
+/// Check that guests locked to the same table number don't exceed its capacity.
+fn validate_locked_table_capacity(
+    project: &ProjectInput,
+    table_by_number: &HashMap<usize, &TableInstance>,
+    errors: &mut Vec<ValidationError>,
+) {
+    let mut counts: HashMap<usize, usize> = HashMap::new();
+    for p in &project.people {
+        if let Some(table_number) = p.locked_table {
+            *counts.entry(table_number).or_insert(0) += 1;
+        }
+    }
+    for (table_number, count) in counts {
+        let Some(table) = table_by_number.get(&table_number) else {
+            continue; // Reported separately as LockedTableDoesNotExist.
+        };
+        if count > table.max_people {
+            errors.push(ValidationError::LockedTableOverbooked {
+                table_number,
+                count,
+                capacity: table.max_people,
+            });
+        }
     }
 }
 
@@ -503,7 +597,7 @@ pub(crate) fn canonical_pair(a: &str, b: &str) -> (String, String) {
 
 /// Build a lookup map from canonical pair to score from a slice of closeness rules.
 pub(crate) fn build_closeness_lookup(
-    rules: &[crate::models::ClosenessRule],
+    rules: &[ClosenessRule],
 ) -> Result<HashMap<(String, String), f64>, ValidationError> {
     let mut map = HashMap::new();
     for rule in rules {

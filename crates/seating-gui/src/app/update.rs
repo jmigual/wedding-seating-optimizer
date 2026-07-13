@@ -1,15 +1,47 @@
 use super::*;
 
 pub(super) fn update(app: &mut GuiApp, message: Msg) -> Command<Msg> {
+    // A pending whole-project confirmation only survives into this dispatch
+    // if the incoming message is the matching repeated activation; any other
+    // message cancels it.
+    if !matches!(
+        (&message, &app.pending_confirm),
+        (Msg::NewProject, Some(PendingConfirm::NewProject))
+            | (Msg::OpenProject, Some(PendingConfirm::OpenProject))
+            | (Msg::ExportProjectCsv, Some(PendingConfirm::ExportCsv(_)))
+    ) {
+        app.pending_confirm = None;
+    }
+
     match message {
         Msg::FocusNext => return iced::widget::focus_next(),
         Msg::FocusPrevious => return iced::widget::focus_previous(),
         Msg::SelectTab(tab) => app.active_tab = tab,
         Msg::NewProject => {
-            *app = GuiApp::empty();
-            app.message = "Started a new empty project.".to_string();
+            if app.dirty && app.pending_confirm.is_none() {
+                app.pending_confirm = Some(PendingConfirm::NewProject);
+                app.set_message(
+                    MessageKind::Info,
+                    "Unsaved changes — click New Project again to discard them.",
+                );
+            } else {
+                app.pending_confirm = None;
+                *app = GuiApp::empty();
+                app.set_message(MessageKind::Success, "Started a new empty project.");
+            }
         }
-        Msg::OpenProject => app.open_project(),
+        Msg::OpenProject => {
+            if app.dirty && app.pending_confirm.is_none() {
+                app.pending_confirm = Some(PendingConfirm::OpenProject);
+                app.set_message(
+                    MessageKind::Info,
+                    "Unsaved changes — click Open Project again to discard them.",
+                );
+            } else {
+                app.pending_confirm = None;
+                app.open_project();
+            }
+        }
         Msg::SaveProject => app.save_project(false),
         Msg::SaveProjectAs => app.save_project(true),
         Msg::ExportProjectCsv => app.export_project_csv(),
@@ -101,34 +133,31 @@ pub(super) fn update(app: &mut GuiApp, message: Msg) -> Command<Msg> {
         }
         Msg::UpdateClosenessLeft(index, value) => {
             if let Some(row) = app.closeness_rules.get_mut(index) {
-                row.rule.left_id = value;
+                row.left_id = value;
                 app.refresh_validation_and_layout();
             }
         }
         Msg::UpdateClosenessRight(index, value) => {
             if let Some(row) = app.closeness_rules.get_mut(index) {
-                row.rule.right_id = value;
+                row.right_id = value;
                 app.refresh_validation_and_layout();
             }
         }
         Msg::SelectClosenessLeft(index, value) => {
             if let Some(row) = app.closeness_rules.get_mut(index) {
-                row.rule.left_id = value;
+                row.left_id = value;
                 app.refresh_validation_and_layout();
             }
         }
         Msg::SelectClosenessRight(index, value) => {
             if let Some(row) = app.closeness_rules.get_mut(index) {
-                row.rule.right_id = value;
+                row.right_id = value;
                 app.refresh_validation_and_layout();
             }
         }
         Msg::UpdateClosenessScore(index, value) => {
             if let Some(row) = app.closeness_rules.get_mut(index) {
                 row.score_input = value;
-                if let Ok(score) = parse_f64_value(&row.score_input, "score") {
-                    row.rule.score = score;
-                }
                 app.refresh_validation_and_layout();
             }
         }
@@ -185,58 +214,101 @@ pub(super) fn update(app: &mut GuiApp, message: Msg) -> Command<Msg> {
             }
         }
         Msg::SeedChanged(value) => app.seed = value,
+        Msg::AttemptsChanged(value) => app.attempts = value,
+        Msg::IterationsChanged(value) => app.iterations = value,
+        Msg::SolutionsChanged(value) => app.solutions = value,
         Msg::ProximityWeightChanged(value) => app.proximity_weight = value,
         Msg::UsedTableWeightChanged(value) => app.used_table_weight = value,
         Msg::OptimalTableSizeWeightChanged(value) => app.optimal_table_size_weight = value,
-        Msg::Optimize => run_optimize(app),
+        Msg::Optimize => return run_optimize(app),
+        Msg::OptimizeFinished(result) => optimize_finished(app, result),
         Msg::SaveSeating => app.save_seating(),
         Msg::ExportPlanSvg => app.export_plan_svg(),
         Msg::ExportPlanPng => app.export_plan_png(),
         Msg::ZoomIn => app.zoom = (app.zoom + 0.2).min(3.0),
         Msg::ZoomOut => app.zoom = (app.zoom - 0.2).max(0.4),
+        Msg::ZoomReset => app.zoom = 1.0,
     }
     Command::none()
 }
 
-fn run_optimize(app: &mut GuiApp) {
+/// Kick off an optimizer run on a background executor thread so the UI event
+/// loop keeps repainting. `HeuristicOptimizer::optimize` is synchronous, but
+/// iced's default executor is a thread pool distinct from the UI thread, so
+/// wrapping the call in an async block already keeps the window responsive
+/// without needing `spawn_blocking` or the `tokio` executor feature.
+fn run_optimize(app: &mut GuiApp) -> Command<Msg> {
+    if app.is_optimizing {
+        return Command::none();
+    }
     let config = match app.optimization_config() {
         Ok(config) => config,
         Err(report) => {
-            app.message = format!("Cannot optimize invalid settings:\n{report}");
-            return;
+            app.set_message(
+                MessageKind::Error,
+                format!(
+                    "Cannot optimize invalid settings: {}",
+                    GuiApp::report_summary(&report)
+                ),
+            );
+            return Command::none();
         }
     };
     let project = match app.current_project() {
         Ok(project) => project,
         Err(report) => {
-            app.message = format!("Cannot optimize invalid data:\n{report}");
-            return;
+            app.set_message(
+                MessageKind::Error,
+                format!(
+                    "Cannot optimize invalid data: {}",
+                    GuiApp::report_summary(&report)
+                ),
+            );
+            return Command::none();
         }
     };
     if let Err(report) = validate_project(&project) {
-        app.validation_errors = report.errors.clone();
-        app.message = format!("Cannot optimize invalid data:\n{report}");
-        return;
+        app.set_message(
+            MessageKind::Error,
+            format!(
+                "Cannot optimize invalid data: {}",
+                GuiApp::report_summary(&report)
+            ),
+        );
+        app.validation_errors = report.errors;
+        return Command::none();
     }
-    match HeuristicOptimizer.optimize(&project, &config) {
-        Err(report) => app.message = format!("Optimization failed:\n{report}"),
-        Ok(result) => match result.solutions.first() {
+    app.is_optimizing = true;
+    app.set_message(MessageKind::Info, "Optimizing…");
+    Command::perform(
+        async move { HeuristicOptimizer.optimize(&project, &config) },
+        Msg::OptimizeFinished,
+    )
+}
+
+fn optimize_finished(app: &mut GuiApp, result: Result<OptimizationResult, ValidationReport>) {
+    app.is_optimizing = false;
+    match result {
+        Err(report) => app.set_message(
+            MessageKind::Error,
+            format!("Optimization failed: {}", GuiApp::report_summary(&report)),
+        ),
+        Ok(result) => match result.solutions.into_iter().next() {
             Some(solution) => {
-                app.assignments = solution.assignments.clone();
-                app.seating_csv = write_seating_csv(&app.assignments).unwrap_or_default();
-                app.validation_errors.clear();
-                if let Ok(layout) = build_layout(&project, &app.assignments) {
-                    let svg_markup = render_svg(&layout, &RenderOptions::default());
-                    app.layout = Some(layout);
-                    app.layout_svg = Some(svg_markup);
-                } else {
-                    app.layout = None;
-                    app.layout_svg = None;
-                }
+                let score = solution.score;
+                app.assignments = solution.assignments;
+                app.refresh_validation_and_layout();
                 app.active_tab = Tab::SeatingPlan;
-                app.message = format!("Optimization complete. Score: {:.3}", solution.score);
+                // refresh_validation_and_layout may have already set a more
+                // specific message if rendering the new plan failed.
+                if app.layout_error.is_none() && app.validation_errors.is_empty() {
+                    app.set_message(
+                        MessageKind::Success,
+                        format!("Optimization complete. Score: {score:.3}"),
+                    );
+                }
             }
-            None => app.message = "Optimizer returned no solutions.".to_string(),
+            None => app.set_message(MessageKind::Error, "Optimizer returned no solutions."),
         },
     }
 }

@@ -1,19 +1,15 @@
 use super::*;
+use crate::components::{secondary_button, spacer, toolbar};
+use iced::widget::scrollable::{Direction, Properties};
 use iced::widget::{column, row};
 
 impl GuiApp {
     pub(super) fn view_seating_plan_tab(&self) -> Element<'_, Msg> {
-        let controls = container(
+        let controls = toolbar(
             row![
-                button(text("Export seating plan as SVG").size(13))
-                    .on_press(Msg::ExportPlanSvg)
-                    .padding([9, 14])
-                    .style(theme::Button::custom(AppButtonStyle::secondary())),
-                button(text("Export seating plan as PNG").size(13))
-                    .on_press(Msg::ExportPlanPng)
-                    .padding([9, 14])
-                    .style(theme::Button::custom(AppButtonStyle::secondary())),
-                container(row![]).width(Length::Fill),
+                secondary_button("Export seating plan as SVG", Msg::ExportPlanSvg),
+                secondary_button("Export seating plan as PNG", Msg::ExportPlanPng),
+                spacer(),
                 button(text("Zoom -").size(13))
                     .on_press(Msg::ZoomOut)
                     .padding([9, 12])
@@ -22,14 +18,12 @@ impl GuiApp {
                     .on_press(Msg::ZoomIn)
                     .padding([9, 12])
                     .style(theme::Button::custom(AppButtonStyle::secondary())),
+                secondary_button("Reset zoom", Msg::ZoomReset),
                 text(format!("Zoom: {:.1}x", self.zoom)).size(13),
             ]
             .spacing(8)
             .align_items(Alignment::Center),
-        )
-        .padding(10)
-        .width(Length::Fill)
-        .style(crate::styles::toolbar_style);
+        );
 
         let body: Element<'_, Msg> = match (&self.layout, &self.layout_svg) {
             (Some(layout), Some(svg_markup)) => scrollable(
@@ -41,8 +35,21 @@ impl GuiApp {
                 .width(Length::Shrink)
                 .height(Length::Shrink),
             )
+            .direction(Direction::Both {
+                vertical: Properties::default(),
+                horizontal: Properties::default(),
+            })
             .into(),
-            _ => text("No valid seating plan to render yet.").into(),
+            _ => match &self.layout_error {
+                Some(reason) => text(format!("Seating plan render failed: {reason}")).into(),
+                None if !self.validation_errors.is_empty() => {
+                    text("Project data is invalid — see Diagnostics tab.").into()
+                }
+                None if self.assignments.is_empty() => {
+                    text("Not optimized yet — run Optimize to generate a plan.").into()
+                }
+                None => text("No valid seating plan to render yet.").into(),
+            },
         };
 
         column![

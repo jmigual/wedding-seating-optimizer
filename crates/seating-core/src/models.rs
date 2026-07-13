@@ -274,42 +274,52 @@ impl std::error::Error for ValidationReport {}
 /// Individual validation error variants, each with descriptive context.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ValidationError {
-    #[error("Duplicate person id: {0}")]
+    #[error("duplicate person id: {0}")]
     DuplicatePersonId(String),
-    #[error("Duplicate table type id: {0}")]
+    #[error("duplicate table type id: {0}")]
     DuplicateTableTypeId(String),
-    #[error("Table type id cannot be empty")]
+    #[error("table type id cannot be empty")]
     EmptyTableTypeId,
-    #[error("Person ID collides with group ID namespace: {0}")]
+    #[error("person id cannot be empty")]
+    EmptyPersonId,
+    #[error("person ID collides with group ID namespace: {0}")]
     NamespaceCollision(String),
-    #[error("Unknown table type '{table_type}' referenced by person '{person_id}'")]
+    #[error("unknown table type '{table_type}' referenced by person '{person_id}'")]
     UnknownTableTypeForPerson {
         person_id: String,
         table_type: String,
     },
-    #[error("Unknown ID in closeness rules: {0}")]
+    #[error("unknown ID in closeness rules: {0}")]
     UnknownIdInCloseness(String),
-    #[error("Duplicate closeness rule for pair: {0} <-> {1}")]
+    #[error("duplicate closeness rule for pair: {0} <-> {1}")]
     DuplicateClosenessRule(String, String),
-    #[error("Invalid closeness score for pair {left} <-> {right}: score must be finite")]
+    #[error("invalid closeness score for pair {left} <-> {right}: score must be finite")]
     InvalidClosenessScore { left: String, right: String },
-    #[error("Locked seat requires locked table for person '{0}'")]
+    #[error("closeness rule references person '{0}' on both sides; self-closeness only applies to groups")]
+    PersonSelfClosenessRule(String),
+    #[error("locked seat requires locked table for person '{0}'")]
     LockedSeatRequiresLockedTable(String),
-    #[error("Locked table {table_number} does not exist for person '{person_id}'")]
+    #[error("locked table {table_number} does not exist for person '{person_id}'")]
     LockedTableDoesNotExist {
         person_id: String,
         table_number: usize,
     },
-    #[error("Locked seat {seat} exceeds table capacity {capacity} for person '{person_id}'")]
+    #[error("locked seat {seat} exceeds table capacity {capacity} for person '{person_id}'")]
     LockedSeatOutOfRange {
         person_id: String,
         seat: usize,
         capacity: usize,
     },
-    #[error("Table shape '{0}' requires people_per_side")]
+    #[error("seat {seat} exceeds table capacity {capacity} for person '{person_id}'")]
+    SeatIndexOutOfRange {
+        person_id: String,
+        seat: usize,
+        capacity: usize,
+    },
+    #[error("table shape '{0}' requires people_per_side")]
     MissingPeoplePerSide(String),
     #[error(
-        "Table type '{table_type}' must define exactly four people_per_side values, found {len}"
+        "table type '{table_type}' must define exactly four people_per_side values, found {len}"
     )]
     InvalidPeoplePerSideLength { table_type: String, len: usize },
     #[error(
@@ -320,13 +330,13 @@ pub enum ValidationError {
         sum: usize,
         max: usize,
     },
-    #[error("Table type '{table_type}' has min_people ({min}) > max_people ({max})")]
+    #[error("table type '{table_type}' has min_people ({min}) > max_people ({max})")]
     InvalidMinMax {
         table_type: String,
         min: usize,
         max: usize,
     },
-    #[error("Table type '{table_type}' has recommended_people ({recommended}) outside the allowed range {min}..={max}")]
+    #[error("table type '{table_type}' has recommended_people ({recommended}) outside the allowed range {min}..={max}")]
     InvalidRecommendedPeople {
         table_type: String,
         recommended: usize,
@@ -334,60 +344,78 @@ pub enum ValidationError {
         max: usize,
     },
     #[error(
-        "Table type '{table_type}' must have number_of_tables > 0 when provided (got {count})"
+        "table type '{table_type}' must have number_of_tables > 0 when provided (got {count})"
     )]
     InvalidNumberOfTables { table_type: String, count: usize },
-    #[error("Multiple people locked to same seat: table {table_number}, seat {seat}")]
+    #[error("multiple people locked to same seat: table {table_number}, seat {seat}")]
     DuplicateLockedSeat { table_number: usize, seat: usize },
-    #[error("Person '{person_id}' is locked to table {table_number} of type '{locked_type}', incompatible with required table_type '{required_type}'")]
+    #[error("person '{person_id}' is locked to table {table_number} of type '{locked_type}', incompatible with required table_type '{required_type}'")]
     LockedTableTypeMismatch {
         person_id: String,
         table_number: usize,
         locked_type: String,
         required_type: String,
     },
-    #[error("Not enough available seats: required {required}, available {available}")]
+    #[error("table {table_number} has {count} guests locked to it, exceeding capacity {capacity}")]
+    LockedTableOverbooked {
+        table_number: usize,
+        count: usize,
+        capacity: usize,
+    },
+    #[error("not enough available seats: required {required}, available {available}")]
     NotEnoughSeats { required: usize, available: usize },
-    #[error("No compatible tables available for person '{person_id}'")]
+    #[error(
+        "not enough seats of table type '{table_type}': required {required}, available {available}"
+    )]
+    NotEnoughSeatsForTableType {
+        table_type: String,
+        required: usize,
+        available: usize,
+    },
+    #[error("no compatible tables available for person '{person_id}'")]
     ImpossiblePersonAssignment { person_id: String },
-    #[error("Group '{group_id}' has very high self-closeness ({score}) and size ({size}), larger than any compatible table capacity ({max_compatible_capacity})")]
+    #[error("group '{group_id}' has very high self-closeness ({score}) and size ({size}), larger than any compatible table capacity ({max_compatible_capacity})")]
     LargeHighPriorityGroup {
         group_id: String,
         score: f64,
         size: usize,
         max_compatible_capacity: usize,
     },
-    #[error("Each person must appear exactly once in seating: {0}")]
+    #[error("each person must appear exactly once in seating: {0}")]
     MissingOrDuplicatePerson(String),
-    #[error("Unknown person in seating output: {0}")]
+    #[error("unknown person in seating output: {0}")]
     UnknownPersonInSeating(String),
-    #[error("Unknown table in seating output: {0}")]
+    #[error("unknown table in seating output: {0}")]
     UnknownTableInSeating(usize),
-    #[error("Seat collision in seating output: table {table_number}, seat {seat}")]
+    #[error("seat collision in seating output: table {table_number}, seat {seat}")]
     SeatCollision { table_number: usize, seat: usize },
-    #[error("Table {table_number} exceeds capacity: {count} > {capacity}")]
+    #[error("table {table_number} exceeds capacity: {count} > {capacity}")]
     TableCapacityExceeded {
         table_number: usize,
         count: usize,
         capacity: usize,
     },
-    #[error("Used table {table_number} violates min_people: {count} < {min}")]
+    #[error("used table {table_number} violates min_people: {count} < {min}")]
     TableBelowMin {
         table_number: usize,
         count: usize,
         min: usize,
     },
-    #[error("Malformed input: {0}")]
+    #[error("malformed input: {0}")]
     MalformedInput(String),
+    #[error("unsupported project file version {found} (expected {expected})")]
+    UnsupportedProjectVersion { found: u32, expected: u32 },
+    #[error("no feasible seating assignment could be constructed for the given constraints")]
+    NoFeasibleAssignment,
     /// `SeatingAssignment.table_type` does not match the actual type of the resolved table instance.
-    #[error("Seating assignment records table_type '{recorded_type}' for table {table_number}, but the table instance has type '{actual_type}'")]
+    #[error("seating assignment records table_type '{recorded_type}' for table {table_number}, but the table instance has type '{actual_type}'")]
     SeatingTableTypeMismatch {
         table_number: usize,
         actual_type: String,
         recorded_type: String,
     },
     /// The assigned table type does not satisfy the person's required table type.
-    #[error("Person '{person_id}' requires table type '{required_type}' but is seated at table {table_number} of type '{assigned_type}'")]
+    #[error("person '{person_id}' requires table type '{required_type}' but is seated at table {table_number} of type '{assigned_type}'")]
     SeatingPersonTableTypeMismatch {
         person_id: String,
         table_number: usize,
@@ -395,7 +423,7 @@ pub enum ValidationError {
         assigned_type: String,
     },
     /// A person with a locked table is assigned to a different table.
-    #[error("Person '{person_id}' must be at table {locked_table} but is seated at table {assigned_table}")]
+    #[error("person '{person_id}' must be at table {locked_table} but is seated at table {assigned_table}")]
     SeatingViolatesLockedTable {
         person_id: String,
         locked_table: usize,
@@ -403,7 +431,7 @@ pub enum ValidationError {
     },
     /// A person with a locked seat is assigned to a different seat.
     #[error(
-        "Person '{person_id}' must be at seat {locked_seat} but is placed at seat {assigned_seat}"
+        "person '{person_id}' must be at seat {locked_seat} but is placed at seat {assigned_seat}"
     )]
     SeatingViolatesLockedSeat {
         person_id: String,

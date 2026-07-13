@@ -25,6 +25,8 @@ pub struct RenderOptions {
     pub seat_radius: f32,
     /// Base font size for labels.
     pub font_size: f32,
+    /// PNG rasterization scale factor (1.0 = CSS pixel size).
+    pub png_scale: f32,
 }
 
 impl Default for RenderOptions {
@@ -37,6 +39,7 @@ impl Default for RenderOptions {
             table_height: 220.0,
             seat_radius: 13.0,
             font_size: 14.0,
+            png_scale: 2.0,
         }
     }
 }
@@ -69,11 +72,14 @@ pub struct LayoutTable {
     pub width: f32,
     /// Card height.
     pub height: f32,
-    /// Concrete seat positions around the table.
+    /// Concrete seat positions around the table, one per capacity slot.
     pub seats: Vec<LayoutSeat>,
 }
 
 /// One rendered seat marker within a table layout.
+///
+/// Every capacity slot for the table is represented, not just occupied ones,
+/// so the rendered geometry always matches the table's real seat count.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutSeat {
     /// Zero-based seat index.
@@ -82,7 +88,7 @@ pub struct LayoutSeat {
     pub x: f32,
     /// Seat-center Y coordinate.
     pub y: f32,
-    /// Occupant name when assigned.
+    /// Occupant name, or `None` when this capacity slot is unassigned.
     pub person_name: Option<String>,
 }
 
@@ -102,17 +108,9 @@ pub fn build_layout(
     project: &ProjectInput,
     assignments: &[SeatingAssignment],
 ) -> Result<SeatingLayout, ValidationReport> {
-    build_layout_with_options(project, assignments, &RenderOptions::default())
-}
-
-/// Build a reusable layout using caller-provided render options.
-pub fn build_layout_with_options(
-    project: &ProjectInput,
-    assignments: &[SeatingAssignment],
-    options: &RenderOptions,
-) -> Result<SeatingLayout, ValidationReport> {
     validate_seating_solution(project, assignments)?;
 
+    let options = RenderOptions::default();
     let instances = generate_table_instances(project);
     let mut assignments_by_table: HashMap<usize, Vec<&SeatingAssignment>> = HashMap::new();
     for assignment in assignments {
@@ -145,9 +143,10 @@ pub fn build_layout_with_options(
         let seats = build_seat_positions(
             table.shape.clone(),
             config.people_per_side.as_deref(),
+            table.max_people,
             x,
             y,
-            options,
+            &options,
             table_assignments,
         );
         tables.push(LayoutTable {
@@ -206,7 +205,7 @@ pub fn render_svg(layout: &SeatingLayout, options: &RenderOptions) -> String {
 
     for table in &layout.tables {
         let label_x = table.x + table.width / 2.0;
-        let title_y = table.y + 24.0;
+        let (title_y, subtitle_y) = header_positions(table.y, options);
         svg.push_str(&format!(
             "<g><rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"18\" fill=\"#17212b\" stroke=\"#3f5368\" stroke-width=\"1.5\"/>",
             table.x, table.y, table.width, table.height
@@ -221,16 +220,26 @@ pub fn render_svg(layout: &SeatingLayout, options: &RenderOptions) -> String {
         svg.push_str(&format!(
             "<text class=\"muted\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">Shape: {}</text>",
             label_x,
-            title_y + 20.0,
+            subtitle_y,
             shape_label(&table.shape)
         ));
 
         match table.shape {
-            TableShape::Round => svg.push_str(&format!(
-                "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"48\" fill=\"#355070\" stroke=\"#90e0ef\" stroke-width=\"2\"/>",
-                table.x + table.width / 2.0,
-                table.y + table.height / 2.0 + 6.0,
-            )),
+            TableShape::Round => {
+                let (center_x, center_y, ring_radius) =
+                    round_table_metrics(table.x, table.y, options);
+                // The table surface sits inside the seat ring, leaving room
+                // for the seat markers themselves.
+                let surface_radius = (ring_radius - options.seat_radius - 6.0).max(20.0);
+                svg.push_str(&format!(
+                    "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"#355070\" stroke=\"#90e0ef\" stroke-width=\"2\"/>",
+                    center_x, center_y, surface_radius
+                ));
+            }
+            // Rectangular/square insets are fixed proportions of the default
+            // 240x220 card rather than derived from RenderOptions; a
+            // table_width/table_height far below the defaults can crowd
+            // seats against the card edge.
             TableShape::Rectangular | TableShape::Square => svg.push_str(&format!(
                 "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"12\" fill=\"#355070\" stroke=\"#90e0ef\" stroke-width=\"2\"/>",
                 table.x + 60.0,
@@ -240,25 +249,46 @@ pub fn render_svg(layout: &SeatingLayout, options: &RenderOptions) -> String {
             )),
         }
 
+        let label_budget = min_seat_spacing(&table.seats).unwrap_or(table.width - 40.0);
+
         for seat in &table.seats {
-            svg.push_str(&format!(
-                "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"#f5f7fa\" stroke=\"#5c6773\" stroke-width=\"1.5\"/>",
-                seat.x, seat.y, options.seat_radius
-            ));
-            svg.push_str(&format!(
-                "<text class=\"seat-index\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" dominant-baseline=\"middle\">{}</text>",
-                seat.x,
-                seat.y + 0.5,
-                seat.seat_index
-            ));
-            if let Some(guest_label) = seat.person_name.as_deref().map(escape_xml) {
+            svg.push_str("<g>");
+            if let Some(name) = seat.person_name.as_deref() {
+                svg.push_str(&format!("<title>{}</title>", escape_xml(name)));
+            }
+            if let Some(person_name) = seat.person_name.as_deref() {
+                svg.push_str(&format!(
+                    "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"#f5f7fa\" stroke=\"#5c6773\" stroke-width=\"1.5\"/>",
+                    seat.x, seat.y, options.seat_radius
+                ));
+                svg.push_str(&format!(
+                    "<text class=\"seat-index\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" dominant-baseline=\"middle\">{}</text>",
+                    seat.x,
+                    seat.y + 0.5,
+                    seat.seat_index
+                ));
+                let label = fit_label(person_name, label_budget, options.font_size - 1.0);
                 svg.push_str(&format!(
                     "<text class=\"guest\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text>",
                     seat.x,
                     seat.y + options.seat_radius + 16.0,
-                    guest_label
+                    escape_xml(&label)
+                ));
+            } else {
+                // Unoccupied capacity slot: hollow, dimmed marker.
+                svg.push_str(&format!(
+                    "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"none\" stroke=\"#3f5368\" stroke-width=\"1.5\" stroke-dasharray=\"3,3\" opacity=\"0.6\"/>",
+                    seat.x, seat.y, options.seat_radius
+                ));
+                svg.push_str(&format!(
+                    "<text class=\"muted\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" dominant-baseline=\"middle\" font-size=\"{:.1}\">{}</text>",
+                    seat.x,
+                    seat.y + 0.5,
+                    options.font_size - 3.0,
+                    seat.seat_index
                 ));
             }
+            svg.push_str("</g>");
         }
         svg.push_str("</g>");
     }
@@ -274,20 +304,28 @@ pub fn render_png(
     path: impl AsRef<Path>,
 ) -> Result<(), RenderingError> {
     let svg = render_svg(layout, options);
-    let svg_options = resvg::usvg::Options::default();
+    let mut svg_options = resvg::usvg::Options::default();
+    svg_options.fontdb_mut().load_system_fonts();
     let tree = resvg::usvg::Tree::from_str(&svg, &svg_options)
         .map_err(|error| RenderingError::SvgParse(error.to_string()))?;
     let size = tree.size().to_int_size();
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(size.width(), size.height()).ok_or(
+    let scale = if options.png_scale.is_finite() && options.png_scale > 0.0 {
+        options.png_scale
+    } else {
+        1.0
+    };
+    let scaled_width = ((size.width() as f32) * scale).round().max(1.0) as u32;
+    let scaled_height = ((size.height() as f32) * scale).round().max(1.0) as u32;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(scaled_width, scaled_height).ok_or(
         RenderingError::PixmapAllocation {
-            width: size.width(),
-            height: size.height(),
+            width: scaled_width,
+            height: scaled_height,
         },
     )?;
     let mut pixmap_mut = pixmap.as_mut();
     resvg::render(
         &tree,
-        resvg::tiny_skia::Transform::identity(),
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
         &mut pixmap_mut,
     );
     pixmap
@@ -303,70 +341,121 @@ fn columns_for(table_count: usize) -> usize {
     }
 }
 
+/// Baseline Y coordinates of a table card's title and subtitle rows,
+/// relative to the card's top-left `y`. Tied to `options.font_size` so a
+/// larger label font pushes both rows (and anything reserved below them)
+/// down accordingly.
+fn header_positions(y: f32, options: &RenderOptions) -> (f32, f32) {
+    let title_y = y + options.font_size + 10.0;
+    let subtitle_y = title_y + options.font_size + 6.0;
+    (title_y, subtitle_y)
+}
+
+/// Y coordinate below which seats may be drawn without overlapping the
+/// title/subtitle header rows.
+fn header_bottom(y: f32, options: &RenderOptions) -> f32 {
+    header_positions(y, options).1 + 8.0
+}
+
+/// Center and ring radius for a round table's seats, sized from the card
+/// dimensions and `seat_radius` so the ring fits inside the card and the
+/// topmost seat clears the header rows.
+fn round_table_metrics(x: f32, y: f32, options: &RenderOptions) -> (f32, f32, f32) {
+    let top = header_bottom(y, options);
+    let bottom = y + options.table_height - options.font_size - 6.0;
+    let center_x = x + options.table_width / 2.0;
+    let center_y = (top + bottom) / 2.0;
+    let vertical_radius = ((bottom - top) / 2.0 - options.seat_radius).max(20.0);
+    let horizontal_radius = (options.table_width / 2.0 - options.seat_radius - 20.0).max(20.0);
+    let radius = vertical_radius.min(horizontal_radius);
+    (center_x, center_y, radius)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_seat_positions(
     shape: TableShape,
     people_per_side: Option<&[usize]>,
+    max_people: usize,
     x: f32,
     y: f32,
     options: &RenderOptions,
     table_assignments: &[&SeatingAssignment],
 ) -> Vec<LayoutSeat> {
     match shape {
-        TableShape::Round => build_round_seats(table_assignments, x, y, options),
+        TableShape::Round => build_round_seats(max_people, table_assignments, x, y, options),
         TableShape::Rectangular | TableShape::Square => build_rectangular_seats(
+            max_people,
             people_per_side.unwrap_or(&[]),
+            table_assignments,
             x,
             y,
             options,
-            table_assignments,
         ),
     }
 }
 
+/// Look up the assignment occupying `seat_index`, if any. `table_assignments`
+/// is sorted by `seat_index` (see [`build_layout`]).
+fn occupant_at<'a>(
+    table_assignments: &[&'a SeatingAssignment],
+    seat_index: usize,
+) -> Option<&'a SeatingAssignment> {
+    table_assignments
+        .binary_search_by_key(&seat_index, |assignment| assignment.seat_index)
+        .ok()
+        .map(|position| table_assignments[position])
+}
+
+/// Places one seat per capacity slot evenly around a ring, regardless of how
+/// many are actually occupied, so the rendered angle always matches
+/// `TAU * seat_index / max_people` — the same geometry `scoring::circular_distance`
+/// assumes.
 fn build_round_seats(
+    max_people: usize,
     table_assignments: &[&SeatingAssignment],
     x: f32,
     y: f32,
     options: &RenderOptions,
 ) -> Vec<LayoutSeat> {
-    let center_x = x + options.table_width / 2.0;
-    let center_y = y + options.table_height / 2.0 + 6.0;
-    let radius = 78.0;
-    let seat_count = table_assignments.len();
-    (0..seat_count)
+    let (center_x, center_y, radius) = round_table_metrics(x, y, options);
+    let seat_count = max_people.max(1);
+    (0..max_people)
         .map(|seat_index| {
-            let assignment = table_assignments[seat_index];
-            let angle = std::f32::consts::TAU * seat_index as f32 / seat_count.max(1) as f32
+            let angle = std::f32::consts::TAU * seat_index as f32 / seat_count as f32
                 - std::f32::consts::FRAC_PI_2;
             LayoutSeat {
-                seat_index: assignment.seat_index,
+                seat_index,
                 x: center_x + radius * angle.cos(),
                 y: center_y + radius * angle.sin(),
-                person_name: Some(assignment.person_name.clone()),
+                person_name: occupant_at(table_assignments, seat_index)
+                    .map(|assignment| assignment.person_name.clone()),
             }
         })
         .collect()
 }
 
+/// Places one seat per capacity slot around the table perimeter, regardless
+/// of how many are actually occupied.
 fn build_rectangular_seats(
+    max_people: usize,
     people_per_side: &[usize],
+    table_assignments: &[&SeatingAssignment],
     x: f32,
     y: f32,
     options: &RenderOptions,
-    table_assignments: &[&SeatingAssignment],
 ) -> Vec<LayoutSeat> {
     let mut points = Vec::new();
-    let seat_count = table_assignments.len();
+    // Fixed proportions of the default 240x220 card; see the render_svg
+    // surface-rect comment for the same caveat.
     let left = x + 52.0;
     let right = x + options.table_width - 52.0;
     let top = y + 68.0;
     let bottom = y + options.table_height - 58.0;
     let counts =
-        if people_per_side.len() == 4 && people_per_side.iter().sum::<usize>() == seat_count {
+        if people_per_side.len() == 4 && people_per_side.iter().sum::<usize>() == max_people {
             people_per_side.to_vec()
         } else {
-            spread_evenly(seat_count)
+            spread_evenly(max_people)
         };
 
     points.extend(line_points(counts[0], left + 14.0, right - 14.0, top, top));
@@ -394,13 +483,14 @@ fn build_rectangular_seats(
 
     points
         .into_iter()
-        .take(seat_count)
+        .take(max_people)
         .enumerate()
         .map(|(seat_index, (seat_x, seat_y))| LayoutSeat {
-            seat_index: table_assignments[seat_index].seat_index,
+            seat_index,
             x: seat_x,
             y: seat_y,
-            person_name: Some(table_assignments[seat_index].person_name.clone()),
+            person_name: occupant_at(table_assignments, seat_index)
+                .map(|assignment| assignment.person_name.clone()),
         })
         .collect()
 }
@@ -435,6 +525,38 @@ fn spread_evenly(seat_count: usize) -> Vec<usize> {
     (0..4)
         .map(|index| base + usize::from(index < remainder))
         .collect()
+}
+
+/// Smallest center-to-center distance between any two seats at a table, used
+/// as the guest-label width budget so labels don't overlap their neighbors.
+/// `None` when there are fewer than two seats to compare.
+fn min_seat_spacing(seats: &[LayoutSeat]) -> Option<f32> {
+    let mut min_dist = f32::INFINITY;
+    for i in 0..seats.len() {
+        for j in (i + 1)..seats.len() {
+            let dx = seats[i].x - seats[j].x;
+            let dy = seats[i].y - seats[j].y;
+            min_dist = min_dist.min((dx * dx + dy * dy).sqrt());
+        }
+    }
+    min_dist.is_finite().then_some(min_dist)
+}
+
+/// Truncate `name` with an ellipsis so it fits within `budget_px`,
+/// approximating Arial glyph width as `0.55 * font_size` per character. The
+/// full name is preserved separately in a `<title>` element for hover text.
+fn fit_label(name: &str, budget_px: f32, font_size: f32) -> String {
+    let char_width = (font_size * 0.55).max(1.0);
+    let max_chars = (budget_px / char_width).floor().max(1.0) as usize;
+    let char_count = name.chars().count();
+    if char_count <= max_chars {
+        name.to_string()
+    } else if max_chars <= 1 {
+        "…".to_string()
+    } else {
+        let truncated: String = name.chars().take(max_chars - 1).collect();
+        format!("{truncated}…")
+    }
 }
 
 fn escape_xml(text: &str) -> String {

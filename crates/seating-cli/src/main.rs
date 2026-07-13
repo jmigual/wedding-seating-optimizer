@@ -56,7 +56,7 @@ use seating_core::{
     SeatingOptimizer,
 };
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Top-level CLI entry point.
 #[derive(Parser, Debug)]
@@ -226,7 +226,7 @@ fn main() -> Result<()> {
                 closeness.as_ref(),
                 tables.as_ref(),
             )?;
-            validate_project(&project).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            validate_project(&project)?;
             println!("Validation passed.");
         }
         Commands::Optimize {
@@ -249,7 +249,7 @@ fn main() -> Result<()> {
                 closeness.as_ref(),
                 tables.as_ref(),
             )?;
-            validate_project(&project).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            validate_project(&project)?;
             let result = HeuristicOptimizer.optimize(
                 &project,
                 &OptimizationConfig {
@@ -300,8 +300,7 @@ fn main() -> Result<()> {
                     optimal_table_size_weight,
                     ..OptimizationConfig::default()
                 },
-            )
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            )?;
             println!("Score: {score}");
         }
         Commands::Render {
@@ -313,8 +312,7 @@ fn main() -> Result<()> {
         } => {
             let project = load_render_project(project.as_ref(), people.as_ref(), tables.as_ref())?;
             let assignments = parse_seating_csv(&read_file(&seating, "seating")?)?;
-            let layout = build_layout(&project, &assignments)
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let layout = build_layout(&project, &assignments)?;
             let options = RenderOptions::default();
             match output
                 .extension()
@@ -324,8 +322,7 @@ fn main() -> Result<()> {
             {
                 Some("svg") => fs::write(&output, render_svg(&layout, &options))
                     .with_context(|| format!("failed writing output {}", output.display()))?,
-                Some("png") => render_png(&layout, &options, &output)
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+                Some("png") => render_png(&layout, &options, &output)?,
                 _ => return Err(anyhow::anyhow!("render output must end with .svg or .png")),
             }
             println!("Rendered seating plan to {}", output.display());
@@ -416,12 +413,12 @@ fn required_csv_inputs<'a>(
     Ok((people, closeness, tables))
 }
 
-fn read_project_file(path: &PathBuf) -> Result<ProjectFile> {
+fn read_project_file(path: &Path) -> Result<ProjectFile> {
     parse_project_file(&read_file(path, "project")?).map_err(Into::into)
 }
 
 /// Read a text file, providing a helpful error message on failure.
-fn read_file(path: &PathBuf, label: &str) -> Result<String> {
+fn read_file(path: &Path, label: &str) -> Result<String> {
     fs::read_to_string(path)
         .with_context(|| format!("failed reading {label} file {}", path.display()))
 }
@@ -447,30 +444,13 @@ mod tests {
     }
 
     #[test]
-    fn optimize_accepts_existing_csv_shape() {
-        let cli = Cli::try_parse_from([
-            "wedding-seating",
-            "optimize",
-            "--people",
-            "people.csv",
-            "--closeness",
-            "closeness.csv",
-            "--tables",
-            "tables.csv",
-            "--output",
-            "seating.csv",
-        ])
-        .unwrap();
-        assert!(matches!(
-            cli.command,
-            Commands::Optimize {
-                project: None,
-                people: Some(_),
-                closeness: Some(_),
-                tables: Some(_),
-                ..
-            }
-        ));
+    fn required_csv_inputs_errors_when_a_path_is_missing() {
+        let closeness = PathBuf::from("closeness.csv");
+        let tables = PathBuf::from("tables.csv");
+        assert!(required_csv_inputs(None, Some(&closeness), Some(&tables)).is_err());
+
+        let people = PathBuf::from("people.csv");
+        assert!(required_csv_inputs(Some(&people), Some(&closeness), Some(&tables)).is_ok());
     }
 
     #[test]

@@ -1,4 +1,6 @@
-use seating_core::{ClosenessRule, Person, TableShape, TableTypeConfig};
+use seating_core::{
+    ClosenessRule, OptimizationResult, Person, TableShape, TableTypeConfig, ValidationReport,
+};
 use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 
@@ -48,15 +50,29 @@ pub(crate) enum Msg {
     UpdateNumberOfTables(usize, String),
     UpdatePeoplePerSide(usize, String),
     SeedChanged(String),
+    AttemptsChanged(String),
+    IterationsChanged(String),
+    SolutionsChanged(String),
     ProximityWeightChanged(String),
     UsedTableWeightChanged(String),
     OptimalTableSizeWeightChanged(String),
     Optimize,
+    OptimizeFinished(Result<OptimizationResult, ValidationReport>),
     SaveSeating,
     ExportPlanSvg,
     ExportPlanPng,
     ZoomIn,
     ZoomOut,
+    ZoomReset,
+}
+
+/// A whole-project action that would discard unsaved work, awaiting a second
+/// confirming activation of the same message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PendingConfirm {
+    NewProject,
+    OpenProject,
+    ExportCsv(PathBuf),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,14 +105,16 @@ impl Tab {
             Tab::Diagnostics => "Validation / Diagnostics",
         }
     }
+}
 
-    pub(crate) fn width(self) -> f32 {
-        match self {
-            Tab::Diagnostics => 230.0,
-            Tab::SeatingPlan => 150.0,
-            _ => 140.0,
-        }
-    }
+/// Severity of [`GuiApp`](crate::app::GuiApp)'s single message-bar line, used
+/// to pick a visually distinct container style (info/success/error).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum MessageKind {
+    #[default]
+    Info,
+    Success,
+    Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,18 +220,16 @@ impl From<Person> for PersonRowState {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ClosenessRowState {
-    pub(crate) rule: ClosenessRule,
+    pub(crate) left_id: String,
+    pub(crate) right_id: String,
     pub(crate) score_input: String,
 }
 
 impl Default for ClosenessRowState {
     fn default() -> Self {
         Self {
-            rule: ClosenessRule {
-                left_id: String::new(),
-                right_id: String::new(),
-                score: 0.0,
-            },
+            left_id: String::new(),
+            right_id: String::new(),
             score_input: "0".to_string(),
         }
     }
@@ -222,8 +238,9 @@ impl Default for ClosenessRowState {
 impl From<ClosenessRule> for ClosenessRowState {
     fn from(rule: ClosenessRule) -> Self {
         Self {
+            left_id: rule.left_id,
+            right_id: rule.right_id,
             score_input: rule.score.to_string(),
-            rule,
         }
     }
 }
@@ -302,10 +319,6 @@ pub(crate) fn selected_usize_choice(
     value: Option<usize>,
 ) -> Option<MaybeUsizeChoice> {
     options.iter().find(|choice| choice.value == value).cloned()
-}
-
-pub(crate) fn same_pair(left_a: &str, right_a: &str, left_b: &str, right_b: &str) -> bool {
-    (left_a == left_b && right_a == right_b) || (left_a == right_b && right_a == left_b)
 }
 
 pub(crate) fn display_path(path: &Option<PathBuf>) -> String {

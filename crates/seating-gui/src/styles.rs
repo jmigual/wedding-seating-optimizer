@@ -137,6 +137,42 @@ pub(crate) fn message_style(_theme: &Theme) -> container::Appearance {
     }
 }
 
+pub(crate) fn success_message_style(_theme: &Theme) -> container::Appearance {
+    container::Appearance {
+        background: Some(Background::Color(rgb(30, 61, 46))),
+        text_color: Some(rgb(214, 245, 226)),
+        border: Border {
+            color: rgb(56, 110, 79),
+            width: 1.0,
+            radius: 7.0.into(),
+        },
+        ..container::Appearance::default()
+    }
+}
+
+pub(crate) fn error_message_style(_theme: &Theme) -> container::Appearance {
+    container::Appearance {
+        background: Some(Background::Color(rgb(66, 32, 36))),
+        text_color: Some(rgb(252, 220, 220)),
+        border: Border {
+            color: rgb(133, 63, 72),
+            width: 1.0,
+            radius: 7.0.into(),
+        },
+        ..container::Appearance::default()
+    }
+}
+
+/// Text color for inline row error hints (`error_column`).
+pub(crate) fn error_text_color() -> Color {
+    rgb(237, 155, 155)
+}
+
+/// Text color for muted helper captions (e.g. the optimize-tab weight hint).
+pub(crate) fn muted_text_color() -> Color {
+    rgb(148, 166, 184)
+}
+
 pub(crate) fn toolbar_style(_theme: &Theme) -> container::Appearance {
     container::Appearance {
         background: Some(Background::Color(rgb(18, 29, 39))),

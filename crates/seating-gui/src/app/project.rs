@@ -1,6 +1,24 @@
 use super::*;
 
 impl GuiApp {
+    /// Set the single message-bar line and its severity. Multi-error
+    /// `ValidationReport`s should be summarized to one line before calling
+    /// this (see [`Self::report_summary`]) — the bar never inlines a full
+    /// report; that detail lives in the Diagnostics tab.
+    pub(super) fn set_message(&mut self, kind: MessageKind, text: impl Into<String>) {
+        self.message = text.into();
+        self.message_kind = kind;
+    }
+
+    /// Summarize a `ValidationReport` to one line: the lone error verbatim,
+    /// or an error count pointing at the Diagnostics tab.
+    pub(super) fn report_summary(report: &ValidationReport) -> String {
+        match report.errors.as_slice() {
+            [error] => error.to_string(),
+            errors => format!("{} validation errors — see Diagnostics", errors.len()),
+        }
+    }
+
     pub(super) fn people_data(&self) -> Vec<Person> {
         self.people.iter().map(|row| row.person.clone()).collect()
     }
@@ -13,8 +31,8 @@ impl GuiApp {
         for row in &self.closeness_rules {
             match parse_f64_value(&row.score_input, "score") {
                 Ok(score) => rules.push(ClosenessRule {
-                    left_id: row.rule.left_id.trim().to_string(),
-                    right_id: row.rule.right_id.trim().to_string(),
+                    left_id: row.left_id.trim().to_string(),
+                    right_id: row.right_id.trim().to_string(),
                     score,
                 }),
                 Err(error) => errors.push(error),
@@ -69,18 +87,13 @@ impl GuiApp {
             let people_per_side = if row.shape == ShapeChoice::Round {
                 None
             } else {
-                let mut side_values = Vec::new();
-                for value in row.people_per_side_input.split('|') {
-                    let value = value.trim();
-                    if value.is_empty() {
-                        continue;
-                    }
-                    match parse_required_usize_value(value, "people_per_side") {
-                        Ok(parsed) => side_values.push(parsed),
-                        Err(error) => errors.push(error),
+                match parse_people_per_side(&row.people_per_side_input) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        errors.push(error);
+                        None
                     }
                 }
-                Some(side_values)
             };
 
             entries.push((
@@ -142,20 +155,45 @@ impl GuiApp {
     }
 
     pub(super) fn optimization_config(&self) -> Result<OptimizationConfig, ValidationReport> {
+        let defaults = OptimizationConfig::default();
         let mut errors = Vec::new();
         let seed = match parse_optional_usize_value(&self.seed, "seed") {
             Ok(Some(value)) => value as u64,
-            Ok(None) => 42,
+            Ok(None) => defaults.seed,
             Err(error) => {
                 errors.push(error);
-                42
+                defaults.seed
+            }
+        };
+        let attempts = match parse_optional_usize_value(&self.attempts, "attempts") {
+            Ok(Some(value)) => value,
+            Ok(None) => defaults.attempts,
+            Err(error) => {
+                errors.push(error);
+                defaults.attempts
+            }
+        };
+        let iterations = match parse_optional_usize_value(&self.iterations, "iterations") {
+            Ok(Some(value)) => value,
+            Ok(None) => defaults.iterations,
+            Err(error) => {
+                errors.push(error);
+                defaults.iterations
+            }
+        };
+        let solutions = match parse_optional_usize_value(&self.solutions, "solutions") {
+            Ok(Some(value)) => value,
+            Ok(None) => defaults.solutions,
+            Err(error) => {
+                errors.push(error);
+                defaults.solutions
             }
         };
         let proximity_weight = match parse_f64_value(&self.proximity_weight, "proximity_weight") {
             Ok(value) => value,
             Err(error) => {
                 errors.push(error);
-                1.0
+                defaults.proximity_weight
             }
         };
         let used_table_weight = match parse_f64_value(&self.used_table_weight, "used_table_weight")
@@ -163,7 +201,7 @@ impl GuiApp {
             Ok(value) => value,
             Err(error) => {
                 errors.push(error);
-                0.0
+                defaults.used_table_weight
             }
         };
         let optimal_table_size_weight =
@@ -171,16 +209,16 @@ impl GuiApp {
                 Ok(value) => value,
                 Err(error) => {
                     errors.push(error);
-                    1.0
+                    defaults.optimal_table_size_weight
                 }
             };
 
         if errors.is_empty() {
             Ok(OptimizationConfig {
                 seed,
-                attempts: 10,
-                iterations: 200,
-                solutions: 1,
+                attempts,
+                iterations,
+                solutions,
                 proximity_weight,
                 used_table_weight,
                 optimal_table_size_weight,
@@ -234,8 +272,10 @@ impl GuiApp {
             .map(|(table_type_id, config)| TableConfigState::from_pair(table_type_id, config))
             .collect();
         self.assignments = project.seating;
-        self.seating_csv = write_seating_csv(&self.assignments).unwrap_or_default();
         self.seed = project.optimization.seed.to_string();
+        self.attempts = project.optimization.attempts.to_string();
+        self.iterations = project.optimization.iterations.to_string();
+        self.solutions = project.optimization.solutions.to_string();
         self.proximity_weight = project.optimization.proximity_weight.to_string();
         self.used_table_weight = project.optimization.used_table_weight.to_string();
         self.optimal_table_size_weight = project.optimization.optimal_table_size_weight.to_string();
@@ -243,20 +283,36 @@ impl GuiApp {
         self.closeness_path = None;
         self.tables_path = None;
         self.seating_path = None;
-        self.refresh_validation_and_layout();
+        self.recompute_validation_and_layout();
+        self.dirty = false;
     }
 
-    pub(super) fn refresh_validation_and_layout(&mut self) {
+    /// Recompute derived state (seating CSV preview, validation, generated
+    /// table lookups, seating-plan layout) from the current editable fields.
+    ///
+    /// Does not touch `dirty` — callers that represent a user edit should go
+    /// through [`Self::refresh_validation_and_layout`] instead, which marks
+    /// the project dirty before delegating here.
+    pub(super) fn recompute_validation_and_layout(&mut self) {
         self.layout = None;
         self.layout_svg = None;
-        self.seating_csv = write_seating_csv(&self.assignments).unwrap_or_default();
+        self.layout_error = None;
         let project = match self.current_project() {
             Ok(project) => project,
             Err(report) => {
                 self.validation_errors = report.errors;
+                self.generated_table_numbers = Vec::new();
+                self.table_capacities = BTreeMap::new();
                 return;
             }
         };
+        let instances = generate_table_instances(&project);
+        self.generated_table_numbers = instances.iter().map(|table| table.number).collect();
+        self.table_capacities = instances
+            .iter()
+            .map(|table| (table.number, table.max_people))
+            .collect();
+
         self.validation_errors = validate_project(&project)
             .err()
             .map(|report| report.errors)
@@ -264,11 +320,25 @@ impl GuiApp {
         if self.assignments.is_empty() || !self.validation_errors.is_empty() {
             return;
         }
-        if let Ok(layout) = build_layout(&project, &self.assignments) {
-            let svg_markup = render_svg(&layout, &RenderOptions::default());
-            self.layout = Some(layout);
-            self.layout_svg = Some(svg_markup);
+        match build_layout(&project, &self.assignments) {
+            Ok(layout) => {
+                let svg_markup = render_svg(&layout, &RenderOptions::default());
+                self.layout = Some(layout);
+                self.layout_svg = Some(svg_markup);
+            }
+            Err(report) => {
+                self.set_message(
+                    MessageKind::Error,
+                    format!("Seating plan render failed: {report}"),
+                );
+                self.layout_error = Some(report.to_string());
+            }
         }
+    }
+
+    pub(super) fn refresh_validation_and_layout(&mut self) {
+        self.dirty = true;
+        self.recompute_validation_and_layout();
     }
 
     pub(super) fn open_project(&mut self) {
@@ -277,12 +347,19 @@ impl GuiApp {
                 Ok(project) => {
                     self.apply_project_file(project);
                     self.project_path = Some(path.clone());
-                    self.message = format!("Opened project {}", path.display());
+                    self.set_message(
+                        MessageKind::Success,
+                        format!("Opened project {}", path.display()),
+                    );
                 }
-                Err(error) => self.message = format!("Project open failed: {error}"),
+                Err(error) => {
+                    self.set_message(MessageKind::Error, format!("Project open failed: {error}"))
+                }
             },
             Ok(None) => {}
-            Err(error) => self.message = format!("Project open failed: {error}"),
+            Err(error) => {
+                self.set_message(MessageKind::Error, format!("Project open failed: {error}"))
+            }
         }
     }
 
@@ -292,28 +369,53 @@ impl GuiApp {
             return;
         };
         match self.current_project_file() {
-            Ok(project) => match write_project_file(&project) {
-                Ok(contents) => match fs::write(&path, contents) {
-                    Ok(_) => {
-                        self.project_path = Some(path.clone());
-                        self.message = format!("Saved project to {}", path.display());
-                    }
-                    Err(error) => self.message = format!("Project save failed: {error}"),
-                },
-                Err(error) => self.message = format!("Project save failed: {error}"),
-            },
-            Err(report) => self.message = format!("Project save failed:\n{report}"),
+            Ok(project) => {
+                let serialized = write_project_file(&project).map_err(|error| error.to_string());
+                if self.save_output(&path, serialized, "project", false) {
+                    self.project_path = Some(path);
+                    self.dirty = false;
+                }
+            }
+            Err(report) => self.set_message(
+                MessageKind::Error,
+                format!("Project save failed: {}", Self::report_summary(&report)),
+            ),
         }
     }
 
+    /// Resolve a folder path for CSV export, prompting for confirmation
+    /// (via a repeated `Msg::ExportProjectCsv`) if it would overwrite
+    /// existing people/closeness/tables CSV files.
+    fn resolve_export_csv_folder(&mut self) -> Option<PathBuf> {
+        if let Some(PendingConfirm::ExportCsv(folder)) = self.pending_confirm.take() {
+            return Some(folder);
+        }
+        let folder = FileDialog::new().pick_folder()?;
+        let would_overwrite = ["people.csv", "closeness.csv", "tables.csv"]
+            .iter()
+            .any(|name| folder.join(name).exists());
+        if would_overwrite {
+            self.pending_confirm = Some(PendingConfirm::ExportCsv(folder));
+            self.set_message(
+                MessageKind::Info,
+                "Folder already has CSV files — click Export CSVs again to overwrite.",
+            );
+            return None;
+        }
+        Some(folder)
+    }
+
     pub(super) fn export_project_csv(&mut self) {
-        let Some(folder) = FileDialog::new().pick_folder() else {
+        let Some(folder) = self.resolve_export_csv_folder() else {
             return;
         };
         let project = match self.current_project() {
             Ok(project) => project,
             Err(report) => {
-                self.message = format!("CSV export failed:\n{report}");
+                self.set_message(
+                    MessageKind::Error,
+                    format!("CSV export failed: {}", Self::report_summary(&report)),
+                );
                 return;
             }
         };
@@ -339,12 +441,18 @@ impl GuiApp {
             {
                 Ok(_) => {}
                 Err(error) => {
-                    self.message = format!("CSV export failed for {}: {error}", path.display());
+                    self.set_message(
+                        MessageKind::Error,
+                        format!("CSV export failed for {}: {error}", path.display()),
+                    );
                     return;
                 }
             }
         }
-        self.message = format!("Exported project CSV files to {}", folder.display());
+        self.set_message(
+            MessageKind::Success,
+            format!("Exported project CSV files to {}", folder.display()),
+        );
     }
 
     pub(super) fn import_people(&mut self) {
@@ -353,13 +461,17 @@ impl GuiApp {
                 Ok(people) => {
                     self.people = people.into_iter().map(PersonRowState::from).collect();
                     self.people_path = Some(path);
-                    self.message = "Imported people CSV.".to_string();
+                    self.set_message(MessageKind::Success, "Imported people CSV.");
                     self.refresh_validation_and_layout();
                 }
-                Err(error) => self.message = format!("People import failed: {error}"),
+                Err(error) => {
+                    self.set_message(MessageKind::Error, format!("People import failed: {error}"))
+                }
             },
             Ok(None) => {}
-            Err(error) => self.message = format!("People import failed: {error}"),
+            Err(error) => {
+                self.set_message(MessageKind::Error, format!("People import failed: {error}"))
+            }
         }
     }
 
@@ -369,13 +481,19 @@ impl GuiApp {
                 Ok(rules) => {
                     self.closeness_rules = rules.into_iter().map(ClosenessRowState::from).collect();
                     self.closeness_path = Some(path);
-                    self.message = "Imported closeness CSV.".to_string();
+                    self.set_message(MessageKind::Success, "Imported closeness CSV.");
                     self.refresh_validation_and_layout();
                 }
-                Err(error) => self.message = format!("Closeness import failed: {error}"),
+                Err(error) => self.set_message(
+                    MessageKind::Error,
+                    format!("Closeness import failed: {error}"),
+                ),
             },
             Ok(None) => {}
-            Err(error) => self.message = format!("Closeness import failed: {error}"),
+            Err(error) => self.set_message(
+                MessageKind::Error,
+                format!("Closeness import failed: {error}"),
+            ),
         }
     }
 
@@ -390,111 +508,125 @@ impl GuiApp {
                         })
                         .collect();
                     self.tables_path = Some(path);
-                    self.message = "Imported tables CSV.".to_string();
+                    self.set_message(MessageKind::Success, "Imported tables CSV.");
                     self.refresh_validation_and_layout();
                 }
-                Err(error) => self.message = format!("Tables import failed: {error}"),
+                Err(error) => {
+                    self.set_message(MessageKind::Error, format!("Tables import failed: {error}"))
+                }
             },
             Ok(None) => {}
-            Err(error) => self.message = format!("Tables import failed: {error}"),
+            Err(error) => {
+                self.set_message(MessageKind::Error, format!("Tables import failed: {error}"))
+            }
+        }
+    }
+
+    /// Serialize `contents`, write it to `path`, and set the message bar to
+    /// report the outcome. Returns whether the write succeeded, so callers
+    /// can decide whether to remember `path` as the entity's saved location.
+    fn save_output<E: std::fmt::Display>(
+        &mut self,
+        path: &std::path::Path,
+        contents: Result<String, E>,
+        label: &str,
+        export_as: bool,
+    ) -> bool {
+        match contents {
+            Ok(contents) => match fs::write(path, contents) {
+                Ok(_) => {
+                    self.set_message(
+                        MessageKind::Success,
+                        format!(
+                            "{} {label} to {}",
+                            if export_as { "Exported" } else { "Saved" },
+                            path.display()
+                        ),
+                    );
+                    true
+                }
+                Err(error) => {
+                    self.set_message(MessageKind::Error, format!("{label} save failed: {error}"));
+                    false
+                }
+            },
+            Err(error) => {
+                self.set_message(MessageKind::Error, format!("{label} save failed: {error}"));
+                false
+            }
         }
     }
 
     pub(super) fn save_people(&mut self, export_as: bool) {
-        if let Some(path) = self.resolve_save_path(export_as, &self.people_path, "people.csv") {
-            match write_people_csv(&self.people_data()) {
-                Ok(contents) => match fs::write(&path, contents) {
-                    Ok(_) => {
-                        if !export_as {
-                            self.people_path = Some(path.clone());
-                        }
-                        self.message = format!(
-                            "{} people CSV to {}",
-                            if export_as { "Exported" } else { "Saved" },
-                            path.display()
-                        );
-                    }
-                    Err(error) => self.message = format!("People save failed: {error}"),
-                },
-                Err(error) => self.message = format!("People save failed: {error}"),
-            }
+        let Some(path) = self.resolve_save_path(export_as, &self.people_path, "people.csv") else {
+            return;
+        };
+        let serialized = write_people_csv(&self.people_data()).map_err(|error| error.to_string());
+        if self.save_output(&path, serialized, "people CSV", export_as) && !export_as {
+            self.people_path = Some(path);
         }
     }
 
     pub(super) fn save_closeness(&mut self, export_as: bool) {
-        if let Some(path) = self.resolve_save_path(export_as, &self.closeness_path, "closeness.csv")
-        {
-            match self.materialize_closeness_rules() {
-                Ok(rules) => match write_closeness_csv(&rules) {
-                    Ok(contents) => match fs::write(&path, contents) {
-                        Ok(_) => {
-                            if !export_as {
-                                self.closeness_path = Some(path.clone());
-                            }
-                            self.message = format!(
-                                "{} closeness CSV to {}",
-                                if export_as { "Exported" } else { "Saved" },
-                                path.display()
-                            );
-                        }
-                        Err(error) => self.message = format!("Closeness save failed: {error}"),
-                    },
-                    Err(error) => self.message = format!("Closeness save failed: {error}"),
-                },
-                Err(report) => self.message = format!("Closeness save failed:\n{report}"),
+        let Some(path) = self.resolve_save_path(export_as, &self.closeness_path, "closeness.csv")
+        else {
+            return;
+        };
+        match self.materialize_closeness_rules() {
+            Ok(rules) => {
+                let serialized = write_closeness_csv(&rules).map_err(|error| error.to_string());
+                if self.save_output(&path, serialized, "closeness CSV", export_as) && !export_as {
+                    self.closeness_path = Some(path);
+                }
             }
+            Err(report) => self.set_message(
+                MessageKind::Error,
+                format!("Closeness save failed: {}", Self::report_summary(&report)),
+            ),
         }
     }
 
     pub(super) fn save_tables(&mut self, export_as: bool) {
-        if let Some(path) = self.resolve_save_path(export_as, &self.tables_path, "tables.csv") {
-            let table_map = self
-                .materialize_table_entries()
-                .and_then(build_table_type_map);
-            match table_map {
-                Ok(table_types) => match write_tables_csv(&table_types) {
-                    Ok(contents) => match fs::write(&path, contents) {
-                        Ok(_) => {
-                            if !export_as {
-                                self.tables_path = Some(path.clone());
-                            }
-                            self.message = format!(
-                                "{} tables CSV to {}",
-                                if export_as { "Exported" } else { "Saved" },
-                                path.display()
-                            );
-                        }
-                        Err(error) => self.message = format!("Tables save failed: {error}"),
-                    },
-                    Err(error) => self.message = format!("Tables save failed: {error}"),
-                },
-                Err(report) => self.message = format!("Tables save failed:\n{report}"),
+        let Some(path) = self.resolve_save_path(export_as, &self.tables_path, "tables.csv") else {
+            return;
+        };
+        let table_map = self
+            .materialize_table_entries()
+            .and_then(build_table_type_map);
+        match table_map {
+            Ok(table_types) => {
+                let serialized = write_tables_csv(&table_types).map_err(|error| error.to_string());
+                if self.save_output(&path, serialized, "tables CSV", export_as) && !export_as {
+                    self.tables_path = Some(path);
+                }
             }
+            Err(report) => self.set_message(
+                MessageKind::Error,
+                format!("Tables save failed: {}", Self::report_summary(&report)),
+            ),
         }
     }
 
     pub(super) fn save_seating(&mut self) {
         if self.assignments.is_empty() {
-            self.message = "No seating assignment to save yet.".to_string();
+            self.set_message(MessageKind::Error, "No seating assignment to save yet.");
             return;
         }
-        if let Some(path) = self.resolve_save_path(false, &self.seating_path, "seating.csv") {
-            match write_seating_csv(&self.assignments) {
-                Ok(contents) => match fs::write(&path, contents) {
-                    Ok(_) => {
-                        self.seating_path = Some(path.clone());
-                        self.message = format!("Saved seating CSV to {}", path.display());
-                    }
-                    Err(error) => self.message = format!("Seating save failed: {error}"),
-                },
-                Err(error) => self.message = format!("Seating save failed: {error}"),
-            }
+        let Some(path) = self.resolve_save_path(false, &self.seating_path, "seating.csv") else {
+            return;
+        };
+        let serialized = write_seating_csv(&self.assignments).map_err(|error| error.to_string());
+        if self.save_output(&path, serialized, "seating CSV", false) {
+            self.seating_path = Some(path);
         }
     }
 
     pub(super) fn export_plan_svg(&mut self) {
         let Some(layout) = &self.layout else {
-            self.message = "No valid seating plan available for SVG export.".to_string();
+            self.set_message(
+                MessageKind::Error,
+                "No valid seating plan available for SVG export.",
+            );
             return;
         };
         let Some(path) = FileDialog::new()
@@ -504,14 +636,22 @@ impl GuiApp {
             return;
         };
         match fs::write(&path, render_svg(layout, &RenderOptions::default())) {
-            Ok(_) => self.message = format!("Exported SVG to {}", path.display()),
-            Err(error) => self.message = format!("SVG export failed: {error}"),
+            Ok(_) => self.set_message(
+                MessageKind::Success,
+                format!("Exported SVG to {}", path.display()),
+            ),
+            Err(error) => {
+                self.set_message(MessageKind::Error, format!("SVG export failed: {error}"))
+            }
         }
     }
 
     pub(super) fn export_plan_png(&mut self) {
         let Some(layout) = &self.layout else {
-            self.message = "No valid seating plan available for PNG export.".to_string();
+            self.set_message(
+                MessageKind::Error,
+                "No valid seating plan available for PNG export.",
+            );
             return;
         };
         let Some(path) = FileDialog::new()
@@ -521,8 +661,13 @@ impl GuiApp {
             return;
         };
         match render_png(layout, &RenderOptions::default(), &path) {
-            Ok(_) => self.message = format!("Exported PNG to {}", path.display()),
-            Err(error) => self.message = format!("PNG export failed: {error}"),
+            Ok(_) => self.set_message(
+                MessageKind::Success,
+                format!("Exported PNG to {}", path.display()),
+            ),
+            Err(error) => {
+                self.set_message(MessageKind::Error, format!("PNG export failed: {error}"))
+            }
         }
     }
 
@@ -596,9 +741,9 @@ impl GuiApp {
             value: None,
         }];
         choices.extend(
-            self.generated_table_numbers()
-                .into_iter()
-                .map(|number| MaybeUsizeChoice {
+            self.generated_table_numbers
+                .iter()
+                .map(|&number| MaybeUsizeChoice {
                     label: format!("Table {number}"),
                     value: Some(number),
                 }),
@@ -620,8 +765,7 @@ impl GuiApp {
             value: None,
         }];
         if let Some(table_number) = person.locked_table {
-            let capacity = self.table_capacity_for_number(table_number);
-            if let Some(capacity) = capacity {
+            if let Some(&capacity) = self.table_capacities.get(&table_number) {
                 choices.extend((0..capacity).map(|seat| MaybeUsizeChoice {
                     label: format!("Seat {seat}"),
                     value: Some(seat),
@@ -637,27 +781,6 @@ impl GuiApp {
             }
         }
         choices
-    }
-
-    pub(super) fn generated_table_numbers(&self) -> Vec<usize> {
-        self.current_project()
-            .ok()
-            .map(|project| {
-                generate_table_instances(&project)
-                    .into_iter()
-                    .map(|table| table.number)
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    pub(super) fn table_capacity_for_number(&self, table_number: usize) -> Option<usize> {
-        self.current_project().ok().and_then(|project| {
-            generate_table_instances(&project)
-                .into_iter()
-                .find(|table| table.number == table_number)
-                .map(|table| table.max_people)
-        })
     }
 
     pub(super) fn generated_table_summary(&self) -> Vec<String> {
@@ -677,68 +800,27 @@ impl GuiApp {
     pub(super) fn person_errors(&self, person: &Person) -> Vec<String> {
         self.validation_errors
             .iter()
-            .filter_map(|error| match error {
-                ValidationError::DuplicatePersonId(id) if id == &person.id => {
-                    Some(error.to_string())
-                }
-                ValidationError::NamespaceCollision(id) if id == &person.id => {
-                    Some(error.to_string())
-                }
-                ValidationError::UnknownTableTypeForPerson { person_id, .. }
-                    if person_id == &person.id =>
-                {
-                    Some(error.to_string())
-                }
-                ValidationError::LockedSeatRequiresLockedTable(id) if id == &person.id => {
-                    Some(error.to_string())
-                }
-                ValidationError::LockedTableDoesNotExist { person_id, .. }
-                    if person_id == &person.id =>
-                {
-                    Some(error.to_string())
-                }
-                ValidationError::LockedSeatOutOfRange { person_id, .. }
-                    if person_id == &person.id =>
-                {
-                    Some(error.to_string())
-                }
-                ValidationError::LockedTableTypeMismatch { person_id, .. }
-                    if person_id == &person.id =>
-                {
-                    Some(error.to_string())
-                }
-                ValidationError::ImpossiblePersonAssignment { person_id }
-                    if person_id == &person.id =>
-                {
-                    Some(error.to_string())
-                }
-                _ => None,
-            })
+            .filter(|error| error.person_id() == Some(person.id.as_str()))
+            .map(ToString::to_string)
             .collect()
     }
 
-    pub(super) fn closeness_errors(&self, rule: &ClosenessRule, score_input: &str) -> Vec<String> {
+    pub(super) fn closeness_errors(
+        &self,
+        left_id: &str,
+        right_id: &str,
+        score_input: &str,
+    ) -> Vec<String> {
         let mut errors: Vec<String> = self
             .validation_errors
             .iter()
-            .filter_map(|error| match error {
-                ValidationError::UnknownIdInCloseness(id)
-                    if id == &rule.left_id || id == &rule.right_id =>
-                {
-                    Some(error.to_string())
-                }
-                ValidationError::DuplicateClosenessRule(left, right)
-                    if same_pair(left, right, &rule.left_id, &rule.right_id) =>
-                {
-                    Some(error.to_string())
-                }
-                ValidationError::InvalidClosenessScore { left, right }
-                    if left == &rule.left_id && right == &rule.right_id =>
-                {
-                    Some(error.to_string())
-                }
-                _ => None,
+            .filter(|error| {
+                matches!(error, ValidationError::UnknownIdInCloseness(id) if id == left_id || id == right_id)
+                    || error
+                        .closeness_pair()
+                        .is_some_and(|(left, right)| rules_match(left, right, left_id, right_id))
             })
+            .map(ToString::to_string)
             .collect();
         if let Err(error) = parse_f64_value(score_input, "score") {
             errors.push(error.to_string());
@@ -750,45 +832,12 @@ impl GuiApp {
         let mut errors: Vec<String> = self
             .validation_errors
             .iter()
-            .filter_map(|error| match error {
-                ValidationError::DuplicateTableTypeId(id) if id == &row.table_type_id => {
-                    Some(error.to_string())
-                }
-                ValidationError::EmptyTableTypeId if row.table_type_id.trim().is_empty() => {
-                    Some(error.to_string())
-                }
-                ValidationError::MissingPeoplePerSide(table_type)
-                    if table_type == &row.table_type_id =>
-                {
-                    Some(error.to_string())
-                }
-                ValidationError::InvalidPeoplePerSideLength { table_type, .. }
-                    if table_type == &row.table_type_id =>
-                {
-                    Some(error.to_string())
-                }
-                ValidationError::PeoplePerSideMismatch { table_type, .. }
-                    if table_type == &row.table_type_id =>
-                {
-                    Some(error.to_string())
-                }
-                ValidationError::InvalidMinMax { table_type, .. }
-                    if table_type == &row.table_type_id =>
-                {
-                    Some(error.to_string())
-                }
-                ValidationError::InvalidRecommendedPeople { table_type, .. }
-                    if table_type == &row.table_type_id =>
-                {
-                    Some(error.to_string())
-                }
-                ValidationError::InvalidNumberOfTables { table_type, .. }
-                    if table_type == &row.table_type_id =>
-                {
-                    Some(error.to_string())
-                }
-                _ => None,
+            .filter(|error| {
+                error.table_type_id() == Some(row.table_type_id.as_str())
+                    || (matches!(error, ValidationError::EmptyTableTypeId)
+                        && row.table_type_id.trim().is_empty())
             })
+            .map(ToString::to_string)
             .collect();
 
         for (field, input) in [
@@ -808,47 +857,11 @@ impl GuiApp {
         }
 
         if row.shape != ShapeChoice::Round {
-            for input in row.people_per_side_input.split('|') {
-                let input = input.trim();
-                if input.is_empty() {
-                    continue;
-                }
-                if let Err(error) = parse_required_usize_value(input, "people_per_side") {
-                    errors.push(error.to_string());
-                }
+            if let Err(error) = parse_people_per_side(&row.people_per_side_input) {
+                errors.push(error.to_string());
             }
         }
 
         errors
-    }
-
-    pub(super) fn reference_matches(
-        &self,
-        options: &[seating_core::ReferenceIdOption],
-        query: &str,
-    ) -> Vec<seating_core::ReferenceIdOption> {
-        let normalized = query.trim().to_ascii_lowercase();
-        options
-            .iter()
-            .filter(|option| {
-                normalized.is_empty()
-                    || option.id.to_ascii_lowercase().contains(&normalized)
-                    || option.label.to_ascii_lowercase().contains(&normalized)
-            })
-            .take(5)
-            .cloned()
-            .collect()
-    }
-
-    pub(super) fn reference_label(
-        &self,
-        id: &str,
-        options: &[seating_core::ReferenceIdOption],
-    ) -> String {
-        options
-            .iter()
-            .find(|option| option.id == id)
-            .map(|option| option.label.clone())
-            .unwrap_or_else(|| format!("{id} — unknown"))
     }
 }

@@ -10,11 +10,11 @@ impl GuiApp {
                 logo_mark(),
                 text("Wedding Seating").size(16),
                 spacer(),
-                secondary_button("Open Project", Msg::OpenProject),
-                secondary_button("Save Project", Msg::SaveProject),
+                secondary_button("New", Msg::NewProject),
+                secondary_button("Open", Msg::OpenProject),
+                secondary_button("Save", Msg::SaveProject),
                 secondary_button("Save As", Msg::SaveProjectAs),
                 secondary_button("Export CSVs", Msg::ExportProjectCsv),
-                secondary_button("New Project", Msg::NewProject),
             ]
             .spacing(10)
             .align_items(Alignment::Center),

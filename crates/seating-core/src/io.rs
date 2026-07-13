@@ -8,6 +8,9 @@
 //! - [`parse_project_file`] / [`write_project_file`]
 //! - [`make_project`] – convenience constructor that parses all three inputs
 
+use crate::editing::{
+    parse_optional_usize_list, parse_optional_usize_value, parse_required_usize_value,
+};
 use crate::models::{
     ClosenessRule, Person, ProjectFile, ProjectInput, SeatingAssignment, TableShape,
     TableTypeConfig, TableTypeId, ValidationError, PROJECT_FILE_VERSION,
@@ -118,8 +121,8 @@ pub fn parse_people_csv(input: &str) -> Result<Vec<Person>, ValidationError> {
     let mut people = Vec::new();
     for row in rdr.deserialize::<PersonCsvRow>() {
         let row = row.map_err(|e| ValidationError::MalformedInput(format!("people CSV: {e}")))?;
-        let locked_table = parse_optional_usize(&row.locked_table, "locked_table")?;
-        let locked_seat = parse_optional_usize(&row.locked_seat, "locked_seat")?;
+        let locked_table = parse_optional_usize_value(&row.locked_table, "locked_table")?;
+        let locked_seat = parse_optional_usize_value(&row.locked_seat, "locked_seat")?;
         let groups = parse_pipe_separated(&row.groups);
         people.push(Person {
             id: row.id,
@@ -175,11 +178,12 @@ pub fn parse_tables_csv(
             return Err(ValidationError::EmptyTableTypeId);
         }
         let shape = parse_table_shape(&row.shape)?;
-        let max_people = parse_required_usize(&row.max_people, "max_people")?;
+        let max_people = parse_required_usize_value(&row.max_people, "max_people")?;
         let recommended_people =
-            parse_optional_usize(&row.recommended_people, "recommended_people")?;
-        let min_people = parse_optional_usize(&row.min_people, "min_people")?;
-        let number_of_tables = parse_optional_usize(&row.number_of_tables, "number_of_tables")?;
+            parse_optional_usize_value(&row.recommended_people, "recommended_people")?;
+        let min_people = parse_optional_usize_value(&row.min_people, "min_people")?;
+        let number_of_tables =
+            parse_optional_usize_value(&row.number_of_tables, "number_of_tables")?;
         let people_per_side = parse_optional_usize_list(&row.people_per_side, "people_per_side")?;
         if tables
             .insert(
@@ -226,16 +230,17 @@ pub fn parse_seating_csv(input: &str) -> Result<Vec<SeatingAssignment>, Validati
 /// Parse a `.wseat` JSON project file.
 ///
 /// # Errors
-/// Returns [`ValidationError::MalformedInput`] when the JSON is invalid or the
-/// project file schema version is unsupported.
+/// Returns [`ValidationError::MalformedInput`] when the JSON is invalid, or
+/// [`ValidationError::UnsupportedProjectVersion`] when the project file
+/// schema version is unsupported.
 pub fn parse_project_file(input: &str) -> Result<ProjectFile, ValidationError> {
     let project: ProjectFile = serde_json::from_str(input)
         .map_err(|e| ValidationError::MalformedInput(format!("project file JSON: {e}")))?;
     if project.version != PROJECT_FILE_VERSION {
-        return Err(ValidationError::MalformedInput(format!(
-            "unsupported project file version {} (expected {PROJECT_FILE_VERSION})",
-            project.version
-        )));
+        return Err(ValidationError::UnsupportedProjectVersion {
+            found: project.version,
+            expected: PROJECT_FILE_VERSION,
+        });
     }
     Ok(project)
 }
@@ -355,14 +360,15 @@ pub fn write_seating_csv(assignments: &[SeatingAssignment]) -> Result<String, Va
 /// Serialize a `.wseat` JSON project file.
 ///
 /// # Errors
-/// Returns [`ValidationError::MalformedInput`] on any serialization error or
-/// when the project file schema version is unsupported.
+/// Returns [`ValidationError::MalformedInput`] on any serialization error, or
+/// [`ValidationError::UnsupportedProjectVersion`] when the project file
+/// schema version is unsupported.
 pub fn write_project_file(project: &ProjectFile) -> Result<String, ValidationError> {
     if project.version != PROJECT_FILE_VERSION {
-        return Err(ValidationError::MalformedInput(format!(
-            "unsupported project file version {} (expected {PROJECT_FILE_VERSION})",
-            project.version
-        )));
+        return Err(ValidationError::UnsupportedProjectVersion {
+            found: project.version,
+            expected: PROJECT_FILE_VERSION,
+        });
     }
     serde_json::to_string_pretty(project)
         .map_err(|e| ValidationError::MalformedInput(format!("project file serialization: {e}")))
@@ -395,45 +401,6 @@ fn finish_writer(wtr: csv::Writer<Vec<u8>>, label: &str) -> Result<String, Valid
         .map_err(|e| ValidationError::MalformedInput(format!("{label} finalize: {e}")))?;
     String::from_utf8(bytes)
         .map_err(|e| ValidationError::MalformedInput(format!("{label} utf8: {e}")))
-}
-
-/// Parse a string as `usize`, returning `None` for empty strings.
-fn parse_optional_usize(s: &str, field: &str) -> Result<Option<usize>, ValidationError> {
-    if s.is_empty() {
-        Ok(None)
-    } else {
-        s.parse::<usize>()
-            .map(Some)
-            .map_err(|e| ValidationError::MalformedInput(format!("invalid {field} '{s}': {e}")))
-    }
-}
-
-fn parse_required_usize(s: &str, field: &str) -> Result<usize, ValidationError> {
-    if s.is_empty() {
-        Err(ValidationError::MalformedInput(format!(
-            "missing required {field}"
-        )))
-    } else {
-        s.parse::<usize>()
-            .map_err(|e| ValidationError::MalformedInput(format!("invalid {field} '{s}': {e}")))
-    }
-}
-
-fn parse_optional_usize_list(s: &str, field: &str) -> Result<Option<Vec<usize>>, ValidationError> {
-    if s.is_empty() {
-        return Ok(None);
-    }
-    let mut values = Vec::new();
-    for value in s.split('|') {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        values.push(trimmed.parse::<usize>().map_err(|e| {
-            ValidationError::MalformedInput(format!("invalid {field} value '{trimmed}': {e}"))
-        })?);
-    }
-    Ok(Some(values))
 }
 
 fn parse_table_shape(s: &str) -> Result<TableShape, ValidationError> {
