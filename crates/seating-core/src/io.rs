@@ -12,8 +12,8 @@ use crate::editing::{
     parse_optional_usize_list, parse_optional_usize_value, parse_required_usize_value,
 };
 use crate::models::{
-    ClosenessRule, Person, ProjectFile, ProjectInput, SeatingAssignment, TableShape,
-    TableTypeConfig, TableTypeId, ValidationError, PROJECT_FILE_VERSION,
+    ClosenessRule, PROJECT_FILE_VERSION, Person, ProjectFile, ProjectInput, SeatingAssignment,
+    TableShape, TableTypeConfig, TableTypeId, ValidationError,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};

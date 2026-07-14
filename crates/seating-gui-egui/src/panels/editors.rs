@@ -8,13 +8,22 @@
 use crate::state::{ClosenessRow, SharedState, TableConfigRow};
 use eframe::egui;
 use seating_core::{
+    ClosenessRule, OptimizationConfig, ReferenceIdOption, TableShape, ValidationError,
     collect_group_ids, parse_f64_value, reference_id_options, reference_label, remove_group,
-    rename_group, rules_match, ClosenessRule, OptimizationConfig, TableShape, ValidationError,
+    rename_group, rules_match,
 };
 use std::collections::HashMap;
 
 const ERROR_COLOR: egui::Color32 = egui::Color32::from_rgb(220, 90, 90);
 const SUCCESS_COLOR: egui::Color32 = egui::Color32::from_rgb(90, 200, 120);
+
+/// Item spacing budgeted between fields on an explicit-width row line
+/// (matches egui's default `Spacing::item_spacing.x`).
+const ROW_SPACING: f32 = 8.0;
+/// Budgeted width of a "Delete" button. Its text is a constant, so this is a
+/// one-time, generous, deterministic estimate — not something that varies
+/// per row.
+const DELETE_BUDGET: f32 = 90.0;
 
 /// UI-only state for the editors panel: per-person "new group" scratch
 /// input (kept index-aligned with `SharedState::people`), and per-group
@@ -29,7 +38,7 @@ pub(crate) fn show(shared: &mut SharedState, state: &mut EditorsState, ui: &mut 
     ui.heading("Editors");
 
     egui::CollapsingHeader::new(format!("People ({})", shared.people.len()))
-        .id_source("editors_people")
+        .id_salt("editors_people")
         .default_open(true)
         .show(ui, |ui| people_section(shared, state, ui));
 
@@ -37,32 +46,44 @@ pub(crate) fn show(shared: &mut SharedState, state: &mut EditorsState, ui: &mut 
         "Groups ({})",
         collect_group_ids(&shared.people).len()
     ))
-    .id_source("editors_groups")
+    .id_salt("editors_groups")
     .default_open(false)
     .show(ui, |ui| groups_section(shared, state, ui));
 
     egui::CollapsingHeader::new(format!("Closeness ({})", shared.closeness_rules.len()))
-        .id_source("editors_closeness")
+        .id_salt("editors_closeness")
         .default_open(false)
         .show(ui, |ui| closeness_section(shared, ui));
 
     egui::CollapsingHeader::new(format!("Tables ({})", shared.table_configs.len()))
-        .id_source("editors_tables")
+        .id_salt("editors_tables")
         .default_open(false)
         .show(ui, |ui| tables_section(shared, ui));
 
     egui::CollapsingHeader::new("Settings")
-        .id_source("editors_settings")
+        .id_salt("editors_settings")
         .default_open(false)
         .show(ui, |ui| settings_section(shared, ui));
 
     egui::CollapsingHeader::new(format!("Diagnostics ({})", shared.validation.len()))
-        .id_source("editors_diagnostics")
+        .id_salt("editors_diagnostics")
         .default_open(!shared.validation.is_empty())
         .show(ui, |ui| diagnostics_section(shared, ui));
 }
 
 // ── People ──────────────────────────────────────────────────────────────────
+
+const PEOPLE_WIDE_MIN_WIDTH: f32 = 920.0;
+const PEOPLE_MEDIUM_MIN_WIDTH: f32 = 660.0;
+const PERSON_ID_W: f32 = 70.0;
+const PERSON_NAME_MIN_W: f32 = 80.0;
+const TABLE_TYPE_LABEL_W: f32 = 90.0;
+const TABLE_TYPE_COMBO_W: f32 = 100.0;
+const TABLE_TYPE_MAX_CHARS: usize = 9;
+const LOCKED_TABLE_LABEL_W: f32 = 110.0;
+const LOCKED_TABLE_COMBO_W: f32 = 90.0;
+const LOCKED_SEAT_LABEL_W: f32 = 100.0;
+const LOCKED_SEAT_COMBO_W: f32 = 90.0;
 
 fn people_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
@@ -104,129 +125,90 @@ fn people_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
         ui.group(|ui| {
             let mut changed = false;
 
-            // Wrapped so the id/name/delete, table-type, and locked
-            // table/seat clusters flow onto fewer lines on a wide panel and
-            // degrade to one cluster per line (the old stacked layout) on a
-            // narrow one.
-            //
-            // Each cluster below is itself `horizontal_wrapped`, not plain
-            // `horizontal`: a plain nested `horizontal` is laid out with an
-            // egui-reported "desired size" of whatever room is left in the
-            // outer row (not its actual content width), so when its content
-            // doesn't fit, it silently overflows sideways instead of
-            // wrapping — and that overflow bubbles up through the
-            // `ScrollArea`/`Frame` to the SidePanel's persisted width,
-            // permanently widening the panel. A wrapped cluster instead
-            // drops its own overflow to a second internal line, which
-            // bounds its width to what it was given.
-            ui.horizontal_wrapped(|ui| {
-                ui.horizontal_wrapped(|ui| {
-                    changed |= ui
-                        .add(
-                            egui::TextEdit::singleline(&mut shared.people[index].id)
-                                .hint_text("id")
-                                .desired_width(70.0),
-                        )
-                        .changed();
-                    changed |= ui
-                        .add(
-                            egui::TextEdit::singleline(&mut shared.people[index].name)
-                                .hint_text("name")
-                                .desired_width(110.0),
-                        )
-                        .changed();
-                    if ui.button("Delete").clicked() {
+            // Explicit width-branched layout, never `horizontal_wrapped`:
+            // pick a tier from this row's actual available width (already
+            // the panel's real, resized width — the SidePanel's ScrollArea
+            // runs with `auto_shrink` off, so it reports the assigned width
+            // rather than re-measuring content and pushing that back up),
+            // then lay out plain `ui.horizontal` lines. A label can never
+            // wrap mid-word here because these lines are never
+            // `horizontal_wrapped`. Every non-flex widget on a line gets an
+            // explicit, deterministic width — TextEdit honors
+            // `desired_width` exactly, and ComboBox text is truncated
+            // (`truncate_label`) so its "at least" width (egui 0.27 grows a
+            // ComboBox past `.width()` to fit unwrapped `selected_text`)
+            // never exceeds what we budget for it. The one flex field per
+            // line (`name`) gets whatever's left, computed *before* it's
+            // drawn from those same deterministic budgets. So every line's
+            // total is bounded by `w` by construction: the row's min_rect
+            // can never demand more width than the panel actually granted
+            // it, which is what stops the resize/snap-back loop this
+            // replaces.
+            let w = ui.available_width();
+            let wide = w >= PEOPLE_WIDE_MIN_WIDTH;
+            let medium = !wide && w >= PEOPLE_MEDIUM_MIN_WIDTH;
+
+            if wide {
+                let name_w = (w
+                    - PERSON_ID_W
+                    - DELETE_BUDGET
+                    - TABLE_TYPE_LABEL_W
+                    - TABLE_TYPE_COMBO_W
+                    - LOCKED_TABLE_LABEL_W
+                    - LOCKED_TABLE_COMBO_W
+                    - LOCKED_SEAT_LABEL_W
+                    - LOCKED_SEAT_COMBO_W
+                    - ROW_SPACING * 8.0)
+                    .max(PERSON_NAME_MIN_W);
+                ui.horizontal(|ui| {
+                    changed |= id_field(ui, shared, index, PERSON_ID_W);
+                    changed |= name_field(ui, shared, index, name_w);
+                    if delete_button(ui) {
+                        delete_index = Some(index);
+                    }
+                    changed |=
+                        table_type_field(ui, shared, &table_type_ids, index, TABLE_TYPE_COMBO_W);
+                    changed |= locked_table_field(ui, shared, index, LOCKED_TABLE_COMBO_W);
+                    changed |= locked_seat_field(ui, shared, index, LOCKED_SEAT_COMBO_W);
+                });
+            } else if medium {
+                let name_w =
+                    (w - PERSON_ID_W - DELETE_BUDGET - ROW_SPACING * 2.0).max(PERSON_NAME_MIN_W);
+                ui.horizontal(|ui| {
+                    changed |= id_field(ui, shared, index, PERSON_ID_W);
+                    changed |= name_field(ui, shared, index, name_w);
+                    if delete_button(ui) {
                         delete_index = Some(index);
                     }
                 });
-
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Table type:");
-                    let current = shared.people[index].table_type.clone();
-                    egui::ComboBox::from_id_source(("person_table_type", index))
-                        .selected_text(current.clone().unwrap_or_else(|| "(any)".to_string()))
-                        .show_ui(ui, |ui| {
-                            if ui.selectable_label(current.is_none(), "(any)").clicked() {
-                                shared.people[index].table_type = None;
-                                changed = true;
-                            }
-                            for table_type_id in &table_type_ids {
-                                let selected = current.as_deref() == Some(table_type_id.as_str());
-                                if ui.selectable_label(selected, table_type_id).clicked() {
-                                    shared.people[index].table_type = Some(table_type_id.clone());
-                                    changed = true;
-                                }
-                            }
-                        });
+                ui.horizontal(|ui| {
+                    changed |=
+                        table_type_field(ui, shared, &table_type_ids, index, TABLE_TYPE_COMBO_W);
+                    changed |= locked_table_field(ui, shared, index, LOCKED_TABLE_COMBO_W);
+                    changed |= locked_seat_field(ui, shared, index, LOCKED_SEAT_COMBO_W);
                 });
-
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Locked table:");
-                    let current_table = shared.people[index].locked_table;
-                    egui::ComboBox::from_id_source(("person_locked_table", index))
-                        .selected_text(
-                            current_table
-                                .map(|t| t.to_string())
-                                .unwrap_or_else(|| "(none)".to_string()),
-                        )
-                        .show_ui(ui, |ui| {
-                            if ui
-                                .selectable_label(current_table.is_none(), "(none)")
-                                .clicked()
-                            {
-                                shared.people[index].locked_table = None;
-                                shared.people[index].locked_seat = None;
-                                changed = true;
-                            }
-                            for &table_number in &shared.generated_table_numbers {
-                                let selected = current_table == Some(table_number);
-                                if ui
-                                    .selectable_label(selected, table_number.to_string())
-                                    .clicked()
-                                {
-                                    shared.people[index].locked_table = Some(table_number);
-                                    changed = true;
-                                }
-                            }
-                        });
-
-                    let locked_table = shared.people[index].locked_table;
-                    let capacity =
-                        locked_table.and_then(|t| shared.table_capacities.get(&t).copied());
-                    // Label lives inside the enabled scope too, so hovering
-                    // either it or the combo shows why the control is
-                    // disabled (a seat index is meaningless without a
-                    // locked table).
-                    ui.add_enabled_ui(locked_table.is_some(), |ui| {
-                        ui.label("Locked seat:");
-                        let current_seat = shared.people[index].locked_seat;
-                        egui::ComboBox::from_id_source(("person_locked_seat", index))
-                            .selected_text(
-                                current_seat
-                                    .map(|s| s.to_string())
-                                    .unwrap_or_else(|| "(none)".to_string()),
-                            )
-                            .show_ui(ui, |ui| {
-                                if ui
-                                    .selectable_label(current_seat.is_none(), "(none)")
-                                    .clicked()
-                                {
-                                    shared.people[index].locked_seat = None;
-                                    changed = true;
-                                }
-                                for seat in 0..capacity.unwrap_or(0) {
-                                    let selected = current_seat == Some(seat);
-                                    if ui.selectable_label(selected, seat.to_string()).clicked() {
-                                        shared.people[index].locked_seat = Some(seat);
-                                        changed = true;
-                                    }
-                                }
-                            });
-                    })
-                    .response
-                    .on_disabled_hover_text("Select a locked table first");
+            } else {
+                ui.horizontal(|ui| {
+                    changed |= id_field(ui, shared, index, PERSON_ID_W);
+                    if delete_button(ui) {
+                        delete_index = Some(index);
+                    }
                 });
-            });
+                ui.horizontal(|ui| {
+                    let name_w = (w - ROW_SPACING).max(PERSON_NAME_MIN_W);
+                    changed |= name_field(ui, shared, index, name_w);
+                });
+                ui.horizontal(|ui| {
+                    changed |=
+                        table_type_field(ui, shared, &table_type_ids, index, TABLE_TYPE_COMBO_W);
+                });
+                ui.horizontal(|ui| {
+                    changed |= locked_table_field(ui, shared, index, LOCKED_TABLE_COMBO_W);
+                });
+                ui.horizontal(|ui| {
+                    changed |= locked_seat_field(ui, shared, index, LOCKED_SEAT_COMBO_W);
+                });
+            }
 
             ui.horizontal_wrapped(|ui| {
                 ui.label("Groups:");
@@ -241,7 +223,7 @@ fn people_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
                     changed = true;
                 }
                 let mut add_existing_group = None;
-                egui::ComboBox::from_id_source(("person_group_picker", index))
+                egui::ComboBox::from_id_salt(("person_group_picker", index))
                     .selected_text("+ existing group")
                     .show_ui(ui, |ui| {
                         for group in &all_groups {
@@ -291,6 +273,155 @@ fn people_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
         state.new_group_inputs.remove(index);
         shared.refresh();
     }
+}
+
+fn id_field(ui: &mut egui::Ui, shared: &mut SharedState, index: usize, width: f32) -> bool {
+    ui.add(
+        egui::TextEdit::singleline(&mut shared.people[index].id)
+            .hint_text("id")
+            .desired_width(width),
+    )
+    .changed()
+}
+
+fn name_field(ui: &mut egui::Ui, shared: &mut SharedState, index: usize, width: f32) -> bool {
+    ui.add(
+        egui::TextEdit::singleline(&mut shared.people[index].name)
+            .hint_text("name")
+            .desired_width(width),
+    )
+    .changed()
+}
+
+fn table_type_field(
+    ui: &mut egui::Ui,
+    shared: &mut SharedState,
+    table_type_ids: &[String],
+    index: usize,
+    combo_width: f32,
+) -> bool {
+    let mut changed = false;
+    ui.label("Table type:");
+    let current = shared.people[index].table_type.clone();
+    let selected = current
+        .clone()
+        .map(|id| truncate_label(&id, TABLE_TYPE_MAX_CHARS))
+        .unwrap_or_else(|| "(any)".to_string());
+    egui::ComboBox::from_id_salt(("person_table_type", index))
+        .selected_text(selected)
+        .width(combo_width)
+        .show_ui(ui, |ui| {
+            if ui.selectable_label(current.is_none(), "(any)").clicked() {
+                shared.people[index].table_type = None;
+                changed = true;
+            }
+            for table_type_id in table_type_ids {
+                let is_selected = current.as_deref() == Some(table_type_id.as_str());
+                if ui.selectable_label(is_selected, table_type_id).clicked() {
+                    shared.people[index].table_type = Some(table_type_id.clone());
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
+
+fn locked_table_field(
+    ui: &mut egui::Ui,
+    shared: &mut SharedState,
+    index: usize,
+    combo_width: f32,
+) -> bool {
+    let mut changed = false;
+    ui.label("Locked table:");
+    let current_table = shared.people[index].locked_table;
+    egui::ComboBox::from_id_salt(("person_locked_table", index))
+        .selected_text(
+            current_table
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "(none)".to_string()),
+        )
+        .width(combo_width)
+        .show_ui(ui, |ui| {
+            if ui
+                .selectable_label(current_table.is_none(), "(none)")
+                .clicked()
+            {
+                shared.people[index].locked_table = None;
+                shared.people[index].locked_seat = None;
+                changed = true;
+            }
+            for &table_number in &shared.generated_table_numbers {
+                let is_selected = current_table == Some(table_number);
+                if ui
+                    .selectable_label(is_selected, table_number.to_string())
+                    .clicked()
+                {
+                    shared.people[index].locked_table = Some(table_number);
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
+
+/// The "Locked seat:" combo is only meaningful once a locked table is set,
+/// so it's wrapped in `add_enabled_ui`. Two tooltip paths cover it: the
+/// combo's own response (returned by `ComboBox::show_ui`, whose `.enabled`
+/// correctly reflects the inner disabled scope) carries
+/// `on_disabled_hover_text`; the label — which always senses hover, enabled
+/// or not — unconditionally carries `on_hover_text` explaining the same
+/// rule, so the hint is reachable regardless of exactly which widget the
+/// pointer lands on.
+///
+/// Previously this called `.on_disabled_hover_text` on the `InnerResponse`
+/// from `add_enabled_ui` itself. That response is allocated by
+/// `Ui::scope_dyn` on the *outer*, still-enabled ui
+/// (`self.allocate_rect(child_ui.min_rect(), Sense::hover())`), so its
+/// `.enabled` is always `true` regardless of the `enabled` flag passed to
+/// `add_enabled_ui` — the disabled-hover branch in
+/// `Response::on_disabled_hover_ui` (`if !self.enabled && ...`) could never
+/// fire.
+fn locked_seat_field(
+    ui: &mut egui::Ui,
+    shared: &mut SharedState,
+    index: usize,
+    combo_width: f32,
+) -> bool {
+    let mut changed = false;
+    let locked_table = shared.people[index].locked_table;
+    let capacity = locked_table.and_then(|t| shared.table_capacities.get(&t).copied());
+    ui.label("Locked seat:")
+        .on_hover_text("Seat index only applies once this guest has a locked table.");
+    ui.add_enabled_ui(locked_table.is_some(), |ui| {
+        let current_seat = shared.people[index].locked_seat;
+        let combo_response = egui::ComboBox::from_id_salt(("person_locked_seat", index))
+            .selected_text(
+                current_seat
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "(none)".to_string()),
+            )
+            .width(combo_width)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(current_seat.is_none(), "(none)")
+                    .clicked()
+                {
+                    shared.people[index].locked_seat = None;
+                    changed = true;
+                }
+                for seat in 0..capacity.unwrap_or(0) {
+                    let is_selected = current_seat == Some(seat);
+                    if ui.selectable_label(is_selected, seat.to_string()).clicked() {
+                        shared.people[index].locked_seat = Some(seat);
+                        changed = true;
+                    }
+                }
+            })
+            .response;
+        combo_response.on_disabled_hover_text("Select a locked table first");
+    });
+    changed
 }
 
 // ── Groups ──────────────────────────────────────────────────────────────────
@@ -362,6 +493,12 @@ fn groups_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
 
 // ── Closeness ───────────────────────────────────────────────────────────────
 
+const CLOSENESS_WIDE_MIN_WIDTH: f32 = 710.0;
+const CLOSENESS_MEDIUM_MIN_WIDTH: f32 = 450.0;
+const REFERENCE_COMBO_W: f32 = 150.0;
+const REFERENCE_MAX_CHARS: usize = 15;
+const SCORE_FIELD_W: f32 = 70.0;
+
 fn closeness_section(shared: &mut SharedState, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         if ui.button("+ Add Rule").clicked() {
@@ -388,63 +525,50 @@ fn closeness_section(shared: &mut SharedState, ui: &mut egui::Ui) {
         ui.group(|ui| {
             let mut changed = false;
 
-            // Wrapped so Left/Right/Score+Delete flow onto fewer lines when
-            // the panel is wide, and stack one per line when it's narrow.
-            ui.horizontal_wrapped(|ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Left:");
-                    let current = shared.closeness_rules[index].left_id.clone();
-                    egui::ComboBox::from_id_source(("closeness_left", index))
-                        .selected_text(if current.is_empty() {
-                            "(select)".to_string()
-                        } else {
-                            reference_label(&current, &options)
-                        })
-                        .show_ui(ui, |ui| {
-                            for option in &options {
-                                let selected = current == option.id;
-                                if ui.selectable_label(selected, &option.label).clicked() {
-                                    shared.closeness_rules[index].left_id = option.id.clone();
-                                    changed = true;
-                                }
-                            }
-                        });
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Right:");
-                    let current = shared.closeness_rules[index].right_id.clone();
-                    egui::ComboBox::from_id_source(("closeness_right", index))
-                        .selected_text(if current.is_empty() {
-                            "(select)".to_string()
-                        } else {
-                            reference_label(&current, &options)
-                        })
-                        .show_ui(ui, |ui| {
-                            for option in &options {
-                                let selected = current == option.id;
-                                if ui.selectable_label(selected, &option.label).clicked() {
-                                    shared.closeness_rules[index].right_id = option.id.clone();
-                                    changed = true;
-                                }
-                            }
-                        });
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Score:");
-                    changed |= ui
-                        .add(
-                            egui::TextEdit::singleline(
-                                &mut shared.closeness_rules[index].score_input,
-                            )
-                            .hint_text("e.g. 2.0")
-                            .desired_width(70.0),
-                        )
-                        .changed();
-                    if ui.button("Delete").clicked() {
+            // Explicit width-branched layout — same invariant as
+            // `people_section`. Every field here has a deterministic width
+            // (Left/Right combo text is truncated so egui's "at least"
+            // ComboBox width never grows past `REFERENCE_COMBO_W`), so no
+            // line needs a flex field to stay within `w`; the tiers only
+            // decide how many fields share a line.
+            let w = ui.available_width();
+            let wide = w >= CLOSENESS_WIDE_MIN_WIDTH;
+            let medium = !wide && w >= CLOSENESS_MEDIUM_MIN_WIDTH;
+
+            if wide {
+                ui.horizontal(|ui| {
+                    changed |= left_field(ui, shared, &options, index);
+                    changed |= right_field(ui, shared, &options, index);
+                    changed |= score_field(ui, shared, index);
+                    if delete_button(ui) {
                         delete_index = Some(index);
                     }
                 });
-            });
+            } else if medium {
+                ui.horizontal(|ui| {
+                    changed |= left_field(ui, shared, &options, index);
+                    changed |= right_field(ui, shared, &options, index);
+                });
+                ui.horizontal(|ui| {
+                    changed |= score_field(ui, shared, index);
+                    if delete_button(ui) {
+                        delete_index = Some(index);
+                    }
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    changed |= left_field(ui, shared, &options, index);
+                });
+                ui.horizontal(|ui| {
+                    changed |= right_field(ui, shared, &options, index);
+                });
+                ui.horizontal(|ui| {
+                    changed |= score_field(ui, shared, index);
+                    if delete_button(ui) {
+                        delete_index = Some(index);
+                    }
+                });
+            }
 
             let row = &shared.closeness_rules[index];
             let (left, right) = (
@@ -452,10 +576,10 @@ fn closeness_section(shared: &mut SharedState, ui: &mut egui::Ui) {
                 row.right_id.trim().to_string(),
             );
             for error in &shared.validation {
-                if let Some((error_left, error_right)) = error.closeness_pair() {
-                    if rules_match(error_left, error_right, &left, &right) {
-                        ui.colored_label(ERROR_COLOR, error.to_string());
-                    }
+                if let Some((error_left, error_right)) = error.closeness_pair()
+                    && rules_match(error_left, error_right, &left, &right)
+                {
+                    ui.colored_label(ERROR_COLOR, error.to_string());
                 }
             }
 
@@ -471,7 +595,91 @@ fn closeness_section(shared: &mut SharedState, ui: &mut egui::Ui) {
     }
 }
 
+fn left_field(
+    ui: &mut egui::Ui,
+    shared: &mut SharedState,
+    options: &[ReferenceIdOption],
+    index: usize,
+) -> bool {
+    let mut changed = false;
+    ui.label("Left:");
+    let current = shared.closeness_rules[index].left_id.clone();
+    let selected = if current.is_empty() {
+        "(select)".to_string()
+    } else {
+        truncate_label(&reference_label(&current, options), REFERENCE_MAX_CHARS)
+    };
+    egui::ComboBox::from_id_salt(("closeness_left", index))
+        .selected_text(selected)
+        .width(REFERENCE_COMBO_W)
+        .show_ui(ui, |ui| {
+            for option in options {
+                let is_selected = current == option.id;
+                if ui.selectable_label(is_selected, &option.label).clicked() {
+                    shared.closeness_rules[index].left_id = option.id.clone();
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
+
+fn right_field(
+    ui: &mut egui::Ui,
+    shared: &mut SharedState,
+    options: &[ReferenceIdOption],
+    index: usize,
+) -> bool {
+    let mut changed = false;
+    ui.label("Right:");
+    let current = shared.closeness_rules[index].right_id.clone();
+    let selected = if current.is_empty() {
+        "(select)".to_string()
+    } else {
+        truncate_label(&reference_label(&current, options), REFERENCE_MAX_CHARS)
+    };
+    egui::ComboBox::from_id_salt(("closeness_right", index))
+        .selected_text(selected)
+        .width(REFERENCE_COMBO_W)
+        .show_ui(ui, |ui| {
+            for option in options {
+                let is_selected = current == option.id;
+                if ui.selectable_label(is_selected, &option.label).clicked() {
+                    shared.closeness_rules[index].right_id = option.id.clone();
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
+
+fn score_field(ui: &mut egui::Ui, shared: &mut SharedState, index: usize) -> bool {
+    ui.label("Score:");
+    ui.add(
+        egui::TextEdit::singleline(&mut shared.closeness_rules[index].score_input)
+            .hint_text("e.g. 2.0")
+            .desired_width(SCORE_FIELD_W),
+    )
+    .changed()
+}
+
 // ── Tables ──────────────────────────────────────────────────────────────────
+
+const TABLES_WIDE_MIN_WIDTH: f32 = 760.0;
+const TABLES_MEDIUM_MIN_WIDTH: f32 = 460.0;
+const TABLE_ID_W: f32 = 110.0;
+const SHAPE_COMBO_W: f32 = 130.0;
+const NUM_FIELD_W: f32 = 45.0;
+const COUNT_FIELD_W: f32 = 60.0;
+/// Shortened from the original "People per side (top|right|bottom|left):" —
+/// at the panel's minimum width (280pt) that full label alone risks
+/// approaching the available width before the field is even placed. The
+/// abbreviated form plus the existing `1|1|1|1` hint text keeps the meaning
+/// while giving the field's live leftover-width computation real room on
+/// every tier.
+const PPS_LABEL: &str = "Per side (T|R|B|L):";
+const PPS_MIN_W: f32 = 70.0;
+const PPS_MAX_W: f32 = 220.0;
 
 fn table_shape_label(shape: &TableShape) -> &'static str {
     match shape {
@@ -517,105 +725,77 @@ fn tables_section(shared: &mut SharedState, ui: &mut egui::Ui) {
         ui.group(|ui| {
             let mut changed = false;
 
-            // Wrapped so the name/shape/delete, capacity, count, and
-            // people-per-side clusters flow onto fewer lines when the panel
-            // is wide, and stack one per line when it's narrow.
-            ui.horizontal_wrapped(|ui| {
-                ui.horizontal_wrapped(|ui| {
-                    changed |= ui
-                        .add(
-                            egui::TextEdit::singleline(
-                                &mut shared.table_configs[index].table_type_id,
-                            )
-                            .hint_text("table_type_id")
-                            .desired_width(100.0),
-                        )
-                        .changed();
+            // Explicit width-branched layout — see `people_section` for the
+            // invariant. Every field width here is a deterministic budget
+            // (TextEdit widths are exact; the shape combo's vocabulary is
+            // fixed and short enough to fit `SHAPE_COMBO_W`), except the
+            // people-per-side field, whose own dedicated line makes it safe
+            // to size as pure live leftover.
+            let w = ui.available_width();
+            let wide = w >= TABLES_WIDE_MIN_WIDTH;
+            let medium = !wide && w >= TABLES_MEDIUM_MIN_WIDTH;
 
-                    let current_shape = shared.table_configs[index].shape.clone();
-                    egui::ComboBox::from_id_source(("table_shape", index))
-                        .selected_text(table_shape_label(&current_shape))
-                        .show_ui(ui, |ui| {
-                            for shape in [
-                                TableShape::Round,
-                                TableShape::Rectangular,
-                                TableShape::Square,
-                            ] {
-                                let selected = current_shape == shape;
-                                if ui
-                                    .selectable_label(selected, table_shape_label(&shape))
-                                    .clicked()
-                                {
-                                    shared.table_configs[index].shape = shape;
-                                    changed = true;
-                                }
-                            }
-                        });
-
-                    if ui.button("Delete").clicked() {
+            if wide {
+                ui.horizontal(|ui| {
+                    changed |= table_id_field(ui, shared, index, TABLE_ID_W);
+                    changed |= shape_field(ui, shared, index, SHAPE_COMBO_W);
+                    if delete_button(ui) {
                         delete_index = Some(index);
                     }
                 });
+                ui.horizontal(|ui| {
+                    changed |= max_field(ui, shared, index, NUM_FIELD_W);
+                    changed |= min_field(ui, shared, index, NUM_FIELD_W);
+                    changed |= recommended_field(ui, shared, index, NUM_FIELD_W);
+                    changed |= count_field(ui, shared, index, COUNT_FIELD_W);
+                });
+            } else if medium {
+                ui.horizontal(|ui| {
+                    changed |= table_id_field(ui, shared, index, TABLE_ID_W);
+                    changed |= shape_field(ui, shared, index, SHAPE_COMBO_W);
+                    if delete_button(ui) {
+                        delete_index = Some(index);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    changed |= max_field(ui, shared, index, NUM_FIELD_W);
+                    changed |= min_field(ui, shared, index, NUM_FIELD_W);
+                    changed |= recommended_field(ui, shared, index, NUM_FIELD_W);
+                });
+                ui.horizontal(|ui| {
+                    changed |= count_field(ui, shared, index, COUNT_FIELD_W);
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    let id_w = (w - ROW_SPACING).max(80.0);
+                    changed |= table_id_field(ui, shared, index, id_w);
+                });
+                ui.horizontal(|ui| {
+                    changed |= shape_field(ui, shared, index, SHAPE_COMBO_W);
+                    if delete_button(ui) {
+                        delete_index = Some(index);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    changed |= max_field(ui, shared, index, NUM_FIELD_W);
+                    changed |= min_field(ui, shared, index, NUM_FIELD_W);
+                });
+                ui.horizontal(|ui| {
+                    changed |= recommended_field(ui, shared, index, NUM_FIELD_W);
+                });
+                ui.horizontal(|ui| {
+                    changed |= count_field(ui, shared, index, COUNT_FIELD_W);
+                });
+            }
 
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("max:");
-                    changed |= ui
-                        .add(
-                            egui::TextEdit::singleline(
-                                &mut shared.table_configs[index].max_people_input,
-                            )
-                            .desired_width(45.0),
-                        )
-                        .changed();
-                    ui.label("min:");
-                    changed |= ui
-                        .add(
-                            egui::TextEdit::singleline(
-                                &mut shared.table_configs[index].min_people_input,
-                            )
-                            .desired_width(45.0),
-                        )
-                        .changed();
-                    ui.label("recommended:");
-                    changed |= ui
-                        .add(
-                            egui::TextEdit::singleline(
-                                &mut shared.table_configs[index].recommended_people_input,
-                            )
-                            .desired_width(45.0),
-                        )
-                        .changed();
+            if matches!(
+                shared.table_configs[index].shape,
+                TableShape::Rectangular | TableShape::Square
+            ) {
+                ui.horizontal(|ui| {
+                    changed |= people_per_side_field(ui, shared, index);
                 });
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("count:");
-                    changed |= ui
-                        .add(
-                            egui::TextEdit::singleline(
-                                &mut shared.table_configs[index].number_of_tables_input,
-                            )
-                            .hint_text("unlimited")
-                            .desired_width(60.0),
-                        )
-                        .changed();
-                });
-                if matches!(
-                    shared.table_configs[index].shape,
-                    TableShape::Rectangular | TableShape::Square
-                ) {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("People per side (top|right|bottom|left):");
-                        changed |= ui
-                            .add(
-                                egui::TextEdit::singleline(
-                                    &mut shared.table_configs[index].people_per_side_input,
-                                )
-                                .hint_text("1|1|1|1")
-                                .desired_width(150.0),
-                            )
-                            .changed();
-                    });
-                }
-            });
+            }
 
             let table_type_id = shared.table_configs[index].table_type_id.clone();
             for error in &shared.validation {
@@ -634,6 +814,101 @@ fn tables_section(shared: &mut SharedState, ui: &mut egui::Ui) {
         shared.table_configs.remove(index);
         shared.refresh();
     }
+}
+
+fn table_id_field(ui: &mut egui::Ui, shared: &mut SharedState, index: usize, width: f32) -> bool {
+    ui.add(
+        egui::TextEdit::singleline(&mut shared.table_configs[index].table_type_id)
+            .hint_text("table_type_id")
+            .desired_width(width),
+    )
+    .changed()
+}
+
+fn shape_field(
+    ui: &mut egui::Ui,
+    shared: &mut SharedState,
+    index: usize,
+    combo_width: f32,
+) -> bool {
+    let mut changed = false;
+    let current_shape = shared.table_configs[index].shape.clone();
+    egui::ComboBox::from_id_salt(("table_shape", index))
+        .selected_text(table_shape_label(&current_shape))
+        .width(combo_width)
+        .show_ui(ui, |ui| {
+            for shape in [
+                TableShape::Round,
+                TableShape::Rectangular,
+                TableShape::Square,
+            ] {
+                let is_selected = current_shape == shape;
+                if ui
+                    .selectable_label(is_selected, table_shape_label(&shape))
+                    .clicked()
+                {
+                    shared.table_configs[index].shape = shape;
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
+
+fn max_field(ui: &mut egui::Ui, shared: &mut SharedState, index: usize, width: f32) -> bool {
+    ui.label("max:");
+    ui.add(
+        egui::TextEdit::singleline(&mut shared.table_configs[index].max_people_input)
+            .desired_width(width),
+    )
+    .changed()
+}
+
+fn min_field(ui: &mut egui::Ui, shared: &mut SharedState, index: usize, width: f32) -> bool {
+    ui.label("min:");
+    ui.add(
+        egui::TextEdit::singleline(&mut shared.table_configs[index].min_people_input)
+            .desired_width(width),
+    )
+    .changed()
+}
+
+fn recommended_field(
+    ui: &mut egui::Ui,
+    shared: &mut SharedState,
+    index: usize,
+    width: f32,
+) -> bool {
+    ui.label("recommended:");
+    ui.add(
+        egui::TextEdit::singleline(&mut shared.table_configs[index].recommended_people_input)
+            .desired_width(width),
+    )
+    .changed()
+}
+
+fn count_field(ui: &mut egui::Ui, shared: &mut SharedState, index: usize, width: f32) -> bool {
+    ui.label("count:");
+    ui.add(
+        egui::TextEdit::singleline(&mut shared.table_configs[index].number_of_tables_input)
+            .hint_text("unlimited")
+            .desired_width(width),
+    )
+    .changed()
+}
+
+fn people_per_side_field(ui: &mut egui::Ui, shared: &mut SharedState, index: usize) -> bool {
+    ui.label(PPS_LABEL);
+    // Live leftover on this row's own dedicated line: correct regardless of
+    // the label's actual rendered width, since it's queried *after* the
+    // label is placed.
+    let field_w = ui.available_width().clamp(PPS_MIN_W, PPS_MAX_W);
+    ui.add(
+        egui::TextEdit::singleline(&mut shared.table_configs[index].people_per_side_input)
+            .hint_text("1|1|1|1")
+            .desired_width(field_w),
+    )
+    .changed()
 }
 
 // ── Settings ────────────────────────────────────────────────────────────────
@@ -731,5 +1006,24 @@ fn unique_id<'a>(prefix: &str, existing: impl Iterator<Item = &'a str> + Clone) 
             return candidate;
         }
         n += 1;
+    }
+}
+
+/// Delete button shared by every editor row across People/Closeness/Tables.
+fn delete_button(ui: &mut egui::Ui) -> bool {
+    ui.button("Delete").clicked()
+}
+
+/// Truncate a user-entered id/name before handing it to
+/// `ComboBox::selected_text`. egui 0.27's `ComboBox::width` is only a
+/// *minimum* — `combo_box_dyn` computes `width.at_least(full_minimum_width)`
+/// from the unwrapped selected-text galley, so an unbounded string would
+/// grow the combo past the width a row's layout budgeted for it, undoing the
+/// whole point of the explicit-width tiers above.
+fn truncate_label(text: &str, max_chars: usize) -> String {
+    if text.chars().count() > max_chars {
+        format!("{}…", text.chars().take(max_chars).collect::<String>())
+    } else {
+        text.to_string()
     }
 }

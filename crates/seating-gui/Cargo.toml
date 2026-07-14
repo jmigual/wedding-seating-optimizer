@@ -1,13 +1,15 @@
+[workspace]
+
 [package]
 name = "seating-gui"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
 
 [dependencies]
-iced = { workspace = true, features = ["svg", "image"] }
-rfd.workspace = true
+iced = { version = "0.12", features = ["svg", "image"] }
+rfd = "0.15"
 seating-core = { path = "../seating-core" }
 
 [build-dependencies]
-winresource = { workspace = true }
+winresource = "0.1"

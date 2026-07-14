@@ -192,37 +192,37 @@ pub fn validate_seating_solution(
         }
 
         // The person's required table_type (if any) must match.
-        if let Some(required) = &person.table_type {
-            if *required != table.table_type {
-                errors.push(ValidationError::SeatingPersonTableTypeMismatch {
-                    person_id: a.person_id.clone(),
-                    table_number: a.table_number,
-                    required_type: required.clone(),
-                    assigned_type: table.table_type.clone(),
-                });
-            }
+        if let Some(required) = &person.table_type
+            && *required != table.table_type
+        {
+            errors.push(ValidationError::SeatingPersonTableTypeMismatch {
+                person_id: a.person_id.clone(),
+                table_number: a.table_number,
+                required_type: required.clone(),
+                assigned_type: table.table_type.clone(),
+            });
         }
 
         // Locked-table constraint.
-        if let Some(locked_table) = person.locked_table {
-            if locked_table != a.table_number {
-                errors.push(ValidationError::SeatingViolatesLockedTable {
-                    person_id: a.person_id.clone(),
-                    locked_table,
-                    assigned_table: a.table_number,
-                });
-            }
+        if let Some(locked_table) = person.locked_table
+            && locked_table != a.table_number
+        {
+            errors.push(ValidationError::SeatingViolatesLockedTable {
+                person_id: a.person_id.clone(),
+                locked_table,
+                assigned_table: a.table_number,
+            });
         }
 
         // Locked-seat constraint.
-        if let Some(locked_seat) = person.locked_seat {
-            if locked_seat != a.seat_index {
-                errors.push(ValidationError::SeatingViolatesLockedSeat {
-                    person_id: a.person_id.clone(),
-                    locked_seat,
-                    assigned_seat: a.seat_index,
-                });
-            }
+        if let Some(locked_seat) = person.locked_seat
+            && locked_seat != a.seat_index
+        {
+            errors.push(ValidationError::SeatingViolatesLockedSeat {
+                person_id: a.person_id.clone(),
+                locked_seat,
+                assigned_seat: a.seat_index,
+            });
         }
 
         if a.seat_index >= table.max_people {
@@ -256,16 +256,15 @@ pub fn validate_seating_solution(
                 capacity: table.max_people,
             });
         }
-        if count > 0 {
-            if let Some(min_people) = table.min_people {
-                if count < min_people {
-                    errors.push(ValidationError::TableBelowMin {
-                        table_number: table.number,
-                        count,
-                        min: min_people,
-                    });
-                }
-            }
+        if count > 0
+            && let Some(min_people) = table.min_people
+            && count < min_people
+        {
+            errors.push(ValidationError::TableBelowMin {
+                table_number: table.number,
+                count,
+                min: min_people,
+            });
         }
     }
 
@@ -299,13 +298,13 @@ fn collect_id_sets(
         if p.locked_seat.is_some() && p.locked_table.is_none() {
             errors.push(ValidationError::LockedSeatRequiresLockedTable(p.id.clone()));
         }
-        if let Some(tt) = &p.table_type {
-            if !project.table_types.contains_key(tt) {
-                errors.push(ValidationError::UnknownTableTypeForPerson {
-                    person_id: p.id.clone(),
-                    table_type: tt.clone(),
-                });
-            }
+        if let Some(tt) = &p.table_type
+            && !project.table_types.contains_key(tt)
+        {
+            errors.push(ValidationError::UnknownTableTypeForPerson {
+                person_id: p.id.clone(),
+                table_type: tt.clone(),
+            });
         }
     }
 
@@ -343,14 +342,14 @@ fn validate_table_type_configs(project: &ProjectInput, errors: &mut Vec<Validati
                 });
             }
         }
-        if let Some(min) = cfg.min_people {
-            if min > cfg.max_people {
-                errors.push(ValidationError::InvalidMinMax {
-                    table_type: table_type.clone(),
-                    min,
-                    max: cfg.max_people,
-                });
-            }
+        if let Some(min) = cfg.min_people
+            && min > cfg.max_people
+        {
+            errors.push(ValidationError::InvalidMinMax {
+                table_type: table_type.clone(),
+                min,
+                max: cfg.max_people,
+            });
         }
         if let Some(recommended) = cfg.recommended_people {
             let min_allowed = cfg.min_people.unwrap_or(0);
@@ -363,13 +362,13 @@ fn validate_table_type_configs(project: &ProjectInput, errors: &mut Vec<Validati
                 });
             }
         }
-        if let Some(count) = cfg.number_of_tables {
-            if count == 0 {
-                errors.push(ValidationError::InvalidNumberOfTables {
-                    table_type: table_type.clone(),
-                    count,
-                });
-            }
+        if let Some(count) = cfg.number_of_tables
+            && count == 0
+        {
+            errors.push(ValidationError::InvalidNumberOfTables {
+                table_type: table_type.clone(),
+                count,
+            });
         }
     }
 }
@@ -498,15 +497,15 @@ fn validate_locked_assignments(
             });
             continue;
         };
-        if let Some(required) = &p.table_type {
-            if required != &table.table_type {
-                errors.push(ValidationError::LockedTableTypeMismatch {
-                    person_id: p.id.clone(),
-                    table_number: table_num,
-                    locked_type: table.table_type.clone(),
-                    required_type: required.clone(),
-                });
-            }
+        if let Some(required) = &p.table_type
+            && required != &table.table_type
+        {
+            errors.push(ValidationError::LockedTableTypeMismatch {
+                person_id: p.id.clone(),
+                table_number: table_num,
+                locked_type: table.table_type.clone(),
+                required_type: required.clone(),
+            });
         }
         if let Some(seat) = p.locked_seat {
             if seat >= table.max_people {

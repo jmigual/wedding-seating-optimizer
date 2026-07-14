@@ -2,13 +2,14 @@
 members = [
   "crates/seating-core",
   "crates/seating-cli",
-  "crates/seating-gui",
   "crates/seating-gui-egui",
 ]
+exclude = ["crates/seating-gui"]
 resolver = "2"
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
 version = "0.1.0"
 license = "MIT"
 authors = ["wedding-seating contributors"]
@@ -18,10 +19,9 @@ winresource = "0.1"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 csv = "1.4"
-eframe = { version = "0.27.2", default-features = false }
-iced = "0.12"
-rand = "0.8"
-rfd = "0.15"
+eframe = { version = "0.35", default-features = false }
+rand = "0.10"
+rfd = "0.17"
 resvg = "0.47.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

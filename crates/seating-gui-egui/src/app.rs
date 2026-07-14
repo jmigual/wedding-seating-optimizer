@@ -4,8 +4,8 @@ use crate::panels::{self, CanvasState, EditorsState};
 use crate::state::{MessageKind, SharedState};
 use eframe::egui::{self, Color32};
 use seating_core::{
-    validate_project, HeuristicOptimizer, OptimizationResult, SeatingOptimizer, ValidationReport,
-    COLOR_BACKGROUND, COLOR_CARD,
+    COLOR_BACKGROUND, COLOR_CARD, HeuristicOptimizer, OptimizationResult, SeatingOptimizer,
+    ValidationReport, validate_project,
 };
 use std::sync::mpsc;
 use std::thread;
@@ -34,9 +34,13 @@ pub(crate) struct SeatingApp {
 }
 
 impl SeatingApp {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(initial_project: Option<std::path::PathBuf>) -> Self {
+        let mut shared = SharedState::empty();
+        if let Some(path) = initial_project {
+            shared.open_project_path(path);
+        }
         Self {
-            shared: SharedState::empty(),
+            shared,
             editors_state: EditorsState::default(),
             canvas_state: CanvasState::default(),
             is_optimizing: false,
@@ -149,7 +153,8 @@ impl SeatingApp {
 }
 
 impl eframe::App for SeatingApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         if !self.chrome_set {
             ctx.set_visuals(navy_visuals());
             self.chrome_set = true;
@@ -167,17 +172,17 @@ impl eframe::App for SeatingApp {
             self.shown_dirty = dirty;
         }
 
-        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
-            panels::top_bar::show(self, ctx, ui);
+        egui::Panel::top("top_bar").show(ui, |ui| {
+            panels::top_bar::show(self, &ctx, ui);
         });
-        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+        egui::Panel::bottom("status_bar").show(ui, |ui| {
             panels::status_bar::show(&self.shared, ui);
         });
-        egui::SidePanel::left("editors_panel")
+        egui::Panel::left("editors_panel")
             .resizable(true)
-            .default_width(380.0)
-            .width_range(280.0..=f32::INFINITY)
-            .show(ctx, |ui| {
+            .default_size(380.0)
+            .size_range(280.0..=f32::INFINITY)
+            .show(ui, |ui| {
                 // `auto_shrink` off: with horizontal scrolling disabled,
                 // egui's default shrink-to-content otherwise makes the
                 // ScrollArea (and thus the panel) re-report the content's
@@ -188,7 +193,7 @@ impl eframe::App for SeatingApp {
                         panels::editors::show(&mut self.shared, &mut self.editors_state, ui);
                     });
             });
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             panels::canvas::show(&mut self.shared, &mut self.canvas_state, ui);
         });
     }

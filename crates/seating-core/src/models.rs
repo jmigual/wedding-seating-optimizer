@@ -295,7 +295,9 @@ pub enum ValidationError {
     DuplicateClosenessRule(String, String),
     #[error("invalid closeness score for pair {left} <-> {right}: score must be finite")]
     InvalidClosenessScore { left: String, right: String },
-    #[error("closeness rule references person '{0}' on both sides; self-closeness only applies to groups")]
+    #[error(
+        "closeness rule references person '{0}' on both sides; self-closeness only applies to groups"
+    )]
     PersonSelfClosenessRule(String),
     #[error("locked seat requires locked table for person '{0}'")]
     LockedSeatRequiresLockedTable(String),
@@ -336,20 +338,22 @@ pub enum ValidationError {
         min: usize,
         max: usize,
     },
-    #[error("table type '{table_type}' has recommended_people ({recommended}) outside the allowed range {min}..={max}")]
+    #[error(
+        "table type '{table_type}' has recommended_people ({recommended}) outside the allowed range {min}..={max}"
+    )]
     InvalidRecommendedPeople {
         table_type: String,
         recommended: usize,
         min: usize,
         max: usize,
     },
-    #[error(
-        "table type '{table_type}' must have number_of_tables > 0 when provided (got {count})"
-    )]
+    #[error("table type '{table_type}' must have number_of_tables > 0 when provided (got {count})")]
     InvalidNumberOfTables { table_type: String, count: usize },
     #[error("multiple people locked to same seat: table {table_number}, seat {seat}")]
     DuplicateLockedSeat { table_number: usize, seat: usize },
-    #[error("person '{person_id}' is locked to table {table_number} of type '{locked_type}', incompatible with required table_type '{required_type}'")]
+    #[error(
+        "person '{person_id}' is locked to table {table_number} of type '{locked_type}', incompatible with required table_type '{required_type}'"
+    )]
     LockedTableTypeMismatch {
         person_id: String,
         table_number: usize,
@@ -374,7 +378,9 @@ pub enum ValidationError {
     },
     #[error("no compatible tables available for person '{person_id}'")]
     ImpossiblePersonAssignment { person_id: String },
-    #[error("group '{group_id}' has very high self-closeness ({score}) and size ({size}), larger than any compatible table capacity ({max_compatible_capacity})")]
+    #[error(
+        "group '{group_id}' has very high self-closeness ({score}) and size ({size}), larger than any compatible table capacity ({max_compatible_capacity})"
+    )]
     LargeHighPriorityGroup {
         group_id: String,
         score: f64,
@@ -408,14 +414,18 @@ pub enum ValidationError {
     #[error("no feasible seating assignment could be constructed for the given constraints")]
     NoFeasibleAssignment,
     /// `SeatingAssignment.table_type` does not match the actual type of the resolved table instance.
-    #[error("seating assignment records table_type '{recorded_type}' for table {table_number}, but the table instance has type '{actual_type}'")]
+    #[error(
+        "seating assignment records table_type '{recorded_type}' for table {table_number}, but the table instance has type '{actual_type}'"
+    )]
     SeatingTableTypeMismatch {
         table_number: usize,
         actual_type: String,
         recorded_type: String,
     },
     /// The assigned table type does not satisfy the person's required table type.
-    #[error("person '{person_id}' requires table type '{required_type}' but is seated at table {table_number} of type '{assigned_type}'")]
+    #[error(
+        "person '{person_id}' requires table type '{required_type}' but is seated at table {table_number} of type '{assigned_type}'"
+    )]
     SeatingPersonTableTypeMismatch {
         person_id: String,
         table_number: usize,
@@ -423,7 +433,9 @@ pub enum ValidationError {
         assigned_type: String,
     },
     /// A person with a locked table is assigned to a different table.
-    #[error("person '{person_id}' must be at table {locked_table} but is seated at table {assigned_table}")]
+    #[error(
+        "person '{person_id}' must be at table {locked_table} but is seated at table {assigned_table}"
+    )]
     SeatingViolatesLockedTable {
         person_id: String,
         locked_table: usize,

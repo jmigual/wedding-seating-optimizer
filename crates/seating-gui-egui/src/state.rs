@@ -7,12 +7,12 @@
 //! panel modules never need to reach into `app.rs`.
 
 use seating_core::{
-    build_layout, build_table_type_map, generate_table_instances, parse_closeness_csv,
-    parse_f64_value, parse_optional_usize_value, parse_people_csv, parse_people_per_side,
-    parse_project_file, parse_required_usize_value, parse_tables_csv, score_solution,
-    validate_project, write_closeness_csv, write_people_csv, write_project_file, write_tables_csv,
     ClosenessRule, OptimizationConfig, Person, ProjectFile, ProjectInput, SeatingAssignment,
-    SeatingLayout, TableShape, TableTypeConfig, ValidationError, ValidationReport,
+    SeatingLayout, TableShape, TableTypeConfig, ValidationError, ValidationReport, build_layout,
+    build_table_type_map, generate_table_instances, parse_closeness_csv, parse_f64_value,
+    parse_optional_usize_value, parse_people_csv, parse_people_per_side, parse_project_file,
+    parse_required_usize_value, parse_tables_csv, score_solution, validate_project,
+    write_closeness_csv, write_people_csv, write_project_file, write_tables_csv,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -471,6 +471,12 @@ impl SharedState {
         let Some(path) = rfd::FileDialog::new().pick_file() else {
             return;
         };
+        self.open_project_path(path);
+    }
+
+    /// Open a `.wseat` project from a known path (used by the Open dialog and
+    /// by a path passed on the command line).
+    pub(crate) fn open_project_path(&mut self, path: std::path::PathBuf) {
         match fs::read_to_string(&path) {
             Ok(contents) => match parse_project_file(&contents) {
                 Ok(project) => {

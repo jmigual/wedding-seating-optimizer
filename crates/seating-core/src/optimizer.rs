@@ -8,9 +8,9 @@ use crate::models::{
     OptimizationConfig, OptimizationResult, Person, ProjectInput, SeatingAssignment,
     SeatingSolution, TableInstance, ValidationError, ValidationReport,
 };
-use crate::scoring::{score_solution, ScoringContext};
+use crate::scoring::{ScoringContext, score_solution};
 use crate::validation::{generate_table_instances, validate_project};
-use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::collections::{HashMap, HashSet};
 
 // ── Optimizer trait ───────────────────────────────────────────────────────────
@@ -89,7 +89,7 @@ impl HeuristicOptimizer {
             if candidates.is_empty() {
                 return None;
             }
-            let chosen = candidates[rng.gen_range(0..candidates.len())];
+            let chosen = candidates[rng.random_range(0..candidates.len())];
             occupied.insert(chosen);
             assigned.insert(p.id.clone(), chosen);
         }
@@ -416,8 +416,8 @@ impl HeuristicOptimizer {
         // locked-table and locked-seat constraints need checking here.
         if assignments.len() >= 2 {
             for _ in 0..config.iterations {
-                let i = rng.gen_range(0..assignments.len());
-                let j = rng.gen_range(0..assignments.len());
+                let i = rng.random_range(0..assignments.len());
+                let j = rng.random_range(0..assignments.len());
                 if i == j {
                     continue;
                 }
@@ -470,7 +470,7 @@ impl HeuristicOptimizer {
         // Phase 2: single-guest relocation.
         if !assignments.is_empty() {
             for _ in 0..config.iterations {
-                let i = rng.gen_range(0..assignments.len());
+                let i = rng.random_range(0..assignments.len());
                 if locked_seat_ids.contains(assignments[i].person_id.as_str()) {
                     continue;
                 }
@@ -492,7 +492,7 @@ impl HeuristicOptimizer {
                 if candidates.is_empty() {
                     continue;
                 }
-                let chosen = candidates[rng.gen_range(0..candidates.len())];
+                let chosen = candidates[rng.random_range(0..candidates.len())];
                 let Some(dest_table) = ctx.table_by_number.get(&chosen.0) else {
                     continue;
                 };
@@ -501,12 +501,12 @@ impl HeuristicOptimizer {
                 // source table with a non-zero, under-min remainder, and
                 // adding them must bring the destination to at least min.
                 let source_table_number = assignments[i].table_number;
-                if let Some(source_table) = ctx.table_by_number.get(&source_table_number) {
-                    if let Some(min) = source_table.min_people {
-                        let remaining = counts.get(&source_table_number).copied().unwrap_or(0);
-                        if remaining > 0 && remaining < min {
-                            continue;
-                        }
+                if let Some(source_table) = ctx.table_by_number.get(&source_table_number)
+                    && let Some(min) = source_table.min_people
+                {
+                    let remaining = counts.get(&source_table_number).copied().unwrap_or(0);
+                    if remaining > 0 && remaining < min {
+                        continue;
                     }
                 }
                 if let Some(min) = dest_table.min_people {

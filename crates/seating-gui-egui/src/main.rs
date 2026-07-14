@@ -29,9 +29,13 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
+    // An optional `.wseat` path as first argument opens that project on
+    // startup (also what a file association hands us).
+    let initial_project = std::env::args_os().nth(1).map(std::path::PathBuf::from);
+
     eframe::run_native(
         "Wedding Seating",
         native_options,
-        Box::new(|_cc| Box::new(SeatingApp::new())),
+        Box::new(|_cc| Ok(Box::new(SeatingApp::new(initial_project)))),
     )
 }

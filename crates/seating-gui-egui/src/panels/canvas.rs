@@ -5,12 +5,14 @@
 //! [`apply_seat_drop`], score-delta toasts, and SVG/PNG export.
 
 use crate::state::{ClosenessRow, MessageKind, SharedState};
-use eframe::egui::{self, Align2, Color32, FontId, Id, Pos2, Rect, Rounding, Sense, Stroke, Vec2};
+use eframe::egui::{
+    self, Align2, Color32, FontId, Id, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2,
+};
 use seating_core::{
-    apply_seat_drop, render_png, render_svg, LayoutSeat, LayoutTable, Person, ProjectInput,
-    RenderOptions, SeatDropOutcome, SeatingAssignment, SeatingLayout, TableSurface,
     COLOR_BACKGROUND, COLOR_CARD, COLOR_MUTED, COLOR_SEAT_FILL, COLOR_SEAT_STROKE, COLOR_STROKE,
-    COLOR_TABLE_FILL, COLOR_TABLE_STROKE,
+    COLOR_TABLE_FILL, COLOR_TABLE_STROKE, LayoutSeat, LayoutTable, Person, ProjectInput,
+    RenderOptions, SeatDropOutcome, SeatingAssignment, SeatingLayout, TableSurface,
+    apply_seat_drop, render_png, render_svg,
 };
 use std::collections::HashMap;
 
@@ -216,7 +218,7 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
         state.pan += background.drag_delta();
     }
 
-    painter.rect_filled(rect, Rounding::ZERO, rgb(COLOR_BACKGROUND));
+    painter.rect_filled(rect, 0.0, rgb(COLOR_BACKGROUND));
 
     let transform = Transform {
         origin: rect.min,
@@ -294,26 +296,26 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
                 let seat_id = Id::new(("seat_drag", table.table_number, seat.seat_index));
                 let mut seat_response = ui.interact(hit_rect, seat_id, Sense::click_and_drag());
 
-                if state.drag.is_none() {
-                    if let Some(person) = person {
-                        seat_response =
-                            seat_response.on_hover_ui(|ui| person_tooltip(ui, person, shared));
-                    }
+                if state.drag.is_none()
+                    && let Some(person) = person
+                {
+                    seat_response =
+                        seat_response.on_hover_ui(|ui| person_tooltip(ui, person, shared));
                 }
-                if seat_response.drag_started() && state.drag.is_none() {
-                    if let (Some(assignment), Some(person)) = (
+                if seat_response.drag_started()
+                    && state.drag.is_none()
+                    && let (Some(assignment), Some(person)) = (
                         assignment_by_seat.get(&(table.table_number, seat.seat_index)),
                         person,
-                    ) {
-                        if let Ok(project) = shared.materialize_project() {
-                            state.drag = Some(DragState {
-                                person_id: assignment.person_id.clone(),
-                                person_name: person.name.clone(),
-                                project,
-                                allowed_table: person.locked_table,
-                            });
-                        }
-                    }
+                    )
+                    && let Ok(project) = shared.materialize_project()
+                {
+                    state.drag = Some(DragState {
+                        person_id: assignment.person_id.clone(),
+                        person_name: person.name.clone(),
+                        project,
+                        allowed_table: person.locked_table,
+                    });
                 }
                 if seat_response.drag_stopped() {
                     match pointer_pos.and_then(|pointer| {
@@ -460,11 +462,12 @@ fn draw_table(painter: &egui::Painter, table: &LayoutTable, transform: Transform
         transform.to_screen((table.x, table.y)),
         transform.to_screen((table.x + table.width, table.y + table.height)),
     );
-    painter.rect_filled(card_rect, Rounding::same(12.0 * zoom), rgb(COLOR_CARD));
+    painter.rect_filled(card_rect, 12.0 * zoom, rgb(COLOR_CARD));
     painter.rect_stroke(
         card_rect,
-        Rounding::same(12.0 * zoom),
+        12.0 * zoom,
         Stroke::new(1.2_f32, rgb(COLOR_STROKE)),
+        StrokeKind::Middle,
     );
 
     painter.text(
@@ -498,9 +501,10 @@ fn draw_table(painter: &egui::Painter, table: &LayoutTable, transform: Transform
             );
             painter.rect(
                 surface_rect,
-                Rounding::same(8.0 * zoom),
+                8.0 * zoom,
                 surface_fill,
                 surface_stroke,
+                StrokeKind::Middle,
             );
         }
     }
@@ -579,15 +583,12 @@ fn draw_seat(
 fn draw_ghost(painter: &egui::Painter, pointer: Pos2, person_name: &str) {
     let rect = Rect::from_min_size(pointer + Vec2::new(14.0, 14.0), Vec2::new(96.0, 24.0));
     let (r, g, b) = COLOR_CARD;
-    painter.rect_filled(
-        rect,
-        Rounding::same(6.0),
-        Color32::from_rgba_unmultiplied(r, g, b, 235),
-    );
+    painter.rect_filled(rect, 6.0, Color32::from_rgba_unmultiplied(r, g, b, 235));
     painter.rect_stroke(
         rect,
-        Rounding::same(6.0),
+        6.0,
         Stroke::new(1.0_f32, rgb(COLOR_TABLE_STROKE)),
+        StrokeKind::Middle,
     );
     painter.text(
         rect.center(),
@@ -670,7 +671,9 @@ fn person_tooltip(ui: &mut egui::Ui, person: &Person, shared: &SharedState) {
         for rule in rules {
             ui.label(format!(
                 "{} \u{2194} {}: {}",
-                rule.left_id, rule.right_id, rule.score_input
+                rule_endpoint_label(&rule.left_id, shared),
+                rule_endpoint_label(&rule.right_id, shared),
+                rule.score_input
             ));
         }
     }
@@ -678,6 +681,19 @@ fn person_tooltip(ui: &mut egui::Ui, person: &Person, shared: &SharedState) {
 
 fn involves(id: &str, person: &Person) -> bool {
     id == person.id || person.groups.iter().any(|group| group == id)
+}
+
+/// A closeness rule endpoint is either a person id or a group id — show the
+/// person's name when it resolves to one, otherwise the raw id (a group has
+/// no separate display name).
+fn rule_endpoint_label<'a>(id: &'a str, shared: &'a SharedState) -> &'a str {
+    shared
+        .people
+        .iter()
+        .find(|p| p.id == id)
+        .map(|p| p.name.as_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(id)
 }
 
 fn export_svg(shared: &mut SharedState) {

@@ -223,11 +223,7 @@ pub fn score_solution(
 
 /// Canonically order `a`/`b` without allocating, unlike [`canonical_pair`].
 fn canonical_pair_ref<'a>(a: &'a str, b: &'a str) -> (&'a str, &'a str) {
-    if a <= b {
-        (a, b)
-    } else {
-        (b, a)
-    }
+    if a <= b { (a, b) } else { (b, a) }
 }
 
 /// Precomputed, allocation-light scoring context reused across every

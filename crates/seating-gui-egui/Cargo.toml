@@ -5,9 +5,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-# ponytail: default `wgpu` backend pulls a web-sys version that conflicts
-# with the existing iced GUI's pinned web-sys in the shared workspace lock.
-# `glow` (OpenGL) is eframe's other supported native backend and avoids it.
 eframe = { workspace = true, features = ["glow", "default_fonts", "x11", "wayland"] }
 rfd.workspace = true
 seating-core = { path = "../seating-core" }

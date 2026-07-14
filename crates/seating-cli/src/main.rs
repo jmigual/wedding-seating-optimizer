@@ -49,11 +49,10 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use seating_core::{
-    build_layout, make_project, parse_people_csv, parse_project_file, parse_seating_csv,
-    parse_tables_csv, render_png, render_svg, score_solution, validate_project,
-    write_closeness_csv, write_people_csv, write_project_file, write_seating_csv, write_tables_csv,
     HeuristicOptimizer, OptimizationConfig, ProjectFile, ProjectInput, RenderOptions,
-    SeatingOptimizer,
+    SeatingOptimizer, build_layout, make_project, parse_people_csv, parse_project_file,
+    parse_seating_csv, parse_tables_csv, render_png, render_svg, score_solution, validate_project,
+    write_closeness_csv, write_people_csv, write_project_file, write_seating_csv, write_tables_csv,
 };
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -790,10 +790,11 @@ fn id_namespace_collision_is_rejected() {
     )
     .unwrap();
     let err = validate_project(&project).unwrap_err();
-    assert!(err
-        .errors
-        .iter()
-        .any(|e| matches!(e, ValidationError::NamespaceCollision(id) if id == "p1")));
+    assert!(
+        err.errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::NamespaceCollision(id) if id == "p1"))
+    );
 }
 
 #[test]
@@ -857,10 +858,11 @@ fn capacity_validation_catches_insufficient_space() {
     )
     .unwrap();
     let err = validate_project(&project).unwrap_err();
-    assert!(err
-        .errors
-        .iter()
-        .any(|e| matches!(e, ValidationError::NotEnoughSeats { .. })));
+    assert!(
+        err.errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::NotEnoughSeats { .. }))
+    );
 }
 
 #[test]
@@ -872,10 +874,11 @@ fn locked_table_validation_works() {
     )
     .unwrap();
     let err = validate_project(&project).unwrap_err();
-    assert!(err
-        .errors
-        .iter()
-        .any(|e| matches!(e, ValidationError::LockedTableDoesNotExist { .. })));
+    assert!(
+        err.errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::LockedTableDoesNotExist { .. }))
+    );
 }
 
 #[test]
@@ -887,10 +890,11 @@ fn locked_seat_validation_works() {
     )
     .unwrap();
     let err = validate_project(&project).unwrap_err();
-    assert!(err
-        .errors
-        .iter()
-        .any(|e| matches!(e, ValidationError::LockedSeatOutOfRange { .. })));
+    assert!(
+        err.errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::LockedSeatOutOfRange { .. }))
+    );
 }
 
 #[test]
@@ -1135,14 +1139,16 @@ fn missing_and_duplicate_person_is_detected() {
     assignments[3].person_id = "p1".to_string();
     assignments[3].person_name = "Alice".to_string();
     let err = validate_seating_solution(&project, &assignments).unwrap_err();
-    assert!(err
-        .errors
-        .iter()
-        .any(|e| matches!(e, ValidationError::MissingOrDuplicatePerson(id) if id == "p1")));
-    assert!(err
-        .errors
-        .iter()
-        .any(|e| matches!(e, ValidationError::MissingOrDuplicatePerson(id) if id == "p4")));
+    assert!(
+        err.errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::MissingOrDuplicatePerson(id) if id == "p1"))
+    );
+    assert!(
+        err.errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::MissingOrDuplicatePerson(id) if id == "p4"))
+    );
 }
 
 #[test]
@@ -1496,10 +1502,11 @@ fn infeasible_min_constraints_yield_error() {
     let err = HeuristicOptimizer
         .optimize(&project, &OptimizationConfig::default())
         .unwrap_err();
-    assert!(err
-        .errors
-        .iter()
-        .any(|e| matches!(e, ValidationError::NoFeasibleAssignment)));
+    assert!(
+        err.errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::NoFeasibleAssignment))
+    );
 }
 
 // ── CSV error paths ───────────────────────────────────────────────────────
