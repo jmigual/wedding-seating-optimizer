@@ -6,6 +6,7 @@ use eframe::egui;
 
 pub(crate) fn show(app: &mut SeatingApp, ctx: &egui::Context, ui: &mut egui::Ui) {
     let mut new_or_open_clicked = false;
+    let mut other_action_clicked = false;
 
     ui.horizontal(|ui| {
         ui.heading("Wedding Seating");
@@ -24,12 +25,15 @@ pub(crate) fn show(app: &mut SeatingApp, ctx: &egui::Context, ui: &mut egui::Ui)
             }
         });
         if ui.button("Save").clicked() {
+            other_action_clicked = true;
             app.shared.save_project(false);
         }
         if ui.button("Save As").clicked() {
+            other_action_clicked = true;
             app.shared.save_project(true);
         }
         if ui.button("Export CSVs").clicked() {
+            other_action_clicked = true;
             app.shared.export_csvs();
         }
 
@@ -37,6 +41,7 @@ pub(crate) fn show(app: &mut SeatingApp, ctx: &egui::Context, ui: &mut egui::Ui)
 
         ui.add_enabled_ui(!app.is_optimizing, |ui| {
             if ui.button("Optimize").clicked() {
+                other_action_clicked = true;
                 app.start_optimize(ctx);
             }
         });
@@ -45,16 +50,18 @@ pub(crate) fn show(app: &mut SeatingApp, ctx: &egui::Context, ui: &mut egui::Ui)
         }
 
         ui.separator();
-        let score_text = match app.shared.score {
-            Some(score) => format!("Score: {score:.1}"),
+        let score_text = match &app.shared.score_breakdown {
+            Some(b) => format!(
+                "Score: {:.1}  (proximity {:+.1} · tables {:+.1} · size {:+.1})",
+                b.total, b.proximity, -b.used_table_penalty, -b.size_penalty
+            ),
             None => "Score: —".to_string(),
         };
         ui.strong(score_text);
     });
 
-    // Any button other than the matching repeated New/Open click cancels a
-    // pending discard confirmation.
-    if !new_or_open_clicked {
+    // Cancel pending discard confirmation only if a different action button was clicked.
+    if other_action_clicked {
         app.pending_confirm = None;
     }
 

@@ -131,7 +131,27 @@ pub fn effective_person_pair_score(
 
 // ── Solution-level scoring ────────────────────────────────────────────────────
 
-/// Compute the aggregate score for a complete seating arrangement.
+/// Component breakdown of [`score_solution`]'s total.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScoreBreakdown {
+    /// Sum of same-table pairwise closeness contributions
+    /// (`pair_score × proximity_weight(distance) × config.proximity_weight`).
+    pub proximity: f64,
+    /// `used_table_count × config.used_table_weight` — the magnitude
+    /// subtracted from `total` for using tables at all.
+    pub used_table_penalty: f64,
+    /// Sum over tables of `|occupancy - recommended_people| × config.optimal_table_size_weight`
+    /// — the magnitude subtracted from `total` for deviating from recommended occupancy.
+    pub size_penalty: f64,
+    /// `proximity - used_table_penalty - size_penalty`, computed via the
+    /// exact same running-accumulator sequence as the current
+    /// `score_solution` body (not recombined from the three fields above at
+    /// the end) so floating-point rounding is unchanged run to run.
+    pub total: f64,
+}
+
+/// Compute the aggregate score for a complete seating arrangement, broken
+/// down into its components.
 ///
 /// For each pair of guests at the **same** table the contribution is:
 /// ```text
@@ -152,11 +172,11 @@ pub fn effective_person_pair_score(
 ///
 /// # Errors
 /// Returns a [`ValidationReport`] if the solution or project is invalid.
-pub fn score_solution(
+pub fn score_solution_breakdown(
     project: &ProjectInput,
     assignments: &[SeatingAssignment],
     config: &OptimizationConfig,
-) -> Result<f64, ValidationReport> {
+) -> Result<ScoreBreakdown, ValidationReport> {
     validate_seating_solution(project, assignments)?;
 
     // Build the closeness lookup once for all pair evaluations.
@@ -179,6 +199,7 @@ pub fn score_solution(
     }
 
     let mut total = 0.0;
+    let mut proximity = 0.0;
 
     // Pairwise same-table score.
     for seated in by_table.values() {
@@ -198,25 +219,49 @@ pub fn score_solution(
                         perimeter_distance(a.seat_index, b.seat_index, table.max_people)
                     }
                 };
-                total += pair_score * default_proximity_weight(distance) * config.proximity_weight;
+                let contribution =
+                    pair_score * default_proximity_weight(distance) * config.proximity_weight;
+                total += contribution;
+                proximity += contribution;
             }
         }
     }
 
-    total -= by_table.len() as f64 * config.used_table_weight;
+    let used_table_penalty = by_table.len() as f64 * config.used_table_weight;
+    total -= used_table_penalty;
 
     // Soft penalty for deviation from recommended occupancy.
+    let mut size_penalty = 0.0;
     for table in &instances {
         if let Some(recommended) = table.recommended_people {
             let count = by_table.get(&table.number).map(|v| v.len()).unwrap_or(0);
             if count > 0 {
-                total -= (count as isize - recommended as isize).unsigned_abs() as f64
+                let deviation = (count as isize - recommended as isize).unsigned_abs() as f64
                     * config.optimal_table_size_weight;
+                total -= deviation;
+                size_penalty += deviation;
             }
         }
     }
 
-    Ok(total)
+    Ok(ScoreBreakdown {
+        proximity,
+        used_table_penalty,
+        size_penalty,
+        total,
+    })
+}
+
+/// Compute the aggregate score for a complete seating arrangement.
+///
+/// See [`score_solution_breakdown`] for the component breakdown; this
+/// function returns just the `total`.
+pub fn score_solution(
+    project: &ProjectInput,
+    assignments: &[SeatingAssignment],
+    config: &OptimizationConfig,
+) -> Result<f64, ValidationReport> {
+    score_solution_breakdown(project, assignments, config).map(|b| b.total)
 }
 
 // ── Optimizer-internal scoring context ────────────────────────────────────────

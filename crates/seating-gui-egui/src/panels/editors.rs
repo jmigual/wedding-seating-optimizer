@@ -5,7 +5,7 @@
 //! the spec): only `crate::state::SharedState` is read/mutated from here,
 //! and every mutation ends with [`SharedState::refresh`].
 
-use crate::state::{ClosenessRow, SharedState, TableConfigRow};
+use crate::state::{ClosenessRow, ImportDecision, PendingImport, SharedState, TableConfigRow};
 use eframe::egui;
 use seating_core::{
     ClosenessRule, OptimizationConfig, ReferenceIdOption, TableShape, ValidationError,
@@ -73,17 +73,32 @@ pub(crate) fn show(shared: &mut SharedState, state: &mut EditorsState, ui: &mut 
 
 // ── People ──────────────────────────────────────────────────────────────────
 
-const PEOPLE_WIDE_MIN_WIDTH: f32 = 920.0;
-const PEOPLE_MEDIUM_MIN_WIDTH: f32 = 660.0;
 const PERSON_ID_W: f32 = 70.0;
 const PERSON_NAME_MIN_W: f32 = 80.0;
-const TABLE_TYPE_LABEL_W: f32 = 90.0;
 const TABLE_TYPE_COMBO_W: f32 = 100.0;
 const TABLE_TYPE_MAX_CHARS: usize = 9;
-const LOCKED_TABLE_LABEL_W: f32 = 110.0;
 const LOCKED_TABLE_COMBO_W: f32 = 90.0;
-const LOCKED_SEAT_LABEL_W: f32 = 100.0;
 const LOCKED_SEAT_COMBO_W: f32 = 90.0;
+
+/// Small deterministic cushion added on top of a measured label width, to
+/// absorb sub-pixel differences between this measurement and egui's own
+/// `ui.label()` layout (rounding/hinting), so the tier boundary never
+/// under-shoots and causes the row to overflow its budgeted width. Same
+/// "generous, deterministic estimate" philosophy as `DELETE_BUDGET`.
+const LABEL_MEASURE_SLACK: f32 = 4.0;
+
+/// Measure the rendered width of a plain label string in the current body
+/// text style, via egui's memoized font-layout cache. Depends only on font
+/// metrics + text + style — never on `ui.available_width()` or any other
+/// panel-size-derived quantity — so unlike the container-size feedback loop
+/// this design forbids, this measurement cannot feed back into panel size.
+fn measured_label_width(ui: &egui::Ui, text: &str) -> f32 {
+    let font_id = egui::TextStyle::Body.resolve(ui.style());
+    ui.ctx()
+        .fonts_mut(|fonts| fonts.layout_no_wrap(text.to_string(), font_id, egui::Color32::WHITE))
+        .size()
+        .x
+}
 
 fn people_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
@@ -105,6 +120,15 @@ fn people_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
         }
     });
 
+    if let Some(PendingImport::People { path, people }) = &shared.pending_import {
+        let summary = format!("{} people from {}", people.len(), path.display());
+        if let Some(decision) = import_decision_modal(ui.ctx(), "Import People", &summary)
+            && shared.resolve_pending_import(decision)
+        {
+            state.new_group_inputs = vec![String::new(); shared.people.len()];
+        }
+    }
+
     if shared.people.is_empty() {
         ui.label(egui::RichText::new("No guests yet — click \"+ Add Person\" to start.").weak());
         return;
@@ -119,6 +143,39 @@ fn people_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
         .map(|row| row.table_type_id.clone())
         .collect();
     let all_groups = collect_group_ids(&shared.people);
+
+    let table_type_label_w = measured_label_width(ui, "Table type:");
+    let locked_table_label_w = measured_label_width(ui, "Locked table:");
+    let locked_seat_label_w = measured_label_width(ui, "Locked seat:");
+
+    // Wide tier's one line has 9 items (id, name, delete, 3×(label+combo)) → 8 gaps.
+    // Below this width the name field can't shrink further without dropping under
+    // PERSON_NAME_MIN_W, so the tier can no longer fit.
+    let wide_required = PERSON_ID_W
+        + PERSON_NAME_MIN_W
+        + DELETE_BUDGET
+        + table_type_label_w
+        + TABLE_TYPE_COMBO_W
+        + locked_table_label_w
+        + LOCKED_TABLE_COMBO_W
+        + locked_seat_label_w
+        + LOCKED_SEAT_COMBO_W
+        + ROW_SPACING * 8.0
+        + LABEL_MEASURE_SLACK;
+
+    // Medium tier's line 1 (id, name, delete — name flexes to PERSON_NAME_MIN_W)
+    // and line 2 (3×(label+combo), no flex field, 6 items → 5 gaps) must both fit;
+    // line 2 is the true bottleneck (matches the reported symptom).
+    let medium_line1_required = PERSON_ID_W + PERSON_NAME_MIN_W + DELETE_BUDGET + ROW_SPACING * 2.0;
+    let medium_line2_required = table_type_label_w
+        + TABLE_TYPE_COMBO_W
+        + locked_table_label_w
+        + LOCKED_TABLE_COMBO_W
+        + locked_seat_label_w
+        + LOCKED_SEAT_COMBO_W
+        + ROW_SPACING * 5.0
+        + LABEL_MEASURE_SLACK;
+    let medium_required = medium_line1_required.max(medium_line2_required);
 
     let mut delete_index = None;
     for index in 0..shared.people.len() {
@@ -143,20 +200,25 @@ fn people_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
             // total is bounded by `w` by construction: the row's min_rect
             // can never demand more width than the panel actually granted
             // it, which is what stops the resize/snap-back loop this
-            // replaces.
+            // replaces. Tier thresholds are computed per-frame from label
+            // widths measured via the font-layout cache rather than
+            // hardcoded, so they track the actual rendered text; the
+            // measurement is a pure function of font metrics + text + style,
+            // never of panel width, so it cannot feed back into container
+            // size or reintroduce that loop.
             let w = ui.available_width();
-            let wide = w >= PEOPLE_WIDE_MIN_WIDTH;
-            let medium = !wide && w >= PEOPLE_MEDIUM_MIN_WIDTH;
+            let wide = w >= wide_required;
+            let medium = !wide && w >= medium_required;
 
             if wide {
                 let name_w = (w
                     - PERSON_ID_W
                     - DELETE_BUDGET
-                    - TABLE_TYPE_LABEL_W
+                    - table_type_label_w
                     - TABLE_TYPE_COMBO_W
-                    - LOCKED_TABLE_LABEL_W
+                    - locked_table_label_w
                     - LOCKED_TABLE_COMBO_W
-                    - LOCKED_SEAT_LABEL_W
+                    - locked_seat_label_w
                     - LOCKED_SEAT_COMBO_W
                     - ROW_SPACING * 8.0)
                     .max(PERSON_NAME_MIN_W);
@@ -514,6 +576,14 @@ fn closeness_section(shared: &mut SharedState, ui: &mut egui::Ui) {
         }
     });
 
+    if let Some(PendingImport::Closeness { path, rules }) = &shared.pending_import {
+        let summary = format!("{} closeness rules from {}", rules.len(), path.display());
+        if let Some(decision) = import_decision_modal(ui.ctx(), "Import Closeness Rules", &summary)
+        {
+            shared.resolve_pending_import(decision);
+        }
+    }
+
     if shared.closeness_rules.is_empty() {
         ui.label(egui::RichText::new("No closeness rules yet — click \"+ Add Rule\".").weak());
         return;
@@ -714,6 +784,13 @@ fn tables_section(shared: &mut SharedState, ui: &mut egui::Ui) {
             shared.import_tables_csv();
         }
     });
+
+    if let Some(PendingImport::Tables { path, tables }) = &shared.pending_import {
+        let summary = format!("{} table types from {}", tables.len(), path.display());
+        if let Some(decision) = import_decision_modal(ui.ctx(), "Import Table Types", &summary) {
+            shared.resolve_pending_import(decision);
+        }
+    }
 
     if shared.table_configs.is_empty() {
         ui.label(egui::RichText::new("No table types yet — click \"+ Add Table Type\".").weak());
@@ -1012,6 +1089,34 @@ fn unique_id<'a>(prefix: &str, existing: impl Iterator<Item = &'a str> + Clone) 
 /// Delete button shared by every editor row across People/Closeness/Tables.
 fn delete_button(ui: &mut egui::Ui) -> bool {
     ui.button("Delete").clicked()
+}
+
+/// Show the Replace/Merge/Cancel modal for a pending CSV import. Returns
+/// the user's decision the frame a button is clicked, `None` while still
+/// awaiting input. `title` doubles as the modal's stable `Id` salt.
+fn import_decision_modal(
+    ctx: &egui::Context,
+    title: &str,
+    summary: &str,
+) -> Option<ImportDecision> {
+    let mut decision = None;
+    egui::Modal::new(egui::Id::new(("import_decision_modal", title))).show(ctx, |ui| {
+        ui.heading(title);
+        ui.label(format!("Loaded {summary}."));
+        ui.label("Replace clears existing entries first. Merge overwrites matching entries and keeps the rest.");
+        ui.horizontal(|ui| {
+            if ui.button("Replace").clicked() {
+                decision = Some(ImportDecision::Replace);
+            }
+            if ui.button("Merge").clicked() {
+                decision = Some(ImportDecision::Merge);
+            }
+            if ui.button("Cancel").clicked() {
+                decision = Some(ImportDecision::Cancel);
+            }
+        });
+    });
+    decision
 }
 
 /// Truncate a user-entered id/name before handing it to
