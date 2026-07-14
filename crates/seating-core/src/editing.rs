@@ -7,8 +7,8 @@ use crate::models::{
     ClosenessRule, GroupId, Person, ProjectInput, SeatingAssignment, TableTypeConfig, TableTypeId,
     ValidationError, ValidationReport,
 };
-use crate::validation::{generate_table_instances, validate_seating_solution};
-use std::collections::{BTreeMap, BTreeSet};
+use crate::validation::{canonical_pair, generate_table_instances, validate_seating_solution};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Describes an identifier that can be referenced by a closeness rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,6 +227,71 @@ pub fn reference_label(id: &str, options: &[ReferenceIdOption]) -> String {
         .find(|option| option.id == id)
         .map(|option| option.label.clone())
         .unwrap_or_else(|| format!("{id} — unknown"))
+}
+
+// ── CSV import merge ──────────────────────────────────────────────────────────
+
+/// Upsert `imported` into `existing`, keyed by `Person.id`. An imported
+/// person whose id matches an existing one replaces that entry in place;
+/// an imported person with a new id is appended (in `imported`'s order);
+/// an existing person whose id is absent from `imported` is kept unchanged
+/// and in its original position.
+pub fn merge_people(existing: &[Person], imported: Vec<Person>) -> Vec<Person> {
+    let mut result = existing.to_vec();
+    let mut index: HashMap<String, usize> = result
+        .iter()
+        .enumerate()
+        .map(|(i, person)| (person.id.clone(), i))
+        .collect();
+    for person in imported {
+        if let Some(&position) = index.get(&person.id) {
+            result[position] = person;
+        } else {
+            index.insert(person.id.clone(), result.len());
+            result.push(person);
+        }
+    }
+    result
+}
+
+/// Upsert `imported` into `existing`, keyed by the unordered
+/// `(left_id, right_id)` pair (see [`canonical_pair`]) — a rule for
+/// `(a, b)` and one for `(b, a)` are the same key. Same replace/append/keep
+/// semantics as [`merge_people`].
+pub fn merge_closeness_rules(
+    existing: &[ClosenessRule],
+    imported: Vec<ClosenessRule>,
+) -> Vec<ClosenessRule> {
+    let mut result = existing.to_vec();
+    let mut index: HashMap<(String, String), usize> = result
+        .iter()
+        .enumerate()
+        .map(|(i, rule)| (canonical_pair(&rule.left_id, &rule.right_id), i))
+        .collect();
+    for rule in imported {
+        let key = canonical_pair(&rule.left_id, &rule.right_id);
+        if let Some(&position) = index.get(&key) {
+            result[position] = rule;
+        } else {
+            index.insert(key, result.len());
+            result.push(rule);
+        }
+    }
+    result
+}
+
+/// Upsert `imported` into `existing`, keyed by the map's own `TableTypeId`
+/// key. Equivalent to `existing.clone()` followed by `.extend(imported)`,
+/// which is exactly `BTreeMap`'s upsert semantics (overwrite on collision,
+/// insert if new) — stated as a named function so the GUI never
+/// reimplements this and so it's covered by its own test.
+pub fn merge_table_types(
+    existing: &BTreeMap<TableTypeId, TableTypeConfig>,
+    imported: BTreeMap<TableTypeId, TableTypeConfig>,
+) -> BTreeMap<TableTypeId, TableTypeConfig> {
+    let mut merged = existing.clone();
+    merged.extend(imported);
+    merged
 }
 
 // ── Seat drag-and-drop ────────────────────────────────────────────────────────
@@ -570,6 +635,87 @@ mod tests {
         assert!(people[1].groups.is_empty());
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].left_id, "p1");
+    }
+
+    #[test]
+    fn merge_people_upserts_by_id() {
+        let p1 = person("p1", &[]);
+        let p2 = person("p2", &[]);
+        let existing = vec![p1.clone(), p2.clone()];
+        let mut p2_updated = person("p2", &["family"]);
+        p2_updated.name = "P2 Updated".to_string();
+        let p3 = person("p3", &[]);
+        let merged = merge_people(&existing, vec![p2_updated.clone(), p3.clone()]);
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0].id, "p1");
+        assert_eq!(merged[1].id, "p2");
+        assert_eq!(merged[1].name, "P2 Updated");
+        assert_eq!(merged[2].id, "p3");
+    }
+
+    #[test]
+    fn merge_closeness_rules_upserts_by_unordered_pair() {
+        let existing = vec![
+            ClosenessRule {
+                left_id: "a".to_string(),
+                right_id: "b".to_string(),
+                score: 1.0,
+            },
+            ClosenessRule {
+                left_id: "e".to_string(),
+                right_id: "f".to_string(),
+                score: 9.0,
+            },
+        ];
+        let imported = vec![
+            ClosenessRule {
+                left_id: "b".to_string(),
+                right_id: "a".to_string(),
+                score: 5.0,
+            },
+            ClosenessRule {
+                left_id: "c".to_string(),
+                right_id: "d".to_string(),
+                score: 2.0,
+            },
+        ];
+        let merged = merge_closeness_rules(&existing, imported);
+        assert_eq!(merged.len(), 3);
+        // a-b collided with imported b-a: imported wins.
+        assert_eq!(merged[0].score, 5.0);
+        // e-f absent from import: kept unchanged.
+        assert_eq!(merged[1].left_id, "e");
+        assert_eq!(merged[1].score, 9.0);
+        // c-d is new: appended.
+        assert_eq!(merged[2].left_id, "c");
+    }
+
+    fn table_config(max_people: usize) -> TableTypeConfig {
+        TableTypeConfig {
+            shape: crate::models::TableShape::Round,
+            people_per_side: None,
+            max_people,
+            recommended_people: None,
+            min_people: None,
+            number_of_tables: None,
+        }
+    }
+
+    #[test]
+    fn merge_table_types_upserts_by_key() {
+        let mut existing = BTreeMap::new();
+        existing.insert("round_8".to_string(), table_config(8));
+        existing.insert("round_10".to_string(), table_config(10));
+
+        let mut imported = BTreeMap::new();
+        imported.insert("round_10".to_string(), table_config(99));
+        imported.insert("round_12".to_string(), table_config(12));
+
+        let merged = merge_table_types(&existing, imported);
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged["round_8"].max_people, 8);
+        assert_eq!(merged["round_10"].max_people, 99);
+        assert_eq!(merged["round_12"].max_people, 12);
     }
 
     #[test]

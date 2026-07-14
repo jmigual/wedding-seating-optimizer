@@ -7,11 +7,12 @@
 //! panel modules never need to reach into `app.rs`.
 
 use seating_core::{
-    ClosenessRule, OptimizationConfig, Person, ProjectFile, ProjectInput, SeatingAssignment,
-    SeatingLayout, TableShape, TableTypeConfig, ValidationError, ValidationReport, build_layout,
-    build_table_type_map, generate_table_instances, parse_closeness_csv, parse_f64_value,
+    ClosenessRule, OptimizationConfig, Person, ProjectFile, ProjectInput, ScoreBreakdown,
+    SeatingAssignment, SeatingLayout, TableShape, TableTypeConfig, TableTypeId, ValidationError,
+    ValidationReport, build_layout, build_table_type_map, generate_table_instances,
+    merge_closeness_rules, merge_people, merge_table_types, parse_closeness_csv, parse_f64_value,
     parse_optional_usize_value, parse_people_csv, parse_people_per_side, parse_project_file,
-    parse_required_usize_value, parse_tables_csv, score_solution, validate_project,
+    parse_required_usize_value, parse_tables_csv, score_solution_breakdown, validate_project,
     write_closeness_csv, write_people_csv, write_project_file, write_tables_csv,
 };
 use std::collections::BTreeMap;
@@ -25,6 +26,32 @@ pub(crate) enum MessageKind {
     Info,
     Success,
     Error,
+}
+
+/// The user's choice when resolving a [`PendingImport`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImportDecision {
+    Replace,
+    Merge,
+    Cancel,
+}
+
+/// A successfully-parsed CSV import awaiting a Replace/Merge/Cancel
+/// decision from the user before it is applied to project state.
+#[derive(Debug)]
+pub(crate) enum PendingImport {
+    People {
+        path: PathBuf,
+        people: Vec<Person>,
+    },
+    Closeness {
+        path: PathBuf,
+        rules: Vec<ClosenessRule>,
+    },
+    Tables {
+        path: PathBuf,
+        tables: BTreeMap<TableTypeId, TableTypeConfig>,
+    },
 }
 
 /// One editable closeness-rule row with raw string inputs, parsed at
@@ -105,6 +132,7 @@ pub(crate) struct SharedState {
     pub(crate) generated_table_numbers: Vec<usize>,
     pub(crate) table_capacities: BTreeMap<usize, usize>,
     pub(crate) score: Option<f64>,
+    pub(crate) score_breakdown: Option<ScoreBreakdown>,
     pub(crate) seed: String,
     pub(crate) attempts: String,
     pub(crate) iterations: String,
@@ -116,6 +144,7 @@ pub(crate) struct SharedState {
     pub(crate) message_kind: MessageKind,
     pub(crate) project_path: Option<PathBuf>,
     pub(crate) dirty: bool,
+    pub(crate) pending_import: Option<PendingImport>,
 }
 
 impl SharedState {
@@ -133,6 +162,7 @@ impl SharedState {
             generated_table_numbers: Vec::new(),
             table_capacities: BTreeMap::new(),
             score: None,
+            score_breakdown: None,
             seed: defaults.seed.to_string(),
             attempts: defaults.attempts.to_string(),
             iterations: defaults.iterations.to_string(),
@@ -144,6 +174,7 @@ impl SharedState {
             message_kind: MessageKind::Info,
             project_path: None,
             dirty: false,
+            pending_import: None,
         };
         state.recompute();
         state
@@ -417,6 +448,7 @@ impl SharedState {
     fn recompute(&mut self) {
         self.layout = None;
         self.score = None;
+        self.score_breakdown = None;
         let project = match self.materialize_project() {
             Ok(project) => project,
             Err(report) => {
@@ -450,10 +482,13 @@ impl SharedState {
             ),
         }
 
-        // `score_solution` validates the solution internally; a failure here
-        // (e.g. a stale assignment after an edit) just clears the badge.
+        // `score_solution_breakdown` validates the solution internally; a
+        // failure here (e.g. a stale assignment after an edit) just clears
+        // the badge.
         let config = self.materialize_optimization_config().unwrap_or_default();
-        self.score = score_solution(&project, &self.assignments, &config).ok();
+        let breakdown = score_solution_breakdown(&project, &self.assignments, &config).ok();
+        self.score = breakdown.as_ref().map(|b| b.total);
+        self.score_breakdown = breakdown;
     }
 
     /// Recompute derived state after a user edit, marking the project dirty.
@@ -601,12 +636,15 @@ impl SharedState {
         };
         match parse_people_csv(&contents) {
             Ok(people) => {
-                self.people = people;
                 self.set_message(
-                    MessageKind::Success,
-                    format!("Imported people from {}", path.display()),
+                    MessageKind::Info,
+                    format!(
+                        "Loaded {} people from {} — choose Replace or Merge.",
+                        people.len(),
+                        path.display()
+                    ),
                 );
-                self.refresh();
+                self.pending_import = Some(PendingImport::People { path, people });
             }
             Err(error) => self.set_message(
                 MessageKind::Error,
@@ -621,12 +659,15 @@ impl SharedState {
         };
         match parse_closeness_csv(&contents) {
             Ok(rules) => {
-                self.closeness_rules = rules.into_iter().map(ClosenessRow::from).collect();
                 self.set_message(
-                    MessageKind::Success,
-                    format!("Imported closeness rules from {}", path.display()),
+                    MessageKind::Info,
+                    format!(
+                        "Loaded {} closeness rules from {} — choose Replace or Merge.",
+                        rules.len(),
+                        path.display()
+                    ),
                 );
-                self.refresh();
+                self.pending_import = Some(PendingImport::Closeness { path, rules });
             }
             Err(error) => self.set_message(
                 MessageKind::Error,
@@ -641,20 +682,132 @@ impl SharedState {
         };
         match parse_tables_csv(&contents) {
             Ok(tables) => {
-                self.table_configs = tables
-                    .into_iter()
-                    .map(|(table_type_id, config)| TableConfigRow::from_pair(table_type_id, config))
-                    .collect();
                 self.set_message(
-                    MessageKind::Success,
-                    format!("Imported table types from {}", path.display()),
+                    MessageKind::Info,
+                    format!(
+                        "Loaded {} table types from {} — choose Replace or Merge.",
+                        tables.len(),
+                        path.display()
+                    ),
                 );
-                self.refresh();
+                self.pending_import = Some(PendingImport::Tables { path, tables });
             }
             Err(error) => self.set_message(
                 MessageKind::Error,
                 format!("Tables CSV import failed: {error}"),
             ),
+        }
+    }
+
+    /// Apply the user's Replace/Merge/Cancel decision for `self.pending_import`,
+    /// consuming it. Returns `true` if the decision changed `self.people`
+    /// (Replace or Merge on a `PendingImport::People`) — callers that keep
+    /// people-indexed UI scratch state (`EditorsState::new_group_inputs`) use
+    /// this to know when to resync.
+    pub(crate) fn resolve_pending_import(&mut self, decision: ImportDecision) -> bool {
+        let Some(pending) = self.pending_import.take() else {
+            return false;
+        };
+        if decision == ImportDecision::Cancel {
+            self.set_message(MessageKind::Info, "Import cancelled.");
+            return false;
+        }
+        match pending {
+            PendingImport::People { path, people } => {
+                self.people = match decision {
+                    ImportDecision::Replace => people,
+                    ImportDecision::Merge => merge_people(&self.people, people),
+                    ImportDecision::Cancel => unreachable!(),
+                };
+                self.set_message(
+                    MessageKind::Success,
+                    format!("Imported people from {}", path.display()),
+                );
+                self.refresh();
+                true
+            }
+            PendingImport::Closeness { path, rules } => {
+                match decision {
+                    ImportDecision::Replace => {
+                        self.closeness_rules = rules.into_iter().map(ClosenessRow::from).collect();
+                        self.set_message(
+                            MessageKind::Success,
+                            format!("Imported closeness rules from {}", path.display()),
+                        );
+                        self.refresh();
+                    }
+                    ImportDecision::Merge => match self.materialize_closeness_rules() {
+                        Ok(existing) => {
+                            let merged = merge_closeness_rules(&existing, rules);
+                            self.closeness_rules =
+                                merged.into_iter().map(ClosenessRow::from).collect();
+                            self.set_message(
+                                MessageKind::Success,
+                                format!("Merged closeness rules from {}", path.display()),
+                            );
+                            self.refresh();
+                        }
+                        Err(report) => {
+                            self.set_message(
+                                MessageKind::Error,
+                                format!(
+                                    "Merge failed — fix existing closeness errors first, or Replace: {}",
+                                    Self::report_summary(&report)
+                                ),
+                            );
+                            self.pending_import = Some(PendingImport::Closeness { path, rules });
+                        }
+                    },
+                    ImportDecision::Cancel => unreachable!(),
+                }
+                false
+            }
+            PendingImport::Tables { path, tables } => {
+                match decision {
+                    ImportDecision::Replace => {
+                        self.table_configs = tables
+                            .into_iter()
+                            .map(|(id, cfg)| TableConfigRow::from_pair(id, cfg))
+                            .collect();
+                        self.set_message(
+                            MessageKind::Success,
+                            format!("Imported table types from {}", path.display()),
+                        );
+                        self.refresh();
+                    }
+                    ImportDecision::Merge => {
+                        match self
+                            .materialize_table_entries()
+                            .and_then(build_table_type_map)
+                        {
+                            Ok(existing) => {
+                                let merged = merge_table_types(&existing, tables);
+                                self.table_configs = merged
+                                    .into_iter()
+                                    .map(|(id, cfg)| TableConfigRow::from_pair(id, cfg))
+                                    .collect();
+                                self.set_message(
+                                    MessageKind::Success,
+                                    format!("Merged table types from {}", path.display()),
+                                );
+                                self.refresh();
+                            }
+                            Err(report) => {
+                                self.set_message(
+                                    MessageKind::Error,
+                                    format!(
+                                        "Merge failed — fix existing table errors first, or Replace: {}",
+                                        Self::report_summary(&report)
+                                    ),
+                                );
+                                self.pending_import = Some(PendingImport::Tables { path, tables });
+                            }
+                        }
+                    }
+                    ImportDecision::Cancel => unreachable!(),
+                }
+                false
+            }
         }
     }
 }

@@ -52,7 +52,8 @@ pub mod validation;
 
 pub use editing::{
     ReferenceIdOption, SeatDropOutcome, apply_seat_drop, build_table_type_map, collect_group_ids,
-    parse_f64_value, parse_optional_usize_value, parse_people_per_side, parse_required_usize_value,
+    merge_closeness_rules, merge_people, merge_table_types, parse_f64_value,
+    parse_optional_usize_value, parse_people_per_side, parse_required_usize_value,
     reference_id_options, reference_label, reference_matches, remove_group, rename_group,
     rules_match,
 };
@@ -74,7 +75,7 @@ pub use render::{
     render_svg,
 };
 pub use scoring::{
-    circular_distance, default_proximity_weight, effective_person_pair_score, perimeter_distance,
-    score_solution,
+    ScoreBreakdown, circular_distance, default_proximity_weight, effective_person_pair_score,
+    perimeter_distance, score_solution, score_solution_breakdown,
 };
 pub use validation::{generate_table_instances, validate_project, validate_seating_solution};

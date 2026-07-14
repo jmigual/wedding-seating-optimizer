@@ -1435,6 +1435,115 @@ fn used_table_and_size_penalties_apply() {
     assert!((score - 0.0).abs() < 1e-9, "expected 0.0, got {score}");
 }
 
+/// Shared fixture for score breakdown tests: one round table (max 4,
+/// recommended 2) seating 3 people, with a single closeness rule between two
+/// adjacent seats. Mirrors `used_table_and_size_penalties_apply` above.
+fn breakdown_fixture() -> (ProjectInput, Vec<SeatingAssignment>, OptimizationConfig) {
+    let table_types = build_table_type_map(vec![(
+        "round_4".to_string(),
+        TableTypeConfig {
+            shape: TableShape::Round,
+            people_per_side: None,
+            max_people: 4,
+            recommended_people: Some(2),
+            min_people: None,
+            number_of_tables: Some(1),
+        },
+    )])
+    .unwrap();
+    let project = ProjectInput {
+        people: vec![
+            Person {
+                id: "p1".to_string(),
+                name: "A".to_string(),
+                table_type: None,
+                groups: vec![],
+                locked_table: None,
+                locked_seat: None,
+            },
+            Person {
+                id: "p2".to_string(),
+                name: "B".to_string(),
+                table_type: None,
+                groups: vec![],
+                locked_table: None,
+                locked_seat: None,
+            },
+            Person {
+                id: "p3".to_string(),
+                name: "C".to_string(),
+                table_type: None,
+                groups: vec![],
+                locked_table: None,
+                locked_seat: None,
+            },
+        ],
+        closeness_rules: vec![ClosenessRule {
+            left_id: "p1".to_string(),
+            right_id: "p2".to_string(),
+            score: 5.0,
+        }],
+        table_types,
+    };
+    let assignments = vec![
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 0,
+            person_id: "p1".to_string(),
+            person_name: "A".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 1,
+            person_id: "p2".to_string(),
+            person_name: "B".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 2,
+            person_id: "p3".to_string(),
+            person_name: "C".to_string(),
+        },
+    ];
+    let config = OptimizationConfig {
+        used_table_weight: 3.0,
+        optimal_table_size_weight: 2.0,
+        ..OptimizationConfig::default()
+    };
+    (project, assignments, config)
+}
+
+#[test]
+fn score_solution_breakdown_total_matches_score_solution() {
+    let (project, assignments, config) = breakdown_fixture();
+    let breakdown = score_solution_breakdown(&project, &assignments, &config).unwrap();
+    let score = score_solution(&project, &assignments, &config).unwrap();
+    assert_eq!(breakdown.total, score);
+}
+
+#[test]
+fn score_solution_breakdown_reports_expected_components() {
+    let (project, assignments, config) = breakdown_fixture();
+    let breakdown = score_solution_breakdown(&project, &assignments, &config).unwrap();
+    // Same hand-computed expectation as `used_table_and_size_penalties_apply`:
+    //   proximity: p1-p2 (distance 1, weight 1.0) => 5.0 * 1.0 * 1.0 = 5.0
+    //   used_table_penalty: 1 table * 3.0 = 3.0
+    //   size_penalty: |3 - 2| * 2.0 = 2.0
+    assert!((breakdown.proximity - 5.0).abs() < 1e-9);
+    assert!((breakdown.used_table_penalty - 3.0).abs() < 1e-9);
+    assert!((breakdown.size_penalty - 2.0).abs() < 1e-9);
+    assert!((breakdown.total - 0.0).abs() < 1e-9);
+    assert!(
+        (breakdown.total
+            - (breakdown.proximity - breakdown.used_table_penalty - breakdown.size_penalty))
+            .abs()
+            < 1e-9
+    );
+}
+
 // ── min_people through the optimizer ─────────────────────────────────────
 
 #[test]
