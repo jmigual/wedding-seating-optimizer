@@ -1,7 +1,7 @@
 use seating_core::*;
 use std::collections::BTreeMap;
 use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn sample_tables_csv() -> &'static str {
     "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_4,round,4,4,2,2,\nrect_4,rectangular,4,4,2,1,1|1|1|1\n"
@@ -151,6 +151,60 @@ fn round_project() -> ProjectInput {
             },
         )])
         .unwrap(),
+    }
+}
+
+fn crowded_min_capacity_project() -> ProjectInput {
+    let mut people = Vec::new();
+    for index in 1..=6 {
+        people.push(Person {
+            id: format!("head_{index}"),
+            name: format!("Head {index}"),
+            table_type: Some("nupcial".to_string()),
+            groups: Vec::new(),
+            locked_table: None,
+            locked_seat: None,
+        });
+    }
+    for index in 1..=37 {
+        people.push(Person {
+            id: format!("guest_{index}"),
+            name: format!("Guest {index}"),
+            table_type: None,
+            groups: Vec::new(),
+            locked_table: None,
+            locked_seat: None,
+        });
+    }
+
+    let mut table_types = BTreeMap::new();
+    table_types.insert(
+        "nupcial".to_string(),
+        TableTypeConfig {
+            shape: TableShape::Round,
+            people_per_side: None,
+            max_people: 6,
+            recommended_people: None,
+            min_people: Some(4),
+            number_of_tables: Some(1),
+        },
+    );
+    table_types.insert(
+        "rodona".to_string(),
+        TableTypeConfig {
+            shape: TableShape::Round,
+            people_per_side: None,
+            max_people: 10,
+            recommended_people: None,
+            min_people: Some(8),
+            number_of_tables: None,
+        },
+    );
+
+    ProjectInput {
+        people,
+        closeness_rules: Vec::new(),
+        table_types,
     }
 }
 
@@ -1616,6 +1670,33 @@ fn infeasible_min_constraints_yield_error() {
             .iter()
             .any(|e| matches!(e, ValidationError::NoFeasibleAssignment))
     );
+}
+
+#[test]
+fn timed_optimizer_finds_compacted_min_capacity_solution() {
+    let project = crowded_min_capacity_project();
+    let result = HeuristicOptimizer
+        .optimize_for_duration(
+            &project,
+            &OptimizationConfig::default(),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+
+    validate_seating_solution(&project, &result.solutions[0].assignments).unwrap();
+
+    let mut counts: BTreeMap<usize, usize> = BTreeMap::new();
+    for assignment in &result.solutions[0].assignments {
+        *counts.entry(assignment.table_number).or_insert(0) += 1;
+    }
+
+    assert_eq!(counts.remove(&1), Some(6));
+
+    let mut remaining: Vec<usize> = counts.values().copied().collect();
+    remaining.sort_unstable();
+    assert_eq!(remaining.len(), 4);
+    assert_eq!(remaining.iter().sum::<usize>(), 37);
+    assert!(remaining.iter().all(|count| (8..=10).contains(count)));
 }
 
 // ── CSV error paths ───────────────────────────────────────────────────────

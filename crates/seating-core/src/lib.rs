@@ -3,7 +3,7 @@
 //! Core library for the wedding seating optimizer.
 //!
 //! This crate contains all domain logic and is shared by the CLI (`seating-cli`)
-//! and the native GUI (`seating-gui`).  Neither of those crates contains any
+//! and the native GUI (`seating-gui-egui`). Neither of those crates contains any
 //! business logic of its own.
 //!
 //! ## Module layout
@@ -67,7 +67,7 @@ pub use models::{
     PersonId, ProjectFile, ProjectInput, SeatIndex, SeatingAssignment, SeatingSolution,
     TableInstance, TableShape, TableTypeConfig, TableTypeId, ValidationError, ValidationReport,
 };
-pub use optimizer::{HeuristicOptimizer, SeatingOptimizer};
+pub use optimizer::{DEFAULT_SEARCH_TIME_LIMIT, HeuristicOptimizer, SeatingOptimizer};
 pub use render::{
     COLOR_BACKGROUND, COLOR_CARD, COLOR_GUEST_TEXT, COLOR_MUTED, COLOR_SEAT_FILL,
     COLOR_SEAT_STROKE, COLOR_STROKE, COLOR_TABLE_FILL, COLOR_TABLE_STROKE, LayoutSeat, LayoutTable,

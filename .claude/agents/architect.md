@@ -24,7 +24,7 @@ implementation belongs to the coder and tester.
 - `seating-core` — **all** domain logic: models, I/O, validation, scoring, optimizer, editing,
   rendering. Reusable logic goes here, never in the front-ends.
 - `seating-cli` — thin: arg parsing, file I/O, dispatch, output formatting.
-- `seating-gui` — thin `iced` state/update/view wiring; testable logic belongs in `core`.
+- `seating-gui-egui` — thin egui state/update/view wiring; testable logic belongs in `core`.
 - No dependency edge from `core` into `cli`/`gui`. No UI concerns (terminal formatting, `iced`
   messages, exit handling) in `core`'s public API. Keep the `lib.rs` re-export list coherent.
 

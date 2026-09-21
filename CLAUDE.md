@@ -13,7 +13,7 @@ Three crates under `crates/`, with deliberately separated responsibilities:
   **no** business logic of their own; everything lives here.
 - `seating-cli`: a thin `clap` executable over `seating-core`. Keep it to argument parsing,
   file I/O, command dispatch, and user-facing output.
-- `seating-gui`: a native `iced` GUI over `seating-core`. Keep it to view/update/state wiring;
+- `seating-gui-egui`: a native `egui` GUI over `seating-core`. Keep it to view/update/state wiring;
   any logic worth testing belongs in `seating-core`.
 
 Layout of the library (`crates/seating-core/src/`):
@@ -39,12 +39,12 @@ The public surface is re-exported from `lib.rs`. Sample inputs live in `examples
 ## Architectural Expectations
 
 - Put any reusable logic in `seating-core`, never in the CLI or GUI. If you find yourself
-  writing scoring, validation, or optimization logic inside `seating-cli` or `seating-gui`,
+  writing scoring, validation, or optimization logic inside `seating-cli` or `seating-gui-egui`,
   it belongs in `core`.
 - Keep `seating-cli` thin: parse args, read/write files, call into `core`, format output.
-- Keep `seating-gui` to Elm-style `state` / `update` / `view` wiring. Logic that could be
+- Keep `seating-gui-egui` to view/update/state wiring. Logic that could be
   unit-tested without a window belongs in `core`.
-- No dependency edge from `seating-core` back into `seating-cli` or `seating-gui`.
+- No dependency edge from `seating-core` back into `seating-cli` or `seating-gui-egui`.
 - Don't leak UI concerns (terminal formatting, `iced` message types, exit handling) into
   `core`'s public API.
 - New CLI subcommand → add the domain capability to `core` first, then a thin dispatch arm in
@@ -88,7 +88,7 @@ The public surface is re-exported from `lib.rs`. Sample inputs live in `examples
   parse errors). Return structured errors; don't panic on invalid user input.
 - `ValidationReport` aggregates multiple problems — prefer reporting **all** validation errors
   in one pass over failing on the first.
-- `seating-cli` and `seating-gui` use `anyhow` at the boundary to add context and present
+- `seating-cli` and `seating-gui-egui` use `anyhow` at the boundary to add context and present
   concise, user-facing diagnostics. They must not re-implement core logic.
 - Panic only for genuine internal invariants, never for expected bad input.
 
@@ -110,7 +110,7 @@ Useful commands:
 - `cargo test --workspace`
 - `cargo test -p seating-core`
 - `cargo run -p seating-cli -- --help`
-- `cargo run -p seating-gui`
+- `cargo run -p seating-gui-egui`
 
 ## Style Pitfalls (found and fixed in the 2026-07 audit — do not reintroduce)
 

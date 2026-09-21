@@ -11,7 +11,12 @@ use crate::models::{
 use crate::scoring::{ScoringContext, score_solution};
 use crate::validation::{generate_table_instances, validate_project};
 use rand::{RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
+
+/// Default wall-clock budget used by the CLI and GUIs for full optimizer runs.
+pub const DEFAULT_SEARCH_TIME_LIMIT: Duration = Duration::from_secs(10);
 
 // ── Optimizer trait ───────────────────────────────────────────────────────────
 
@@ -50,6 +55,21 @@ pub trait SeatingOptimizer {
 pub struct HeuristicOptimizer;
 
 impl HeuristicOptimizer {
+    /// Run the heuristic for up to `max_duration`, continuing seeded restart
+    /// attempts until the time budget is exhausted.
+    ///
+    /// Unlike [`SeatingOptimizer::optimize`], which executes exactly
+    /// `config.attempts` restarts, this method keeps exploring additional
+    /// deterministic attempts after that baseline while time remains.
+    pub fn optimize_for_duration(
+        &self,
+        project: &ProjectInput,
+        config: &OptimizationConfig,
+        max_duration: Duration,
+    ) -> Result<OptimizationResult, ValidationReport> {
+        self.optimize_internal(project, config, None, Some(Instant::now() + max_duration))
+    }
+
     /// Construct a random, constraint-satisfying seating assignment.
     ///
     /// Returns `None` if no feasible assignment can be found for the given seed
@@ -83,15 +103,27 @@ impl HeuristicOptimizer {
             .filter(|p| !assigned.contains_key(&p.id))
             .collect();
         pending.shuffle(&mut rng);
+        pending.sort_by_key(|p| self.compatible_table_count(p, &instances));
+
+        let mut occupancy: HashMap<usize, usize> = HashMap::new();
+        for (table_num, _) in assigned.values() {
+            *occupancy.entry(*table_num).or_insert(0) += 1;
+        }
 
         for p in pending {
             let candidates = self.seat_candidates(p, &instances, &occupied);
             if candidates.is_empty() {
                 return None;
             }
-            let chosen = candidates[rng.random_range(0..candidates.len())];
+            let chosen = self.choose_initial_seat(
+                &mut rng,
+                &candidates,
+                &occupancy,
+                &table_lookup,
+            )?;
             occupied.insert(chosen);
             assigned.insert(p.id.clone(), chosen);
+            *occupancy.entry(chosen.0).or_insert(0) += 1;
         }
 
         // Uniform random placement is the worst strategy for min_people: it
@@ -112,6 +144,76 @@ impl HeuristicOptimizer {
         }
 
         Some(self.build_assignments(project, &assigned, &table_lookup))
+    }
+
+    fn compatible_table_count(&self, person: &Person, instances: &[TableInstance]) -> usize {
+        instances
+            .iter()
+            .filter(|table| {
+                person
+                    .table_type
+                    .as_ref()
+                    .map(|table_type| table_type == &table.table_type)
+                    .unwrap_or(true)
+            })
+            .filter(|table| {
+                person
+                    .locked_table
+                    .map(|locked_table| locked_table == table.number)
+                    .unwrap_or(true)
+            })
+            .count()
+    }
+
+    fn choose_initial_seat(
+        &self,
+        rng: &mut StdRng,
+        candidates: &[(usize, usize)],
+        occupancy: &HashMap<usize, usize>,
+        table_lookup: &HashMap<usize, &TableInstance>,
+    ) -> Option<(usize, usize)> {
+        type InitialTableRank = (usize, usize, Reverse<usize>, usize);
+
+        let mut by_table: HashMap<usize, Vec<usize>> = HashMap::new();
+        for &(table_number, seat_index) in candidates {
+            by_table.entry(table_number).or_default().push(seat_index);
+        }
+
+        let mut ranked_tables: Vec<(usize, InitialTableRank)> = by_table
+            .keys()
+            .copied()
+            .filter_map(|table_number| {
+                let table = table_lookup.get(&table_number)?;
+                let current = occupancy.get(&table_number).copied().unwrap_or(0);
+                let shortfall_after_placement = table
+                    .min_people
+                    .map(|min| min.saturating_sub(current + 1))
+                    .unwrap_or(0);
+                Some((
+                    table_number,
+                    (
+                        usize::from(current == 0),
+                        shortfall_after_placement,
+                        Reverse(current),
+                        table_number,
+                    ),
+                ))
+            })
+            .collect();
+        ranked_tables.sort_by_key(|(_, rank)| *rank);
+
+        let best_rank = ranked_tables.first().map(|(_, rank)| *rank)?;
+        let best_tables: Vec<usize> = ranked_tables
+            .into_iter()
+            .take_while(|(_, rank)| *rank == best_rank)
+            .map(|(table_number, _)| table_number)
+            .collect();
+        let chosen_table = best_tables[rng.random_range(0..best_tables.len())];
+
+        let mut seats = by_table.remove(&chosen_table)?;
+        seats.sort_unstable();
+        let chosen_seat = seats[rng.random_range(0..seats.len())];
+        Some((chosen_table, chosen_seat))
     }
 
     /// Deterministically repair `min_people` violations by consolidating
@@ -193,6 +295,9 @@ impl HeuristicOptimizer {
                     let person = person_lookup[id.as_str()];
                     let dest = instances.iter().find_map(|dest_table| {
                         if dest_table.number == table_num {
+                            return None;
+                        }
+                        if counts.get(&dest_table.number).copied().unwrap_or(0) == 0 {
                             return None;
                         }
                         if person
@@ -531,6 +636,61 @@ impl HeuristicOptimizer {
         }
         assignments
     }
+
+    fn optimize_internal(
+        &self,
+        project: &ProjectInput,
+        config: &OptimizationConfig,
+        attempt_limit: Option<usize>,
+        deadline: Option<Instant>,
+    ) -> Result<OptimizationResult, ValidationReport> {
+        validate_project(project)?;
+
+        let mut best: Vec<SeatingSolution> = Vec::new();
+        let min_attempts = config.attempts.max(1);
+        let mut attempt = 0usize;
+
+        loop {
+            if let Some(limit) = attempt_limit {
+                if attempt >= limit {
+                    break;
+                }
+            } else if attempt >= min_attempts && deadline.is_some_and(|end| Instant::now() >= end) {
+                break;
+            }
+
+            let attempt_seed = config.seed.wrapping_add((attempt as u64) * 17);
+            if let Some(initial) = self.random_feasible_assignment(project, attempt_seed) {
+                let improved =
+                    self.local_improve(project, config, initial, attempt_seed ^ 0xA5A5_5A5A);
+                if let Ok(score) = score_solution(project, &improved, config) {
+                    best.push(SeatingSolution {
+                        assignments: improved,
+                        score,
+                    });
+                    best.sort_by(|left, right| right.score.total_cmp(&left.score));
+                    best.truncate(config.solutions.max(1));
+                }
+            }
+
+            attempt += 1;
+
+            if attempt_limit.is_none()
+                && attempt >= min_attempts
+                && deadline.is_some_and(|end| Instant::now() >= end)
+            {
+                break;
+            }
+        }
+
+        if best.is_empty() {
+            return Err(ValidationReport {
+                errors: vec![ValidationError::NoFeasibleAssignment],
+            });
+        }
+
+        Ok(OptimizationResult { solutions: best })
+    }
 }
 
 impl SeatingOptimizer for HeuristicOptimizer {
@@ -547,36 +707,6 @@ impl SeatingOptimizer for HeuristicOptimizer {
         project: &ProjectInput,
         config: &OptimizationConfig,
     ) -> Result<OptimizationResult, ValidationReport> {
-        validate_project(project)?;
-
-        let mut best: Vec<SeatingSolution> = Vec::new();
-
-        for attempt in 0..config.attempts.max(1) {
-            // Derive a per-attempt seed that is deterministic and distinct.
-            let attempt_seed = config.seed.wrapping_add((attempt as u64) * 17);
-            let Some(initial) = self.random_feasible_assignment(project, attempt_seed) else {
-                continue;
-            };
-            // Use a fixed bit-mixing constant to derive a deterministic but
-            // decorrelated RNG stream for local improvement from the base seed.
-            let improved = self.local_improve(project, config, initial, attempt_seed ^ 0xA5A5_5A5A);
-            let Ok(score) = score_solution(project, &improved, config) else {
-                continue;
-            };
-            best.push(SeatingSolution {
-                assignments: improved,
-                score,
-            });
-            best.sort_by(|a, b| b.score.total_cmp(&a.score));
-            best.truncate(config.solutions.max(1));
-        }
-
-        if best.is_empty() {
-            return Err(ValidationReport {
-                errors: vec![ValidationError::NoFeasibleAssignment],
-            });
-        }
-
-        Ok(OptimizationResult { solutions: best })
+        self.optimize_internal(project, config, Some(config.attempts.max(1)), None)
     }
 }

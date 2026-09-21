@@ -4,8 +4,8 @@ use crate::panels::{self, CanvasState, EditorsState};
 use crate::state::{MessageKind, SharedState};
 use eframe::egui::{self, Color32};
 use seating_core::{
-    COLOR_BACKGROUND, COLOR_CARD, HeuristicOptimizer, OptimizationResult, SeatingOptimizer,
-    ValidationReport, validate_project,
+    validate_project, COLOR_BACKGROUND, COLOR_CARD, DEFAULT_SEARCH_TIME_LIMIT,
+    HeuristicOptimizer, OptimizationResult, ValidationReport,
 };
 use std::sync::mpsc;
 use std::thread;
@@ -103,7 +103,8 @@ impl SeatingApp {
 
         let repaint_ctx = ctx.clone();
         thread::spawn(move || {
-            let result = HeuristicOptimizer.optimize(&project, &config);
+            let result = HeuristicOptimizer
+                .optimize_for_duration(&project, &config, DEFAULT_SEARCH_TIME_LIMIT);
             let _ = tx.send(result);
             repaint_ctx.request_repaint();
         });

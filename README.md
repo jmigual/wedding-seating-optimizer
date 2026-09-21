@@ -6,8 +6,6 @@ Rust workspace for wedding seating optimization:
 - `crates/seating-cli`: clap-based CLI (`validate`, `optimize`, `score`, `render`, project file tools).
 - `crates/seating-gui-egui`: native egui GUI — structured editors, background optimization, and an
   interactive seating canvas with drag-and-drop seat editing and live score feedback.
-- `crates/seating-gui`: the original iced GUI. **Deprecated** — kept frozen outside the workspace
-  for comparison; new features land in the egui GUI only.
 
 ## CLI quick start
 
@@ -30,12 +28,3 @@ move or swap them (locks and table compatibility are enforced), and watch the sc
 each change. The plan exports to SVG/PNG with the same palette the app uses.
 
 ![Wedding Seating egui GUI with drag-and-drop seating canvas](docs/gui-egui-canvas.png)
-
-### Deprecated iced GUI
-
-The original GUI still builds from its own manifest (it is excluded from the workspace so the
-workspace can track current dependencies):
-
-```bash
-cargo build --manifest-path crates/seating-gui/Cargo.toml
-```

@@ -1,8 +1,7 @@
 //! # wedding-seating GUI (egui)
 //!
-//! Experimental native desktop application for the wedding seating
-//! optimizer, built with [egui](https://github.com/emilk/egui)/`eframe`.
-//! Lives alongside the existing `seating-gui` (iced) front-end.
+//! Native desktop application for the wedding seating optimizer, built with
+//! [egui](https://github.com/emilk/egui)/`eframe`.
 #![windows_subsystem = "windows"]
 
 mod app;
@@ -14,7 +13,7 @@ use eframe::egui;
 
 fn main() -> eframe::Result<()> {
     let icon =
-        eframe::icon_data::from_png_bytes(include_bytes!("../../seating-gui/assets/app-icon.png"))
+        eframe::icon_data::from_png_bytes(include_bytes!("../assets/app-icon.png"))
             .ok();
 
     let mut viewport = egui::ViewportBuilder::default()

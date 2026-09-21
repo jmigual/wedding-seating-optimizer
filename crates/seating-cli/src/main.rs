@@ -49,10 +49,11 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use seating_core::{
-    HeuristicOptimizer, OptimizationConfig, ProjectFile, ProjectInput, RenderOptions,
-    SeatingOptimizer, build_layout, make_project, parse_people_csv, parse_project_file,
-    parse_seating_csv, parse_tables_csv, render_png, render_svg, score_solution, validate_project,
-    write_closeness_csv, write_people_csv, write_project_file, write_seating_csv, write_tables_csv,
+    DEFAULT_SEARCH_TIME_LIMIT, HeuristicOptimizer, OptimizationConfig, ProjectFile, ProjectInput,
+    RenderOptions, build_layout, make_project, parse_people_csv, parse_project_file,
+    parse_seating_csv, parse_tables_csv, render_png, render_svg, score_solution,
+    validate_project, write_closeness_csv, write_people_csv, write_project_file,
+    write_seating_csv, write_tables_csv,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -249,7 +250,7 @@ fn main() -> Result<()> {
                 tables.as_ref(),
             )?;
             validate_project(&project)?;
-            let result = HeuristicOptimizer.optimize(
+            let result = HeuristicOptimizer.optimize_for_duration(
                 &project,
                 &OptimizationConfig {
                     seed,
@@ -260,6 +261,7 @@ fn main() -> Result<()> {
                     used_table_weight,
                     optimal_table_size_weight,
                 },
+                DEFAULT_SEARCH_TIME_LIMIT,
             )?;
             let best = result
                 .solutions

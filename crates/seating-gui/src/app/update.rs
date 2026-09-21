@@ -281,7 +281,9 @@ fn run_optimize(app: &mut GuiApp) -> Command<Msg> {
     app.is_optimizing = true;
     app.set_message(MessageKind::Info, "Optimizing…");
     Command::perform(
-        async move { HeuristicOptimizer.optimize(&project, &config) },
+        async move {
+            HeuristicOptimizer.optimize_for_duration(&project, &config, DEFAULT_SEARCH_TIME_LIMIT)
+        },
         Msg::OptimizeFinished,
     )
 }

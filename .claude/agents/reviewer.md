@@ -33,7 +33,7 @@ fix. Silence is approval — only output findings.
      before calling removal correct.
 
 4. **Crate-boundary violations.**
-   - Scoring/validation/optimization logic added to `seating-cli` or `seating-gui` instead of
+  - Scoring/validation/optimization logic added to `seating-cli` or `seating-gui-egui` instead of
      `core`.
    - UI concerns (terminal formatting, `iced` message types, exit handling) leaking into `core`.
    - A dependency edge from `core` into `cli`/`gui`.

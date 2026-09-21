@@ -24,9 +24,10 @@ use seating_core::{
     parse_project_file, parse_required_usize_value, parse_tables_csv, reference_id_options,
     reference_label, reference_matches, render_png, render_svg, rules_match, validate_project,
     write_closeness_csv, write_people_csv, write_project_file, write_seating_csv, write_tables_csv,
-    ClosenessRule, HeuristicOptimizer, OptimizationConfig, OptimizationResult, Person, ProjectFile,
-    ProjectInput, RenderOptions, SeatingAssignment, SeatingLayout, SeatingOptimizer, TableShape,
-    TableTypeConfig, ValidationError, ValidationReport,
+    ClosenessRule, DEFAULT_SEARCH_TIME_LIMIT, HeuristicOptimizer, OptimizationConfig,
+    OptimizationResult, Person, ProjectFile, ProjectInput, RenderOptions, SeatingAssignment,
+    SeatingLayout, SeatingOptimizer, TableShape, TableTypeConfig, ValidationError,
+    ValidationReport,
 };
 use std::collections::BTreeMap;
 use std::fs;

@@ -4,7 +4,6 @@ members = [
   "crates/seating-cli",
   "crates/seating-gui-egui",
 ]
-exclude = ["crates/seating-gui"]
 resolver = "2"
 
 [workspace.package]
