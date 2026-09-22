@@ -12,9 +12,7 @@ use app::SeatingApp;
 use eframe::egui;
 
 fn main() -> eframe::Result<()> {
-    let icon =
-        eframe::icon_data::from_png_bytes(include_bytes!("../assets/app-icon.png"))
-            .ok();
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/app-icon.png")).ok();
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size(egui::vec2(1440.0, 860.0))
