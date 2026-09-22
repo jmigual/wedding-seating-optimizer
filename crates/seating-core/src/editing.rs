@@ -64,19 +64,24 @@ pub fn collect_group_ids(people: &[Person]) -> Vec<GroupId> {
 /// Build searchable reference options for closeness-rule editors.
 pub fn reference_id_options(people: &[Person]) -> Vec<ReferenceIdOption> {
     let mut options = Vec::new();
-    for person in people {
-        options.push(ReferenceIdOption {
-            id: person.id.clone(),
-            label: format!("{} — {} — person", person.id, person.name),
-        });
-    }
     for group_id in collect_group_ids(people) {
         options.push(ReferenceIdOption {
             label: format!("{} — group", group_id),
             id: group_id,
         });
     }
-    options.sort_by(|left, right| left.label.cmp(&right.label));
+    let mut people_sorted: Vec<&Person> = people.iter().collect();
+    people_sorted.sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
+    for person in people_sorted {
+        options.push(ReferenceIdOption {
+            id: person.id.clone(),
+            label: if person.name.trim().is_empty() {
+                person.id.clone()
+            } else {
+                person.name.clone()
+            },
+        });
+    }
     options
 }
 
@@ -573,10 +578,39 @@ mod tests {
     fn reference_label_falls_back_for_unknown_id() {
         let options = vec![ReferenceIdOption {
             id: "p1".to_string(),
-            label: "p1 — Alice — person".to_string(),
+            label: "Alice".to_string(),
         }];
-        assert_eq!(reference_label("p1", &options), "p1 — Alice — person");
+        assert_eq!(reference_label("p1", &options), "Alice");
         assert_eq!(reference_label("missing", &options), "missing — unknown");
+    }
+
+    #[test]
+    fn reference_id_options_put_groups_first_then_people_by_name() {
+        let people = vec![
+            Person {
+                id: "p2".to_string(),
+                name: "Zoe".to_string(),
+                table_type: None,
+                groups: vec!["family".to_string()],
+                locked_table: None,
+                locked_seat: None,
+            },
+            Person {
+                id: "p1".to_string(),
+                name: "Alice".to_string(),
+                table_type: None,
+                groups: vec!["friends".to_string()],
+                locked_table: None,
+                locked_seat: None,
+            },
+        ];
+
+        let options = reference_id_options(&people);
+        let labels: Vec<&str> = options.iter().map(|option| option.label.as_str()).collect();
+        let ids: Vec<&str> = options.iter().map(|option| option.id.as_str()).collect();
+
+        assert_eq!(labels, vec!["family — group", "friends — group", "Alice", "Zoe"]);
+        assert_eq!(ids, vec!["family", "friends", "p1", "p2"]);
     }
 
     fn person(id: &str, groups: &[&str]) -> Person {

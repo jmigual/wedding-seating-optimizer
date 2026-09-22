@@ -13,6 +13,7 @@ use crate::validation::{generate_table_instances, validate_project};
 use rand::{RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
+use std::thread;
 use std::time::{Duration, Instant};
 
 /// Default wall-clock budget used by the CLI and GUIs for full optimizer runs.
@@ -67,7 +68,92 @@ impl HeuristicOptimizer {
         config: &OptimizationConfig,
         max_duration: Duration,
     ) -> Result<OptimizationResult, ValidationReport> {
-        self.optimize_internal(project, config, None, Some(Instant::now() + max_duration))
+        self.optimize_parallel_for_duration(project, config, max_duration)
+    }
+
+    fn run_attempt(
+        &self,
+        project: &ProjectInput,
+        config: &OptimizationConfig,
+        attempt: usize,
+    ) -> Option<SeatingSolution> {
+        let attempt_seed = config.seed.wrapping_add((attempt as u64) * 17);
+        let initial = self.random_feasible_assignment(project, attempt_seed)?;
+        let improved = self.local_improve(project, config, initial, attempt_seed ^ 0xA5A5_5A5A);
+        let score = score_solution(project, &improved, config).ok()?;
+        Some(SeatingSolution {
+            assignments: improved,
+            score,
+        })
+    }
+
+    fn merge_solution(
+        &self,
+        best: &mut Vec<SeatingSolution>,
+        solution: SeatingSolution,
+        keep: usize,
+    ) {
+        best.push(solution);
+        best.sort_by(|left, right| right.score.total_cmp(&left.score));
+        best.truncate(keep.max(1));
+    }
+
+    fn optimize_parallel_for_duration(
+        &self,
+        project: &ProjectInput,
+        config: &OptimizationConfig,
+        max_duration: Duration,
+    ) -> Result<OptimizationResult, ValidationReport> {
+        validate_project(project)?;
+
+        let worker_count = thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1)
+            .max(1);
+        let min_attempts = config.attempts.max(1);
+        let deadline = Instant::now() + max_duration;
+        let mut best = Vec::new();
+        let mut next_attempt = 0usize;
+
+        loop {
+            if next_attempt >= min_attempts && Instant::now() >= deadline {
+                break;
+            }
+
+            let batch_start = next_attempt;
+            let batch_len = if next_attempt < min_attempts {
+                worker_count.min(min_attempts - next_attempt)
+            } else {
+                worker_count
+            };
+            let batch_end = batch_start + batch_len;
+            let project_owned = project.clone();
+            let config_owned = config.clone();
+
+            thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(batch_len);
+                for attempt in batch_start..batch_end {
+                    let project_ref = &project_owned;
+                    let config_ref = &config_owned;
+                    handles.push(scope.spawn(move || self.run_attempt(project_ref, config_ref, attempt)));
+                }
+                for handle in handles {
+                    if let Some(solution) = handle.join().expect("optimizer worker panicked") {
+                        self.merge_solution(&mut best, solution, config.solutions);
+                    }
+                }
+            });
+
+            next_attempt = batch_end;
+        }
+
+        if best.is_empty() {
+            return Err(ValidationReport {
+                errors: vec![ValidationError::NoFeasibleAssignment],
+            });
+        }
+
+        Ok(OptimizationResult { solutions: best })
     }
 
     /// Construct a random, constraint-satisfying seating assignment.
@@ -659,18 +745,8 @@ impl HeuristicOptimizer {
                 break;
             }
 
-            let attempt_seed = config.seed.wrapping_add((attempt as u64) * 17);
-            if let Some(initial) = self.random_feasible_assignment(project, attempt_seed) {
-                let improved =
-                    self.local_improve(project, config, initial, attempt_seed ^ 0xA5A5_5A5A);
-                if let Ok(score) = score_solution(project, &improved, config) {
-                    best.push(SeatingSolution {
-                        assignments: improved,
-                        score,
-                    });
-                    best.sort_by(|left, right| right.score.total_cmp(&left.score));
-                    best.truncate(config.solutions.max(1));
-                }
+            if let Some(solution) = self.run_attempt(project, config, attempt) {
+                self.merge_solution(&mut best, solution, config.solutions);
             }
 
             attempt += 1;

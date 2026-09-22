@@ -553,7 +553,7 @@ fn draw_seat(
     let label = seat
         .person_name
         .as_deref()
-        .map(short_label)
+        .map(|name| seat_label(name, radius))
         .unwrap_or_else(|| seat.seat_index.to_string());
     let text_color = if occupied {
         faded(rgb(COLOR_BACKGROUND), seat_alpha)
@@ -564,7 +564,7 @@ fn draw_seat(
         center,
         Align2::CENTER_CENTER,
         label,
-        FontId::proportional((11.0 * zoom).max(7.0)),
+        FontId::proportional((10.0 * zoom).max(6.5)),
         text_color,
     );
 
@@ -642,6 +642,87 @@ fn short_label(name: &str) -> String {
     } else {
         first.to_string()
     }
+}
+
+fn seat_label(name: &str, radius: f32) -> String {
+    let compact = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return String::new();
+    }
+
+    let max_chars_per_line = if radius >= 28.0 {
+        9
+    } else if radius >= 22.0 {
+        7
+    } else {
+        6
+    };
+
+    wrap_label_lines(&compact, max_chars_per_line, 3).join("\n")
+}
+
+fn wrap_label_lines(text: &str, max_chars_per_line: usize, max_lines: usize) -> Vec<String> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for word in &words {
+        let candidate_len = if current.is_empty() {
+            word.chars().count()
+        } else {
+            current.chars().count() + 1 + word.chars().count()
+        };
+        if !current.is_empty() && candidate_len > max_chars_per_line {
+            lines.push(current);
+            current = String::new();
+            if lines.len() == max_lines - 1 {
+                break;
+            }
+        }
+        if current.is_empty() {
+            current.push_str(word);
+        } else {
+            current.push(' ');
+            current.push_str(word);
+        }
+    }
+
+    let used_words = lines
+        .iter()
+        .flat_map(|line| line.split_whitespace())
+        .count()
+        + current.split_whitespace().count();
+    if !current.is_empty() {
+        lines.push(current);
+    }
+
+    if used_words < words.len() {
+        let remaining = words[used_words..].join(" ");
+        if let Some(last) = lines.last_mut() {
+            if !last.is_empty() {
+                last.push(' ');
+            }
+            last.push_str(&remaining);
+        }
+    }
+
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+    }
+
+    if let Some(last) = lines.last_mut()
+        && last.chars().count() > max_chars_per_line
+    {
+        let mut truncated: String = last.chars().take(max_chars_per_line.saturating_sub(1)).collect();
+        truncated.push('…');
+        *last = truncated;
+    }
+
+    lines
 }
 
 fn person_tooltip(ui: &mut egui::Ui, person: &Person, shared: &SharedState) {

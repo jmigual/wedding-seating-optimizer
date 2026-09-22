@@ -101,25 +101,6 @@ fn measured_label_width(ui: &egui::Ui, text: &str) -> f32 {
 }
 
 fn people_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        if ui.button("+ Add Person").clicked() {
-            let id = unique_id("person", shared.people.iter().map(|p| p.id.as_str()));
-            shared.people.push(seating_core::Person {
-                id,
-                name: String::new(),
-                table_type: None,
-                groups: Vec::new(),
-                locked_table: None,
-                locked_seat: None,
-            });
-            state.new_group_inputs.push(String::new());
-            shared.refresh();
-        }
-        if ui.button("Import CSV…").clicked() {
-            shared.import_people_csv();
-        }
-    });
-
     if let Some(PendingImport::People { path, people }) = &shared.pending_import {
         let summary = format!("{} people from {}", people.len(), path.display());
         if let Some(decision) = import_decision_modal(ui.ctx(), "Import People", &summary)
@@ -335,6 +316,25 @@ fn people_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
         state.new_group_inputs.remove(index);
         shared.refresh();
     }
+
+    ui.horizontal(|ui| {
+        if ui.button("+ Add Person").clicked() {
+            let id = unique_id("person", shared.people.iter().map(|p| p.id.as_str()));
+            shared.people.push(seating_core::Person {
+                id,
+                name: String::new(),
+                table_type: None,
+                groups: Vec::new(),
+                locked_table: None,
+                locked_seat: None,
+            });
+            state.new_group_inputs.push(String::new());
+            shared.refresh();
+        }
+        if ui.button("Import CSV…").clicked() {
+            shared.import_people_csv();
+        }
+    });
 }
 
 fn id_field(ui: &mut egui::Ui, shared: &mut SharedState, index: usize, width: f32) -> bool {
@@ -562,20 +562,6 @@ const REFERENCE_MAX_CHARS: usize = 15;
 const SCORE_FIELD_W: f32 = 70.0;
 
 fn closeness_section(shared: &mut SharedState, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        if ui.button("+ Add Rule").clicked() {
-            shared.closeness_rules.push(ClosenessRow {
-                left_id: String::new(),
-                right_id: String::new(),
-                score_input: "1.0".to_string(),
-            });
-            shared.refresh();
-        }
-        if ui.button("Import CSV…").clicked() {
-            shared.import_closeness_csv();
-        }
-    });
-
     if let Some(PendingImport::Closeness { path, rules }) = &shared.pending_import {
         let summary = format!("{} closeness rules from {}", rules.len(), path.display());
         if let Some(decision) = import_decision_modal(ui.ctx(), "Import Closeness Rules", &summary)
@@ -663,6 +649,20 @@ fn closeness_section(shared: &mut SharedState, ui: &mut egui::Ui) {
         shared.closeness_rules.remove(index);
         shared.refresh();
     }
+
+    ui.horizontal(|ui| {
+        if ui.button("+ Add Rule").clicked() {
+            shared.closeness_rules.push(ClosenessRow {
+                left_id: String::new(),
+                right_id: String::new(),
+                score_input: "1.0".to_string(),
+            });
+            shared.refresh();
+        }
+        if ui.button("Import CSV…").clicked() {
+            shared.import_closeness_csv();
+        }
+    });
 }
 
 fn left_field(
@@ -760,31 +760,6 @@ fn table_shape_label(shape: &TableShape) -> &'static str {
 }
 
 fn tables_section(shared: &mut SharedState, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        if ui.button("+ Add Table Type").clicked() {
-            let table_type_id = unique_id(
-                "table_type",
-                shared
-                    .table_configs
-                    .iter()
-                    .map(|row| row.table_type_id.as_str()),
-            );
-            shared.table_configs.push(TableConfigRow {
-                table_type_id,
-                shape: TableShape::Round,
-                max_people_input: String::new(),
-                min_people_input: String::new(),
-                recommended_people_input: String::new(),
-                number_of_tables_input: String::new(),
-                people_per_side_input: String::new(),
-            });
-            shared.refresh();
-        }
-        if ui.button("Import CSV…").clicked() {
-            shared.import_tables_csv();
-        }
-    });
-
     if let Some(PendingImport::Tables { path, tables }) = &shared.pending_import {
         let summary = format!("{} table types from {}", tables.len(), path.display());
         if let Some(decision) = import_decision_modal(ui.ctx(), "Import Table Types", &summary) {
@@ -891,6 +866,31 @@ fn tables_section(shared: &mut SharedState, ui: &mut egui::Ui) {
         shared.table_configs.remove(index);
         shared.refresh();
     }
+
+    ui.horizontal(|ui| {
+        if ui.button("+ Add Table Type").clicked() {
+            let table_type_id = unique_id(
+                "table_type",
+                shared
+                    .table_configs
+                    .iter()
+                    .map(|row| row.table_type_id.as_str()),
+            );
+            shared.table_configs.push(TableConfigRow {
+                table_type_id,
+                shape: TableShape::Round,
+                max_people_input: String::new(),
+                min_people_input: String::new(),
+                recommended_people_input: String::new(),
+                number_of_tables_input: String::new(),
+                people_per_side_input: String::new(),
+            });
+            shared.refresh();
+        }
+        if ui.button("Import CSV…").clicked() {
+            shared.import_tables_csv();
+        }
+    });
 }
 
 fn table_id_field(ui: &mut egui::Ui, shared: &mut SharedState, index: usize, width: f32) -> bool {
