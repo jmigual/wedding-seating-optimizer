@@ -18,6 +18,28 @@ use crate::models::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
+// ── CSV header constants ───────────────────────────────────────────────────────
+// Single source of truth for each CSV format's column order; consumed by the
+// `write_*_csv` functions below and re-exported for documentation/hover-text
+// use by front-ends.
+
+/// Header row for the people CSV format. `table_type`, `groups`,
+/// `locked_table`, and `locked_seat` are optional (empty string = absent);
+/// `groups` is a pipe-separated list (e.g. `family|friends`).
+pub const PEOPLE_CSV_HEADER: &str = "id,name,table_type,groups,locked_table,locked_seat";
+
+/// Header row for the closeness-rules CSV format. `left_id`/`right_id` are
+/// person or group ids.
+pub const CLOSENESS_CSV_HEADER: &str = "left_id,right_id,score";
+
+/// Header row for the table-types CSV format. `recommended_people`,
+/// `min_people`, `number_of_tables`, and `people_per_side` are optional.
+pub const TABLES_CSV_HEADER: &str =
+    "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side";
+
+/// Header row for the seating-solution CSV format.
+pub const SEATING_CSV_HEADER: &str = "table_number,table_type,seat_index,person_id,person_name";
+
 // ── Internal deserialization structs ──────────────────────────────────────────
 // These are intentionally private; callers always receive the public domain types.
 
@@ -252,7 +274,11 @@ pub fn parse_project_file(input: &str) -> Result<ProjectFile, ValidationError> {
 /// # Errors
 /// Returns [`ValidationError::MalformedInput`] on any serialization error.
 pub fn write_people_csv(people: &[Person]) -> Result<String, ValidationError> {
-    let mut wtr = csv::Writer::from_writer(vec![]);
+    let mut wtr = csv::WriterBuilder::new()
+        .has_headers(false)
+        .from_writer(vec![]);
+    wtr.write_record(PEOPLE_CSV_HEADER.split(','))
+        .map_err(|e| ValidationError::MalformedInput(format!("people CSV serialization: {e}")))?;
     for p in people {
         wtr.serialize(PersonCsvOut {
             id: &p.id,
@@ -272,7 +298,13 @@ pub fn write_people_csv(people: &[Person]) -> Result<String, ValidationError> {
 /// # Errors
 /// Returns [`ValidationError::MalformedInput`] on any serialization error.
 pub fn write_closeness_csv(rules: &[ClosenessRule]) -> Result<String, ValidationError> {
-    let mut wtr = csv::Writer::from_writer(vec![]);
+    let mut wtr = csv::WriterBuilder::new()
+        .has_headers(false)
+        .from_writer(vec![]);
+    wtr.write_record(CLOSENESS_CSV_HEADER.split(','))
+        .map_err(|e| {
+            ValidationError::MalformedInput(format!("closeness CSV serialization: {e}"))
+        })?;
     for r in rules {
         wtr.serialize(ClosenessCsvOut {
             left_id: &r.left_id,
@@ -293,7 +325,11 @@ pub fn write_closeness_csv(rules: &[ClosenessRule]) -> Result<String, Validation
 pub fn write_tables_csv(
     tables: &BTreeMap<TableTypeId, TableTypeConfig>,
 ) -> Result<String, ValidationError> {
-    let mut wtr = csv::Writer::from_writer(vec![]);
+    let mut wtr = csv::WriterBuilder::new()
+        .has_headers(false)
+        .from_writer(vec![]);
+    wtr.write_record(TABLES_CSV_HEADER.split(','))
+        .map_err(|e| ValidationError::MalformedInput(format!("tables CSV serialization: {e}")))?;
     for (table_type_id, table) in tables {
         wtr.serialize(TableCsvOut {
             table_type_id,
@@ -343,7 +379,11 @@ pub fn write_seating_csv(assignments: &[SeatingAssignment]) -> Result<String, Va
             .then(a.seat_index.cmp(&b.seat_index))
             .then(a.person_id.cmp(&b.person_id))
     });
-    let mut wtr = csv::Writer::from_writer(vec![]);
+    let mut wtr = csv::WriterBuilder::new()
+        .has_headers(false)
+        .from_writer(vec![]);
+    wtr.write_record(SEATING_CSV_HEADER.split(','))
+        .map_err(|e| ValidationError::MalformedInput(format!("seating CSV serialization: {e}")))?;
     for a in &sorted {
         wtr.serialize(SeatingCsvOut {
             table_number: a.table_number,
@@ -408,6 +448,7 @@ fn parse_table_shape(s: &str) -> Result<TableShape, ValidationError> {
         "" | "round" => Ok(TableShape::Round),
         "rectangular" | "rectangle" | "rect" => Ok(TableShape::Rectangular),
         "square" => Ok(TableShape::Square),
+        "semicircle" => Ok(TableShape::Semicircle),
         other => Err(ValidationError::MalformedInput(format!(
             "invalid table shape '{other}'"
         ))),
@@ -419,6 +460,7 @@ fn table_shape_label(shape: &TableShape) -> &'static str {
         TableShape::Round => "round",
         TableShape::Rectangular => "rectangular",
         TableShape::Square => "square",
+        TableShape::Semicircle => "semicircle",
     }
 }
 

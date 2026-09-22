@@ -12,7 +12,7 @@ use seating_core::{
     COLOR_BACKGROUND, COLOR_CARD, COLOR_MUTED, COLOR_SEAT_FILL, COLOR_SEAT_STROKE, COLOR_STROKE,
     COLOR_TABLE_FILL, COLOR_TABLE_STROKE, LayoutSeat, LayoutTable, Person, ProjectInput,
     RenderOptions, SeatDropOutcome, SeatingAssignment, SeatingLayout, TableSurface,
-    apply_seat_drop, render_png, render_svg,
+    apply_seat_drop, build_layout, compact_table_numbers, render_png, render_svg,
 };
 use std::collections::HashMap;
 
@@ -142,6 +142,25 @@ fn toolbar(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui::Ui)
             state.zoom = (state.zoom * 1.25).clamp(MIN_ZOOM, MAX_ZOOM);
         }
         ui.separator();
+        if ui
+            .checkbox(&mut shared.show_empty_tables, "Show empty tables")
+            .changed()
+        {
+            shared.recompute();
+        }
+        if ui
+            .add_enabled(
+                shared.score_breakdown.is_some(),
+                egui::Button::new("Compact tables"),
+            )
+            .clicked()
+            && let Ok(project) = shared.materialize_project()
+        {
+            shared.assignments = compact_table_numbers(&project, &shared.assignments);
+            shared.refresh();
+            shared.set_message(MessageKind::Success, "Compacted table numbers");
+        }
+        ui.separator();
         ui.add_enabled_ui(shared.layout.is_some(), |ui| {
             if ui.button("Export SVG").clicked() {
                 export_svg(shared);
@@ -252,6 +271,7 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
 
     let mut pending_drop: Option<(usize, usize)> = None;
     let mut drag_cancelled = false;
+    let mut pending_lock: Option<(String, Option<usize>, Option<usize>)> = None;
 
     for table in &layout.tables {
         draw_table(&painter, table, transform, state.zoom);
@@ -301,6 +321,15 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
                 {
                     seat_response =
                         seat_response.on_hover_ui(|ui| person_tooltip(ui, person, shared));
+                    seat_response.context_menu(|ui| {
+                        seat_lock_menu(
+                            ui,
+                            person,
+                            table.table_number,
+                            seat.seat_index,
+                            &mut pending_lock,
+                        );
+                    });
                 }
                 if seat_response.drag_started()
                     && state.drag.is_none()
@@ -327,8 +356,17 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
                 }
             } else if let Some(person) = person {
                 let seat_id = Id::new(("seat_hover", table.table_number, seat.seat_index));
-                let seat_response = ui.interact(hit_rect, seat_id, Sense::hover());
+                let seat_response = ui.interact(hit_rect, seat_id, Sense::click());
                 if state.drag.is_none() {
+                    seat_response.context_menu(|ui| {
+                        seat_lock_menu(
+                            ui,
+                            person,
+                            table.table_number,
+                            seat.seat_index,
+                            &mut pending_lock,
+                        );
+                    });
                     seat_response.on_hover_ui(|ui| person_tooltip(ui, person, shared));
                 }
             }
@@ -351,7 +389,64 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
             MessageKind::Info,
             "Drop cancelled — released outside a seat.",
         );
+    } else if let Some((person_id, locked_table, locked_seat)) = pending_lock {
+        finish_lock(shared, &person_id, locked_table, locked_seat);
     }
+}
+
+/// Menu contents for right-clicking an occupied seat: lock the guest to
+/// their current table/seat, to just the table, or unlock them — offering
+/// only the options that would actually change their current lock state.
+fn seat_lock_menu(
+    ui: &mut egui::Ui,
+    person: &Person,
+    table_number: usize,
+    seat_index: usize,
+    pending_lock: &mut Option<(String, Option<usize>, Option<usize>)>,
+) {
+    if (person.locked_table != Some(table_number) || person.locked_seat != Some(seat_index))
+        && ui
+            .button(format!("Lock to table {table_number}, seat {seat_index}"))
+            .clicked()
+    {
+        *pending_lock = Some((person.id.clone(), Some(table_number), Some(seat_index)));
+        ui.close();
+    }
+    if (person.locked_table != Some(table_number) || person.locked_seat.is_some())
+        && ui.button(format!("Lock to table {table_number}")).clicked()
+    {
+        *pending_lock = Some((person.id.clone(), Some(table_number), None));
+        ui.close();
+    }
+    if (person.locked_table.is_some() || person.locked_seat.is_some())
+        && ui.button("Unlock").clicked()
+    {
+        *pending_lock = Some((person.id.clone(), None, None));
+        ui.close();
+    }
+}
+
+/// Applies a lock/unlock chosen from [`seat_lock_menu`] to the guest's
+/// `locked_table`/`locked_seat` fields, then re-validates and re-scores.
+fn finish_lock(
+    shared: &mut SharedState,
+    person_id: &str,
+    locked_table: Option<usize>,
+    locked_seat: Option<usize>,
+) {
+    let Some(person) = shared.people.iter_mut().find(|p| p.id == person_id) else {
+        return;
+    };
+    person.locked_table = locked_table;
+    person.locked_seat = locked_seat;
+    let name = person.name.clone();
+    shared.refresh();
+    let message = match (locked_table, locked_seat) {
+        (Some(t), Some(s)) => format!("Locked {name} to table {t}, seat {s}."),
+        (Some(t), None) => format!("Locked {name} to table {t}."),
+        _ => format!("Unlocked {name}."),
+    };
+    shared.set_message(MessageKind::Success, message);
 }
 
 fn finish_drop(
@@ -507,6 +602,26 @@ fn draw_table(painter: &egui::Painter, table: &LayoutTable, transform: Transform
                 StrokeKind::Middle,
             );
         }
+        TableSurface::Semicircle { cx, cy, radius } => {
+            let center = transform.to_screen((*cx, *cy));
+            let screen_radius = radius * zoom;
+            const ARC_POINTS: usize = 32;
+            let points: Vec<Pos2> = (0..=ARC_POINTS)
+                .map(|i| {
+                    let angle =
+                        std::f32::consts::PI + std::f32::consts::PI * i as f32 / ARC_POINTS as f32;
+                    Pos2::new(
+                        center.x + screen_radius * angle.cos(),
+                        center.y + screen_radius * angle.sin(),
+                    )
+                })
+                .collect();
+            painter.add(egui::Shape::convex_polygon(
+                points,
+                surface_fill,
+                surface_stroke,
+            ));
+        }
     }
 }
 
@@ -550,21 +665,36 @@ fn draw_seat(
         painter.circle_stroke(center, radius, Stroke::new(1.3_f32, rgb(COLOR_STROKE)));
     }
 
-    let label = seat
-        .person_name
-        .as_deref()
-        .map(|name| seat_label(name, radius))
-        .unwrap_or_else(|| seat.seat_index.to_string());
+    // Shrink (and, as a last resort, re-wrap/truncate) the label so it stays
+    // inside the seat circle: the previous fixed 10*zoom font routinely
+    // overflowed the 26px-diameter circle for 2-3 word names.
+    let box_side = radius * 1.5;
+    let base_font = 10.0 * zoom;
+    let min_font = 5.0 * zoom;
     let text_color = if occupied {
         faded(rgb(COLOR_BACKGROUND), seat_alpha)
     } else {
         rgb(COLOR_MUTED)
     };
+    let (label, font_size) = match seat.person_name.as_deref() {
+        Some(name) => fit_seat_label(painter, name, radius, box_side, base_font, min_font),
+        None => {
+            let text = seat.seat_index.to_string();
+            let size = painter
+                .layout_no_wrap(
+                    text.clone(),
+                    FontId::proportional(base_font),
+                    Color32::PLACEHOLDER,
+                )
+                .size();
+            (text, (base_font * fit_scale(size, box_side)).max(min_font))
+        }
+    };
     painter.text(
         center,
         Align2::CENTER_CENTER,
         label,
-        FontId::proportional((10.0 * zoom).max(6.5)),
+        FontId::proportional(font_size),
         text_color,
     );
 
@@ -644,7 +774,43 @@ fn short_label(name: &str) -> String {
     }
 }
 
-fn seat_label(name: &str, radius: f32) -> String {
+/// Font scale that shrinks `size` (a laid-out label's width/height) to fit
+/// inside a `box_side` x `box_side` square, without ever growing it.
+fn fit_scale(size: Vec2, box_side: f32) -> f32 {
+    (box_side / size.x).min(box_side / size.y).min(1.0)
+}
+
+/// Fit a person's seat label inside the seat circle: wrap at `base_font`,
+/// shrink toward `min_font`, and if it still overflows at that floor,
+/// re-wrap with one fewer line (down to a single, ellipsis-truncated line).
+fn fit_seat_label(
+    painter: &egui::Painter,
+    name: &str,
+    radius: f32,
+    box_side: f32,
+    base_font: f32,
+    min_font: f32,
+) -> (String, f32) {
+    let floor_ratio = min_font / base_font;
+    let mut max_lines = 3;
+    loop {
+        let label = seat_label(name, radius, max_lines);
+        let size = painter
+            .layout_no_wrap(
+                label.clone(),
+                FontId::proportional(base_font),
+                Color32::PLACEHOLDER,
+            )
+            .size();
+        let scale = fit_scale(size, box_side);
+        if scale >= floor_ratio || max_lines == 1 {
+            return (label, (base_font * scale).max(min_font));
+        }
+        max_lines -= 1;
+    }
+}
+
+fn seat_label(name: &str, radius: f32, max_lines: usize) -> String {
     let compact = name.split_whitespace().collect::<Vec<_>>().join(" ");
     if compact.is_empty() {
         return String::new();
@@ -658,13 +824,29 @@ fn seat_label(name: &str, radius: f32) -> String {
         6
     };
 
-    wrap_label_lines(&compact, max_chars_per_line, 3).join("\n")
+    wrap_label_lines(&compact, max_chars_per_line, max_lines).join("\n")
 }
 
 fn wrap_label_lines(text: &str, max_chars_per_line: usize, max_lines: usize) -> Vec<String> {
     let words: Vec<&str> = text.split_whitespace().collect();
     if words.is_empty() {
         return vec![String::new()];
+    }
+
+    // The wrapping loop below assumes at least two lines are available (it
+    // breaks once `max_lines - 1` lines are filled); a single line has no
+    // room to wrap into, so truncate it directly instead.
+    if max_lines <= 1 {
+        let joined = words.join(" ");
+        if joined.chars().count() > max_chars_per_line {
+            let mut truncated: String = joined
+                .chars()
+                .take(max_chars_per_line.saturating_sub(1))
+                .collect();
+            truncated.push('…');
+            return vec![truncated];
+        }
+        return vec![joined];
     }
 
     let mut lines = Vec::new();
@@ -717,7 +899,10 @@ fn wrap_label_lines(text: &str, max_chars_per_line: usize, max_lines: usize) -> 
     if let Some(last) = lines.last_mut()
         && last.chars().count() > max_chars_per_line
     {
-        let mut truncated: String = last.chars().take(max_chars_per_line.saturating_sub(1)).collect();
+        let mut truncated: String = last
+            .chars()
+            .take(max_chars_per_line.saturating_sub(1))
+            .collect();
         truncated.push('…');
         *last = truncated;
     }
@@ -777,11 +962,19 @@ fn rule_endpoint_label<'a>(id: &'a str, shared: &'a SharedState) -> &'a str {
         .unwrap_or(id)
 }
 
+/// Rebuilds a layout without empty tables for export, regardless of the
+/// canvas's "Show empty tables" toggle — exported plans should only depict
+/// tables that actually seat someone.
+fn export_layout(shared: &SharedState) -> Option<SeatingLayout> {
+    let project = shared.materialize_project().ok()?;
+    build_layout(&project, &shared.assignments).ok()
+}
+
 fn export_svg(shared: &mut SharedState) {
-    let Some(layout) = shared.layout.as_ref() else {
+    let Some(layout) = export_layout(shared) else {
         return;
     };
-    let svg = render_svg(layout, &RenderOptions::default());
+    let svg = render_svg(&layout, &RenderOptions::default());
     let Some(path) = rfd::FileDialog::new()
         .set_file_name("seating.svg")
         .add_filter("SVG", &["svg"])
@@ -799,7 +992,7 @@ fn export_svg(shared: &mut SharedState) {
 }
 
 fn export_png(shared: &mut SharedState) {
-    let Some(layout) = shared.layout.as_ref() else {
+    let Some(layout) = export_layout(shared) else {
         return;
     };
     let Some(path) = rfd::FileDialog::new()
@@ -809,7 +1002,7 @@ fn export_png(shared: &mut SharedState) {
     else {
         return;
     };
-    match render_png(layout, &RenderOptions::default(), &path) {
+    match render_png(&layout, &RenderOptions::default(), &path) {
         Ok(()) => shared.set_message(
             MessageKind::Success,
             format!("Exported PNG to {}", path.display()),

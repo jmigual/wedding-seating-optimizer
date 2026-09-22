@@ -1,7 +1,7 @@
 use seating_core::*;
 use std::collections::BTreeMap;
 use std::fs;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn sample_tables_csv() -> &'static str {
     "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_4,round,4,4,2,2,\nrect_4,rectangular,4,4,2,1,1|1|1|1\n"
@@ -385,6 +385,30 @@ fn structured_table_configs_round_trip_csv_works() {
 }
 
 #[test]
+fn csv_writers_emit_the_documented_headers() {
+    assert_eq!(
+        write_people_csv(&[]).unwrap().lines().next().unwrap(),
+        PEOPLE_CSV_HEADER
+    );
+    assert_eq!(
+        write_closeness_csv(&[]).unwrap().lines().next().unwrap(),
+        CLOSENESS_CSV_HEADER
+    );
+    assert_eq!(
+        write_tables_csv(&BTreeMap::new())
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+        TABLES_CSV_HEADER
+    );
+    assert_eq!(
+        write_seating_csv(&[]).unwrap().lines().next().unwrap(),
+        SEATING_CSV_HEADER
+    );
+}
+
+#[test]
 fn project_file_round_trip_works() {
     let project = sample_project();
     let project_file = ProjectFile::new(
@@ -524,6 +548,135 @@ fn square_table_layout_generation_preserves_perimeter_order() {
     assert_eq!(table.seats[1].person_name.as_deref(), Some("East"));
 }
 
+fn semicircle_project() -> ProjectInput {
+    let people = (1..=6)
+        .map(|i| Person {
+            id: format!("p{i}"),
+            name: format!("Guest {i}"),
+            table_type: Some("semi_6".to_string()),
+            groups: vec![],
+            locked_table: None,
+            locked_seat: None,
+        })
+        .collect();
+    ProjectInput {
+        people,
+        closeness_rules: vec![],
+        table_types: build_table_type_map(vec![(
+            "semi_6".to_string(),
+            TableTypeConfig {
+                shape: TableShape::Semicircle,
+                people_per_side: None,
+                max_people: 6,
+                recommended_people: None,
+                min_people: None,
+                number_of_tables: Some(1),
+            },
+        )])
+        .unwrap(),
+    }
+}
+
+fn semicircle_assignments() -> Vec<SeatingAssignment> {
+    (0..6)
+        .map(|seat_index| SeatingAssignment {
+            table_number: 1,
+            table_type: "semi_6".to_string(),
+            seat_index,
+            person_id: format!("p{}", seat_index + 1),
+            person_name: format!("Guest {}", seat_index + 1),
+        })
+        .collect()
+}
+
+#[test]
+fn semicircle_layout_places_seats_on_the_arc_only() {
+    let layout = build_layout(&semicircle_project(), &semicircle_assignments()).unwrap();
+    let table = &layout.tables[0];
+    assert_eq!(table.shape, TableShape::Semicircle);
+    let TableSurface::Semicircle { cy, .. } = &table.surface else {
+        panic!("expected a semicircle surface for a semicircle table");
+    };
+
+    assert_eq!(table.seats.len(), 6);
+    for seat in &table.seats {
+        assert!(
+            seat.y < *cy,
+            "seat {} should sit above the flat edge (y={}, cy={cy})",
+            seat.seat_index,
+            seat.y
+        );
+    }
+    for pair in table.seats.windows(2) {
+        assert!(
+            pair[0].x < pair[1].x,
+            "seat x should strictly increase with seat_index"
+        );
+    }
+
+    let svg = render_svg(&layout, &RenderOptions::default());
+    assert!(svg.contains("<path"));
+}
+
+/// Regression test: `build_semicircle_seats` used to reuse `round_table_metrics`
+/// (sized for a full circle), so a semicircle's arc was half as tall as the
+/// card allows and adjacent seat markers overlapped well before reaching a
+/// realistic 10-12 person table.
+#[test]
+fn semicircle_seats_stay_separated_for_twelve_seats() {
+    let people: Vec<Person> = (1..=12)
+        .map(|i| Person {
+            id: format!("p{i}"),
+            name: format!("Guest {i}"),
+            table_type: Some("semi_12".to_string()),
+            groups: vec![],
+            locked_table: None,
+            locked_seat: None,
+        })
+        .collect();
+    let project = ProjectInput {
+        people,
+        closeness_rules: vec![],
+        table_types: build_table_type_map(vec![(
+            "semi_12".to_string(),
+            TableTypeConfig {
+                shape: TableShape::Semicircle,
+                people_per_side: None,
+                max_people: 12,
+                recommended_people: None,
+                min_people: None,
+                number_of_tables: Some(1),
+            },
+        )])
+        .unwrap(),
+    };
+    let assignments: Vec<SeatingAssignment> = (0..12)
+        .map(|seat_index| SeatingAssignment {
+            table_number: 1,
+            table_type: "semi_12".to_string(),
+            seat_index,
+            person_id: format!("p{}", seat_index + 1),
+            person_name: format!("Guest {}", seat_index + 1),
+        })
+        .collect();
+
+    let options = RenderOptions::default();
+    let layout = build_layout(&project, &assignments).unwrap();
+    let table = &layout.tables[0];
+    assert_eq!(table.seats.len(), 12);
+
+    for pair in table.seats.windows(2) {
+        let dx = pair[1].x - pair[0].x;
+        let dy = pair[1].y - pair[0].y;
+        let distance = (dx * dx + dy * dy).sqrt();
+        assert!(
+            distance >= 2.0 * options.seat_radius,
+            "adjacent semicircle seats should not overlap: distance={distance}, seat_radius={}",
+            options.seat_radius
+        );
+    }
+}
+
 #[test]
 fn svg_rendering_contains_table_labels_types_and_guest_names() {
     let layout = build_layout(&round_project(), &round_assignments()).unwrap();
@@ -574,6 +727,51 @@ fn layout_and_svg_skip_unused_tables_but_render_all_capacity_seats() {
     assert!(svg.contains("Alice"));
     assert!(svg.contains("Bob"));
     assert!(!svg.contains("Table 2"));
+}
+
+#[test]
+fn layout_with_empty_tables_includes_every_instance() {
+    let project = ProjectInput {
+        people: sample_people(),
+        closeness_rules: vec![],
+        table_types: sample_table_map(),
+    };
+    let assignments = vec![
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 0,
+            person_id: "p1".to_string(),
+            person_name: "Alice".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 3,
+            person_id: "p2".to_string(),
+            person_name: "Bob".to_string(),
+        },
+    ];
+
+    let instances = generate_table_instances(&project);
+    let full_layout = build_layout_with_empty_tables(&project, &assignments).unwrap();
+    let used_layout = build_layout(&project, &assignments).unwrap();
+
+    assert_eq!(full_layout.tables.len(), instances.len());
+    assert!(full_layout.tables.len() > used_layout.tables.len());
+
+    let empty_table = full_layout
+        .tables
+        .iter()
+        .find(|table| table.table_number == 2)
+        .unwrap();
+    assert_eq!(empty_table.seats.len(), 4);
+    assert!(
+        empty_table
+            .seats
+            .iter()
+            .all(|seat| seat.person_name.is_none())
+    );
 }
 
 #[test]
@@ -865,7 +1063,7 @@ fn group_pair_scores_apply() {
 }
 
 #[test]
-fn multiple_group_maximum_rule_applies() {
+fn multiple_group_rules_are_summed() {
     let project = make_project(
         "id,name,table_type,groups,locked_table,locked_seat\na1,A1,,g1|g2,,\na2,A2,,g3|g4,,\n",
         "left_id,right_id,score\ng1,g3,5\ng2,g4,9\n",
@@ -874,7 +1072,38 @@ fn multiple_group_maximum_rule_applies() {
     .unwrap();
     let score =
         effective_person_pair_score(&project, &project.people[0], &project.people[1]).unwrap();
-    assert_eq!(score, 9.0);
+    assert_eq!(score, 14.0);
+}
+
+#[test]
+fn overlapping_group_rules_are_summed() {
+    let project = make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\np1,P1,,town|church|family,,\np2,P2,,town|church|family,,\np3,P3,,town|church,,\n",
+        "left_id,right_id,score\ntown,town,4\nchurch,church,5\nfamily,family,5\n",
+        sample_tables_csv(),
+    )
+    .unwrap();
+    let score_p1_p2 =
+        effective_person_pair_score(&project, &project.people[0], &project.people[1]).unwrap();
+    assert_eq!(score_p1_p2, 14.0);
+    let score_p1_p3 =
+        effective_person_pair_score(&project, &project.people[0], &project.people[2]).unwrap();
+    assert_eq!(score_p1_p3, 9.0);
+
+    // A negative direct rule nets against the summed group rules.
+    let project_with_direct = make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\np1,P1,,town|church|family,,\np2,P2,,town|church|family,,\np3,P3,,town|church,,\n",
+        "left_id,right_id,score\ntown,town,4\nchurch,church,5\nfamily,family,5\np1,p3,-10\n",
+        sample_tables_csv(),
+    )
+    .unwrap();
+    let score_p1_p3_negative = effective_person_pair_score(
+        &project_with_direct,
+        &project_with_direct.people[0],
+        &project_with_direct.people[2],
+    )
+    .unwrap();
+    assert_eq!(score_p1_p3_negative, -1.0);
 }
 
 #[test]
@@ -891,6 +1120,37 @@ fn person_pair_score_adds_to_group_score() {
 }
 
 #[test]
+fn cross_group_rule_counts_once_for_overlapping_membership() {
+    // Both people belong to both G and H, so the cross-group rule `G,H,7`
+    // must be counted once, not once per (G,H)/(H,G) enumeration order.
+    let project = make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\np1,P1,,G|H,,\np2,P2,,G|H,,\n",
+        "left_id,right_id,score\nG,H,7\n",
+        sample_tables_csv(),
+    )
+    .unwrap();
+    let score =
+        effective_person_pair_score(&project, &project.people[0], &project.people[1]).unwrap();
+    assert_eq!(score, 7.0);
+
+    // Asymmetric membership: only one orientation of the cross-group rule is
+    // enumerable, plus the shared group's self-rule, both counted once.
+    let project_asymmetric = make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\np1,P1,,G|H,,\np2,P2,,H,,\n",
+        "left_id,right_id,score\nG,H,7\nH,H,2\n",
+        sample_tables_csv(),
+    )
+    .unwrap();
+    let score_asymmetric = effective_person_pair_score(
+        &project_asymmetric,
+        &project_asymmetric.people[0],
+        &project_asymmetric.people[1],
+    )
+    .unwrap();
+    assert_eq!(score_asymmetric, 9.0);
+}
+
+#[test]
 fn round_distance_is_circular() {
     assert_eq!(circular_distance(0, 1, 5), 1);
     assert_eq!(circular_distance(0, 4, 5), 1);
@@ -901,6 +1161,13 @@ fn round_distance_is_circular() {
 fn perimeter_distance_is_circular_default() {
     assert_eq!(perimeter_distance(0, 3, 8), 3);
     assert_eq!(perimeter_distance(0, 7, 8), 1);
+}
+
+#[test]
+fn semicircle_distance_is_linear_along_the_arc() {
+    assert_eq!(linear_distance(0, 7), 7);
+    assert_eq!(seat_distance(&TableShape::Semicircle, 0, 7, 8), 7);
+    assert_eq!(seat_distance(&TableShape::Round, 0, 7, 8), 1);
 }
 
 #[test]
@@ -1043,7 +1310,7 @@ fn integration_style_optimization_test() {
             &OptimizationConfig {
                 seed: 1234,
                 attempts: 20,
-                iterations: 200,
+                steps: 200,
                 solutions: 1,
                 optimal_table_size_weight: 0.5,
                 ..OptimizationConfig::default()
@@ -1091,7 +1358,7 @@ fn used_table_penalty_prefers_needed_table_count() {
             &OptimizationConfig {
                 seed: 9,
                 attempts: 30,
-                iterations: 800,
+                steps: 800,
                 solutions: 1,
                 used_table_weight: 10.0,
                 optimal_table_size_weight: 2.0,
@@ -1115,7 +1382,7 @@ fn same_seed_produces_identical_solutions() {
     let config = OptimizationConfig {
         seed: 4242,
         attempts: 8,
-        iterations: 100,
+        steps: 100,
         solutions: 1,
         ..OptimizationConfig::default()
     };
@@ -1148,7 +1415,7 @@ fn optimizer_honors_locked_table_and_seat() {
             &OptimizationConfig {
                 seed: 7,
                 attempts: 15,
-                iterations: 150,
+                steps: 150,
                 solutions: 1,
                 ..OptimizationConfig::default()
             },
@@ -1247,14 +1514,21 @@ fn capacity_exceeded_is_detected() {
     )));
 }
 
-#[test]
-fn table_below_min_is_detected() {
-    let project = make_project(
+/// Fixture reused by [`min_people_shortfall_is_penalized_not_rejected`] and
+/// [`apply_seat_drop_allows_dropping_onto_an_empty_table_below_min`]: 3
+/// people, one `round_4` type (min 2) with 2 instances.
+fn min_shortfall_project() -> ProjectInput {
+    make_project(
         "id,name,table_type,groups,locked_table,locked_seat\np1,A,,,,\np2,B,,,,\np3,C,,,,\n",
         "left_id,right_id,score\n",
         "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_4,round,4,,2,2,\n",
     )
-    .unwrap();
+    .unwrap()
+}
+
+#[test]
+fn min_people_shortfall_is_penalized_not_rejected() {
+    let project = min_shortfall_project();
     let assignments = vec![
         SeatingAssignment {
             table_number: 1,
@@ -1278,15 +1552,23 @@ fn table_below_min_is_detected() {
             person_name: "C".to_string(),
         },
     ];
-    let err = validate_seating_solution(&project, &assignments).unwrap_err();
-    assert!(err.errors.iter().any(|e| matches!(
-        e,
-        ValidationError::TableBelowMin {
-            table_number: 2,
-            count: 1,
-            min: 2
-        }
-    )));
+    validate_seating_solution(&project, &assignments).unwrap();
+
+    let breakdown =
+        score_solution_breakdown(&project, &assignments, &OptimizationConfig::default()).unwrap();
+    // No closeness rules (proximity = 0), no recommended_people (size_penalty
+    // = 0), default used_table_weight = 0 (used_table_penalty = 0). Table 2
+    // has 1 guest against min_people = 2, so the shortfall of 1 is penalized
+    // at the default min_people_weight of 1000.0.
+    assert_eq!(breakdown.min_people_penalty, 1000.0);
+    assert_eq!(
+        breakdown.total,
+        breakdown.proximity
+            - breakdown.used_table_penalty
+            - breakdown.size_penalty
+            - breakdown.min_people_penalty
+    );
+    assert_eq!(breakdown.total, -1000.0);
 }
 
 #[test]
@@ -1592,10 +1874,46 @@ fn score_solution_breakdown_reports_expected_components() {
     assert!((breakdown.total - 0.0).abs() < 1e-9);
     assert!(
         (breakdown.total
-            - (breakdown.proximity - breakdown.used_table_penalty - breakdown.size_penalty))
+            - (breakdown.proximity
+                - breakdown.used_table_penalty
+                - breakdown.size_penalty
+                - breakdown.min_people_penalty))
             .abs()
             < 1e-9
     );
+}
+
+#[test]
+fn semicircle_scores_arc_ends_as_far_not_adjacent() {
+    let project = make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\np1,A,,,,\np2,B,,,,\n",
+        "left_id,right_id,score\np1,p2,10\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nsemi_4,semicircle,4,,,1,\n",
+    )
+    .unwrap();
+    let assignments = vec![
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "semi_4".to_string(),
+            seat_index: 0,
+            person_id: "p1".to_string(),
+            person_name: "A".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "semi_4".to_string(),
+            seat_index: 3,
+            person_id: "p2".to_string(),
+            person_name: "B".to_string(),
+        },
+    ];
+    let breakdown =
+        score_solution_breakdown(&project, &assignments, &OptimizationConfig::default()).unwrap();
+    // On a round table, seats 0 and 3 of 4 are adjacent (circular_distance = 1,
+    // weight 1.0, contribution 10.0); on a semicircle the arc doesn't wrap, so
+    // the two ends are the farthest apart (linear_distance = 3, weight 0.5).
+    assert_eq!(breakdown.proximity, 10.0 * default_proximity_weight(3));
+    assert_eq!(breakdown.proximity, 5.0);
 }
 
 // ── min_people through the optimizer ─────────────────────────────────────
@@ -1624,7 +1942,7 @@ fn optimizer_respects_min_people() {
             &OptimizationConfig {
                 seed: 5,
                 attempts: 20,
-                iterations: 300,
+                steps: 300,
                 solutions: 1,
                 ..OptimizationConfig::default()
             },
@@ -1641,11 +1959,11 @@ fn optimizer_respects_min_people() {
 }
 
 #[test]
-fn infeasible_min_constraints_yield_error() {
-    // 5 people, 2 tables of max=4/min=3: every split (5+0, 4+1, 3+2) either
-    // exceeds a table's capacity or leaves a used table below its minimum —
-    // genuinely infeasible for the heuristic, deterministically, regardless
-    // of seed.
+fn optimizer_minimizes_min_shortfall_when_no_feasible_split_exists() {
+    // 5 people, 2 tables of max=4/min=3: every split (4+1, 3+2) leaves a
+    // used table below its minimum. Min is soft, so the optimizer must still
+    // return a solution and pick the smallest shortfall (3+2, one guest
+    // short) rather than fail or settle for 4+1 (two short).
     let people_csv = (1..=5)
         .map(|index| format!("p{index},Person {index},,,,\n"))
         .fold(
@@ -1662,27 +1980,174 @@ fn infeasible_min_constraints_yield_error() {
     )
     .unwrap();
 
-    let err = HeuristicOptimizer
-        .optimize(&project, &OptimizationConfig::default())
-        .unwrap_err();
+    let result = HeuristicOptimizer
+        .optimize(
+            &project,
+            &OptimizationConfig {
+                steps: 500,
+                ..OptimizationConfig::default()
+            },
+        )
+        .unwrap();
+    let solution = &result.solutions[0];
+    validate_seating_solution(&project, &solution.assignments).unwrap();
+
+    let mut counts: BTreeMap<usize, usize> = BTreeMap::new();
+    for assignment in &solution.assignments {
+        *counts.entry(assignment.table_number).or_insert(0) += 1;
+    }
+    let mut sizes: Vec<usize> = counts.into_values().collect();
+    sizes.sort_unstable();
+    assert_eq!(sizes, [2, 3]);
+    // No closeness rules (proximity 0), no recommended_people (size penalty
+    // 0), default used_table_weight 0; the only term is one missing guest
+    // on the 2-seat table at the default min_people_weight.
+    assert_eq!(
+        solution.score,
+        -OptimizationConfig::default().min_people_weight
+    );
+}
+
+#[test]
+fn optimizer_moves_whole_group_onto_the_table_that_fits_it() {
+    // 11-person group `G` plus 9 singles; two 10-seat tables (1, 2) and one
+    // 11-seat table (3), all min 8. The only arrangement seating all of `G`
+    // together uses table 3 — which random construction never opens (it
+    // fills tables in number order) and a search that cannot open or close
+    // a table never reaches. p1/p2 additionally want to be adjacent.
+    let mut people_csv = "id,name,table_type,groups,locked_table,locked_seat\n".to_string();
+    for index in 1..=11 {
+        people_csv.push_str(&format!("g{index},G {index},,G,,\n"));
+    }
+    for index in 1..=9 {
+        people_csv.push_str(&format!("s{index},S {index},,,,\n"));
+    }
+    let project = make_project(
+        &people_csv,
+        "left_id,right_id,score\nG,G,5\ng1,g2,10\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\na,round,10,,8,2,\nb,round,11,,8,1,\n",
+    )
+    .unwrap();
+    let config = OptimizationConfig {
+        seed: 7,
+        attempts: 10,
+        steps: 50_000,
+        time_limit_secs: 0,
+        ..OptimizationConfig::default()
+    };
+
+    let run1 = HeuristicOptimizer
+        .optimize_timed(&project, &config, None)
+        .unwrap();
+    let run2 = HeuristicOptimizer
+        .optimize_timed(&project, &config, None)
+        .unwrap();
+    assert_eq!(run1.solutions, run2.solutions);
+
+    let assignments = &run1.solutions[0].assignments;
+    validate_seating_solution(&project, assignments).unwrap();
+    let seat_of = |id: &str| assignments.iter().find(|a| a.person_id == id).unwrap();
+
+    let group_table = seat_of("g1").table_number;
     assert!(
-        err.errors
-            .iter()
-            .any(|e| matches!(e, ValidationError::NoFeasibleAssignment))
+        (1..=11).all(|index| seat_of(&format!("g{index}")).table_number == group_table),
+        "group G is split across tables"
+    );
+    assert_eq!(seat_of("g1").table_type, "b");
+    assert_eq!(
+        circular_distance(seat_of("g1").seat_index, seat_of("g2").seat_index, 11),
+        1
+    );
+
+    let mut counts: BTreeMap<usize, usize> = BTreeMap::new();
+    for assignment in assignments {
+        *counts.entry(assignment.table_number).or_insert(0) += 1;
+    }
+    assert!(counts.values().all(|count| *count >= 8), "{counts:?}");
+}
+
+#[test]
+fn optimizer_splits_a_table_across_smaller_tables_when_that_scores_better() {
+    // 12 people in two mutually-hostile groups `G`/`H` of 6 each. One big
+    // table seats all 12 (and is what random construction fills first, since
+    // it fills already-used tables before opening a new one); two min-6
+    // tables of 6 seat each group separately with no cross-group penalty.
+    // Getting there from "all 12 on the big table" requires emptying it in
+    // one move: single-guest relocation pays the 5000 min-shortfall penalty
+    // for the newly opened min-6 table, and whole-table swap can't fit 12
+    // people into a 6-seat table. Only a table split (this test's subject)
+    // crosses that valley.
+    let mut people_csv = "id,name,table_type,groups,locked_table,locked_seat\n".to_string();
+    for index in 1..=6 {
+        people_csv.push_str(&format!("g{index},G {index},,G,,\n"));
+    }
+    for index in 1..=6 {
+        people_csv.push_str(&format!("h{index},H {index},,H,,\n"));
+    }
+    let project = make_project(
+        &people_csv,
+        "left_id,right_id,score\nG,G,5\nH,H,5\nG,H,-5\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nbig,round,12,,0,1,\nsmall,round,6,,6,2,\n",
+    )
+    .unwrap();
+    let config = OptimizationConfig {
+        seed: 3,
+        attempts: 8,
+        steps: 50_000,
+        time_limit_secs: 0,
+        ..OptimizationConfig::default()
+    };
+
+    let run1 = HeuristicOptimizer
+        .optimize_timed(&project, &config, None)
+        .unwrap();
+    let run2 = HeuristicOptimizer
+        .optimize_timed(&project, &config, None)
+        .unwrap();
+    assert_eq!(run1.solutions, run2.solutions);
+
+    let assignments = &run1.solutions[0].assignments;
+    validate_seating_solution(&project, assignments).unwrap();
+    let seat_of = |id: &str| assignments.iter().find(|a| a.person_id == id).unwrap();
+
+    let g_table = seat_of("g1").table_number;
+    let h_table = seat_of("h1").table_number;
+    assert_ne!(g_table, h_table, "G and H ended up on the same table");
+    assert!(
+        (1..=6).all(|index| seat_of(&format!("g{index}")).table_number == g_table),
+        "group G is split across tables"
+    );
+    assert!(
+        (1..=6).all(|index| seat_of(&format!("h{index}")).table_number == h_table),
+        "group H is split across tables"
+    );
+    assert_eq!(seat_of("g1").table_type, "small");
+    assert_eq!(seat_of("h1").table_type, "small");
+
+    let mut counts: BTreeMap<usize, usize> = BTreeMap::new();
+    for assignment in assignments {
+        *counts.entry(assignment.table_number).or_insert(0) += 1;
+    }
+    assert_eq!(
+        counts.get(&1).copied().unwrap_or(0),
+        0,
+        "big table 1 not empty: {counts:?}"
     );
 }
 
 #[test]
 fn timed_optimizer_finds_compacted_min_capacity_solution() {
     let project = crowded_min_capacity_project();
+    let config = OptimizationConfig {
+        steps: 300,
+        time_limit_secs: 2,
+        ..OptimizationConfig::default()
+    };
     let result = HeuristicOptimizer
-        .optimize_for_duration(
-            &project,
-            &OptimizationConfig::default(),
-            Duration::from_secs(2),
-        )
+        .optimize_timed(&project, &config, None)
         .unwrap();
 
+    assert!(result.attempts_completed >= config.attempts);
     validate_seating_solution(&project, &result.solutions[0].assignments).unwrap();
 
     let mut counts: BTreeMap<usize, usize> = BTreeMap::new();
@@ -1697,6 +2162,83 @@ fn timed_optimizer_finds_compacted_min_capacity_solution() {
     assert_eq!(remaining.len(), 4);
     assert_eq!(remaining.iter().sum::<usize>(), 37);
     assert!(remaining.iter().all(|count| (8..=10).contains(count)));
+}
+
+#[test]
+fn zero_time_limit_run_equals_exact_attempts_run() {
+    let project = round_project();
+    let config = OptimizationConfig {
+        steps: 300,
+        time_limit_secs: 0,
+        ..OptimizationConfig::default()
+    };
+
+    let timed = HeuristicOptimizer
+        .optimize_timed(&project, &config, None)
+        .unwrap();
+    let exact = HeuristicOptimizer.optimize(&project, &config).unwrap();
+
+    assert_eq!(timed.solutions, exact.solutions);
+    assert_eq!(timed.attempts_completed, config.attempts);
+}
+
+#[test]
+fn warm_start_never_returns_worse_and_is_deterministic() {
+    let project = round_project();
+    let initial = round_assignments();
+    let config = OptimizationConfig {
+        steps: 300,
+        time_limit_secs: 0,
+        ..OptimizationConfig::default()
+    };
+
+    let run1 = HeuristicOptimizer
+        .optimize_timed(&project, &config, Some(&initial))
+        .unwrap();
+    let run2 = HeuristicOptimizer
+        .optimize_timed(&project, &config, Some(&initial))
+        .unwrap();
+    assert_eq!(run1.solutions, run2.solutions);
+
+    let initial_score = score_solution(&project, &initial, &config).unwrap();
+    assert!(run1.solutions[0].score >= initial_score);
+
+    // With no search steps at all, only a real warm start returns the
+    // initial seating unchanged (a random start would not).
+    let untouched = HeuristicOptimizer
+        .optimize_timed(
+            &project,
+            &OptimizationConfig {
+                steps: 0,
+                ..config.clone()
+            },
+            Some(&initial),
+        )
+        .unwrap();
+    assert_eq!(untouched.solutions[0].assignments, initial);
+}
+
+#[test]
+fn warm_start_rejects_invalid_initial() {
+    let project = round_project();
+    let mut invalid_initial = round_assignments();
+    invalid_initial[1].seat_index = invalid_initial[0].seat_index; // seat collision
+
+    let err = HeuristicOptimizer
+        .optimize_timed(
+            &project,
+            &OptimizationConfig {
+                steps: 300,
+                ..OptimizationConfig::default()
+            },
+            Some(&invalid_initial),
+        )
+        .unwrap_err();
+    assert!(
+        err.errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::SeatCollision { .. }))
+    );
 }
 
 // ── CSV error paths ───────────────────────────────────────────────────────
@@ -1741,6 +2283,27 @@ fn tables_csv_rejects_empty_type_id() {
     let csv = "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\n,round,4,,,1,\n";
     let err = parse_tables_csv(csv).unwrap_err();
     assert!(matches!(err, ValidationError::EmptyTableTypeId));
+}
+
+#[test]
+fn tables_csv_round_trips_semicircle_shape() {
+    let tables = parse_tables_csv(
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nsemi_6,semicircle,6,,,1,\n",
+    )
+    .unwrap();
+    assert_eq!(tables["semi_6"].shape, TableShape::Semicircle);
+
+    let csv = write_tables_csv(&tables).unwrap();
+    assert!(csv.contains("semicircle"));
+
+    let project = ProjectInput {
+        people: vec![],
+        closeness_rules: vec![],
+        table_types: tables,
+    };
+    let project_file = ProjectFile::new(project, OptimizationConfig::default(), Vec::new());
+    let parsed = parse_project_file(&write_project_file(&project_file).unwrap()).unwrap();
+    assert_eq!(parsed.table_types["semi_6"].shape, TableShape::Semicircle);
 }
 
 // ── SVG escaping ───────────────────────────────────────────────────────────
@@ -2026,6 +2589,43 @@ fn apply_seat_drop_refuses_out_of_range_seat_index() {
 }
 
 #[test]
+fn apply_seat_drop_allows_dropping_onto_an_empty_table_below_min() {
+    let project = min_shortfall_project();
+    let assignments = vec![
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 0,
+            person_id: "p1".to_string(),
+            person_name: "A".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 1,
+            person_id: "p2".to_string(),
+            person_name: "B".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 2,
+            person_id: "p3".to_string(),
+            person_name: "C".to_string(),
+        },
+    ];
+
+    // Table 2's min_people is 2, but dropping a single guest onto it (an
+    // empty table) must succeed now that min_people is a soft penalty.
+    let (updated, outcome) = apply_seat_drop(&project, &assignments, "p3", 2, 0).unwrap();
+
+    assert_eq!(outcome, SeatDropOutcome::Moved);
+    let moved = updated.iter().find(|a| a.person_id == "p3").unwrap();
+    assert_eq!(moved.table_number, 2);
+    assert_eq!(moved.seat_index, 0);
+}
+
+#[test]
 fn seating_csv_round_trip_is_sorted() {
     let shuffled = vec![
         SeatingAssignment {
@@ -2077,4 +2677,288 @@ fn seating_csv_round_trip_is_sorted() {
         },
     ];
     assert_eq!(parsed, expected);
+}
+
+/// Bumping `number_of_tables` on a type that isn't lexicographically last
+/// renumbers every later type's instances. `table_number_remap` must track
+/// each instance by `(table_type, ordinal)` so assignments and locked tables
+/// can be carried forward instead of failing validation after the bump.
+#[test]
+fn table_number_remap_tracks_type_ordinal_after_a_type_grows() {
+    let table_types_with_a_count = |a_count: usize| {
+        build_table_type_map(vec![
+            (
+                "a".to_string(),
+                TableTypeConfig {
+                    shape: TableShape::Round,
+                    people_per_side: None,
+                    max_people: 4,
+                    recommended_people: None,
+                    min_people: None,
+                    number_of_tables: Some(a_count),
+                },
+            ),
+            (
+                "b".to_string(),
+                TableTypeConfig {
+                    shape: TableShape::Round,
+                    people_per_side: None,
+                    max_people: 4,
+                    recommended_people: None,
+                    min_people: None,
+                    number_of_tables: Some(1),
+                },
+            ),
+        ])
+        .unwrap()
+    };
+
+    let people = vec![
+        Person {
+            id: "p1".to_string(),
+            name: "Alice".to_string(),
+            table_type: None,
+            groups: vec![],
+            locked_table: None,
+            locked_seat: None,
+        },
+        Person {
+            id: "p2".to_string(),
+            name: "Bob".to_string(),
+            table_type: None,
+            groups: vec![],
+            locked_table: Some(2),
+            locked_seat: None,
+        },
+    ];
+
+    let before = ProjectInput {
+        people: people.clone(),
+        closeness_rules: vec![],
+        table_types: table_types_with_a_count(1),
+    };
+    let old_instances = generate_table_instances(&before);
+    assert_eq!(
+        old_instances
+            .iter()
+            .find(|t| t.table_type == "b")
+            .unwrap()
+            .number,
+        2
+    );
+
+    let after = ProjectInput {
+        people: people.clone(),
+        closeness_rules: vec![],
+        table_types: table_types_with_a_count(2),
+    };
+    let new_instances = generate_table_instances(&after);
+    assert_eq!(
+        new_instances
+            .iter()
+            .find(|t| t.table_type == "b")
+            .unwrap()
+            .number,
+        3
+    );
+
+    let remap = table_number_remap(&old_instances, &new_instances);
+    assert_eq!(remap.get(&2).copied(), Some(3));
+
+    let mut assignments = vec![
+        SeatingAssignment {
+            table_number: 2,
+            table_type: "b".to_string(),
+            seat_index: 0,
+            person_id: "p1".to_string(),
+            person_name: "Alice".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 2,
+            table_type: "b".to_string(),
+            seat_index: 1,
+            person_id: "p2".to_string(),
+            person_name: "Bob".to_string(),
+        },
+    ];
+    for a in assignments.iter_mut() {
+        if let Some(&new_number) = remap.get(&a.table_number) {
+            a.table_number = new_number;
+        }
+    }
+    assert_eq!(assignments[0].table_number, 3);
+    assert_eq!(assignments[1].table_number, 3);
+
+    let mut remapped_project = after;
+    if let Some(locked) = remapped_project.people[1].locked_table {
+        remapped_project.people[1].locked_table = remap.get(&locked).copied();
+    }
+    assert_eq!(remapped_project.people[1].locked_table, Some(3));
+
+    assert!(validate_seating_solution(&remapped_project, &assignments).is_ok());
+}
+
+fn compact_table_types() -> BTreeMap<TableTypeId, TableTypeConfig> {
+    build_table_type_map(vec![
+        (
+            "a".to_string(),
+            TableTypeConfig {
+                shape: TableShape::Round,
+                people_per_side: None,
+                max_people: 4,
+                recommended_people: None,
+                min_people: Some(0),
+                number_of_tables: Some(3),
+            },
+        ),
+        (
+            "b".to_string(),
+            TableTypeConfig {
+                shape: TableShape::Round,
+                people_per_side: None,
+                max_people: 4,
+                recommended_people: None,
+                min_people: Some(0),
+                number_of_tables: Some(2),
+            },
+        ),
+    ])
+    .unwrap()
+}
+
+fn compact_people() -> Vec<Person> {
+    ["p1", "p2", "p3", "p4", "p5"]
+        .into_iter()
+        .map(|id| Person {
+            id: id.to_string(),
+            name: id.to_string(),
+            table_type: None,
+            groups: vec![],
+            locked_table: None,
+            locked_seat: None,
+        })
+        .collect()
+}
+
+/// Table 1 (type `a`, occupied), table 3 (type `a`, occupied), table 5
+/// (type `b`, occupied) — tables 2 and 4 are empty.
+fn compact_assignments() -> Vec<SeatingAssignment> {
+    vec![
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "a".to_string(),
+            seat_index: 0,
+            person_id: "p1".to_string(),
+            person_name: "p1".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "a".to_string(),
+            seat_index: 1,
+            person_id: "p2".to_string(),
+            person_name: "p2".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 3,
+            table_type: "a".to_string(),
+            seat_index: 0,
+            person_id: "p3".to_string(),
+            person_name: "p3".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 3,
+            table_type: "a".to_string(),
+            seat_index: 1,
+            person_id: "p4".to_string(),
+            person_name: "p4".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 5,
+            table_type: "b".to_string(),
+            seat_index: 0,
+            person_id: "p5".to_string(),
+            person_name: "p5".to_string(),
+        },
+    ]
+}
+
+/// Compaction moves each type's used tables onto its lowest-numbered
+/// instances, preserving seat indices, and is score-neutral because
+/// same-type table instances are identical for scoring.
+#[test]
+fn compact_table_numbers_moves_used_tables_to_the_lowest_numbers() {
+    // Closeness rules on same-table pairs make the proximity term non-zero,
+    // so the score-neutral assertion below is not a tautology.
+    let project = ProjectInput {
+        people: compact_people(),
+        closeness_rules: vec![
+            ClosenessRule {
+                left_id: "p1".to_string(),
+                right_id: "p2".to_string(),
+                score: 5.0,
+            },
+            ClosenessRule {
+                left_id: "p3".to_string(),
+                right_id: "p4".to_string(),
+                score: 5.0,
+            },
+        ],
+        table_types: compact_table_types(),
+    };
+    let assignments = compact_assignments();
+
+    let compacted = compact_table_numbers(&project, &assignments);
+
+    let table_of = |compacted: &[SeatingAssignment], person_id: &str| {
+        let a = compacted.iter().find(|a| a.person_id == person_id).unwrap();
+        (a.table_number, a.seat_index)
+    };
+    assert_eq!(table_of(&compacted, "p1"), (1, 0));
+    assert_eq!(table_of(&compacted, "p2"), (1, 1));
+    assert_eq!(table_of(&compacted, "p3"), (2, 0));
+    assert_eq!(table_of(&compacted, "p4"), (2, 1));
+    assert_eq!(table_of(&compacted, "p5"), (4, 0));
+
+    assert!(validate_seating_solution(&project, &compacted).is_ok());
+
+    let config = OptimizationConfig::default();
+    let score_before = score_solution(&project, &assignments, &config).unwrap();
+    let score_after = score_solution(&project, &compacted, &config).unwrap();
+    assert_eq!(score_before, score_after);
+}
+
+/// A table holding a guest with `locked_table` set is pinned: it keeps its
+/// number, and the other used tables of that type fill the remaining lowest
+/// non-pinned numbers.
+#[test]
+fn compact_table_numbers_keeps_locked_tables_in_place() {
+    let mut people = compact_people();
+    people
+        .iter_mut()
+        .find(|p| p.id == "p3")
+        .unwrap()
+        .locked_table = Some(3);
+    let project = ProjectInput {
+        people,
+        closeness_rules: vec![],
+        table_types: compact_table_types(),
+    };
+    let assignments = compact_assignments();
+
+    let compacted = compact_table_numbers(&project, &assignments);
+
+    let table_of = |compacted: &[SeatingAssignment], person_id: &str| {
+        compacted
+            .iter()
+            .find(|a| a.person_id == person_id)
+            .unwrap()
+            .table_number
+    };
+    assert_eq!(table_of(&compacted, "p1"), 1);
+    assert_eq!(table_of(&compacted, "p2"), 1);
+    assert_eq!(table_of(&compacted, "p3"), 3);
+    assert_eq!(table_of(&compacted, "p4"), 3);
+    assert_eq!(table_of(&compacted, "p5"), 4);
+
+    assert!(validate_seating_solution(&project, &compacted).is_ok());
 }

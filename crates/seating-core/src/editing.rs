@@ -4,11 +4,11 @@
 //! parsing or project-inspection logic outside `seating-core`.
 
 use crate::models::{
-    ClosenessRule, GroupId, Person, ProjectInput, SeatingAssignment, TableTypeConfig, TableTypeId,
-    ValidationError, ValidationReport,
+    ClosenessRule, GroupId, Person, ProjectInput, SeatingAssignment, TableInstance,
+    TableTypeConfig, TableTypeId, ValidationError, ValidationReport,
 };
 use crate::validation::{canonical_pair, generate_table_instances, validate_seating_solution};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Describes an identifier that can be referenced by a closeness rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -381,6 +381,121 @@ pub fn apply_seat_drop(
     Ok((updated, outcome))
 }
 
+// ── Table renumbering ─────────────────────────────────────────────────────────
+
+/// Map old table numbers to their new numbers after [`generate_table_instances`]
+/// is re-run following a [`TableTypeConfig`] change (e.g. `number_of_tables`).
+///
+/// Instances are matched by `(table_type, ordinal-within-type)`, not by raw
+/// number, since bumping one type's count shifts every later type's numbers.
+/// An old table whose `(table_type, ordinal)` no longer exists among
+/// `new_instances` (its type was shrunk or removed) has no entry in the
+/// returned map — callers should leave assignments referencing it unchanged
+/// so validation reports it rather than silently dropping the guest.
+///
+/// [`generate_table_instances`]: crate::validation::generate_table_instances
+pub fn table_number_remap(
+    old_instances: &[TableInstance],
+    new_instances: &[TableInstance],
+) -> BTreeMap<usize, usize> {
+    fn by_type_ordinal(instances: &[TableInstance]) -> HashMap<(TableTypeId, usize), usize> {
+        let mut counts: HashMap<TableTypeId, usize> = HashMap::new();
+        instances
+            .iter()
+            .map(|instance| {
+                let ordinal = counts.entry(instance.table_type.clone()).or_insert(0);
+                let key = (instance.table_type.clone(), *ordinal);
+                *ordinal += 1;
+                (key, instance.number)
+            })
+            .collect()
+    }
+
+    let old_by_key = by_type_ordinal(old_instances);
+    let new_by_key = by_type_ordinal(new_instances);
+    old_by_key
+        .into_iter()
+        .filter_map(|(key, old_number)| {
+            new_by_key
+                .get(&key)
+                .map(|&new_number| (old_number, new_number))
+        })
+        .collect()
+}
+
+// ── Table compaction ──────────────────────────────────────────────────────────
+
+/// Repack each table type's used instances onto that type's lowest-numbered
+/// instances, so used tables sort before empty ones (e.g. table 3 moves to
+/// table 2 when table 2 of the same type is empty). Preserves each guest's
+/// seat index and the relative order of used tables within their type.
+///
+/// A table holding any guest with [`locked_table`](Person::locked_table)
+/// set is pinned: it keeps its number, and the other used tables of that
+/// type fill the remaining lowest, non-pinned numbers in order.
+///
+/// Score-neutral and validity-preserving: instances of the same table type
+/// are identical for scoring (same shape/capacity/min/recommended), so this
+/// only relabels which interchangeable instance a guest's occupant set sits
+/// at — it never changes [`crate::scoring::score_solution`]'s result, and
+/// moving a whole occupant set between same-type tables cannot violate
+/// capacity, seat, or lock invariants.
+pub fn compact_table_numbers(
+    project: &ProjectInput,
+    assignments: &[SeatingAssignment],
+) -> Vec<SeatingAssignment> {
+    let instances = generate_table_instances(project);
+    let mut numbers_by_type: BTreeMap<&TableTypeId, Vec<usize>> = BTreeMap::new();
+    for instance in &instances {
+        numbers_by_type
+            .entry(&instance.table_type)
+            .or_default()
+            .push(instance.number);
+    }
+
+    let locked_person_ids: HashSet<&str> = project
+        .people
+        .iter()
+        .filter(|person| person.locked_table.is_some())
+        .map(|person| person.id.as_str())
+        .collect();
+
+    let mut used_numbers: BTreeSet<usize> = BTreeSet::new();
+    let mut pinned_numbers: BTreeSet<usize> = BTreeSet::new();
+    for assignment in assignments {
+        used_numbers.insert(assignment.table_number);
+        if locked_person_ids.contains(assignment.person_id.as_str()) {
+            pinned_numbers.insert(assignment.table_number);
+        }
+    }
+
+    let mut number_map: HashMap<usize, usize> = HashMap::new();
+    for numbers in numbers_by_type.values() {
+        let free_numbers = numbers
+            .iter()
+            .copied()
+            .filter(|n| !pinned_numbers.contains(n));
+        let unpinned_used = numbers
+            .iter()
+            .copied()
+            .filter(|n| used_numbers.contains(n) && !pinned_numbers.contains(n));
+        for (old, new) in unpinned_used.zip(free_numbers) {
+            number_map.insert(old, new);
+        }
+    }
+
+    assignments
+        .iter()
+        .map(|assignment| SeatingAssignment {
+            table_number: number_map
+                .get(&assignment.table_number)
+                .copied()
+                .unwrap_or(assignment.table_number),
+            ..assignment.clone()
+        })
+        .collect()
+}
+
 // ── ValidationError association helpers ───────────────────────────────────────
 
 impl ValidationError {
@@ -426,7 +541,6 @@ impl ValidationError {
             | ValidationError::UnknownTableInSeating(_)
             | ValidationError::SeatCollision { .. }
             | ValidationError::TableCapacityExceeded { .. }
-            | ValidationError::TableBelowMin { .. }
             | ValidationError::MalformedInput(_)
             | ValidationError::UnsupportedProjectVersion { .. }
             | ValidationError::NoFeasibleAssignment
@@ -473,7 +587,6 @@ impl ValidationError {
             | ValidationError::UnknownTableInSeating(_)
             | ValidationError::SeatCollision { .. }
             | ValidationError::TableCapacityExceeded { .. }
-            | ValidationError::TableBelowMin { .. }
             | ValidationError::MalformedInput(_)
             | ValidationError::UnsupportedProjectVersion { .. }
             | ValidationError::NoFeasibleAssignment
@@ -517,7 +630,6 @@ impl ValidationError {
             | ValidationError::UnknownTableInSeating(_)
             | ValidationError::SeatCollision { .. }
             | ValidationError::TableCapacityExceeded { .. }
-            | ValidationError::TableBelowMin { .. }
             | ValidationError::MalformedInput(_)
             | ValidationError::UnsupportedProjectVersion { .. }
             | ValidationError::NoFeasibleAssignment
@@ -609,7 +721,10 @@ mod tests {
         let labels: Vec<&str> = options.iter().map(|option| option.label.as_str()).collect();
         let ids: Vec<&str> = options.iter().map(|option| option.id.as_str()).collect();
 
-        assert_eq!(labels, vec!["family — group", "friends — group", "Alice", "Zoe"]);
+        assert_eq!(
+            labels,
+            vec!["family — group", "friends — group", "Alice", "Zoe"]
+        );
         assert_eq!(ids, vec!["family", "friends", "p1", "p2"]);
     }
 

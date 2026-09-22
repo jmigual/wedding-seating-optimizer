@@ -3,6 +3,7 @@
 use crate::app::{PendingConfirm, SeatingApp};
 use crate::state::{MessageKind, SharedState};
 use eframe::egui;
+use std::time::Duration;
 
 pub(crate) fn show(app: &mut SeatingApp, ctx: &egui::Context, ui: &mut egui::Ui) {
     let mut new_or_open_clicked = false;
@@ -45,15 +46,37 @@ pub(crate) fn show(app: &mut SeatingApp, ctx: &egui::Context, ui: &mut egui::Ui)
                 app.start_optimize(ctx);
             }
         });
+        ui.add_enabled(
+            app.shared.score_breakdown.is_some(),
+            egui::Checkbox::new(&mut app.warm_start, "Refine current seating"),
+        )
+        .on_hover_text("Start every attempt from the current seating instead of a random one")
+        .on_disabled_hover_text("Needs a valid, scored seating to refine");
         if app.is_optimizing {
-            ui.spinner();
+            let elapsed = app
+                .optimize_started
+                .map_or(Duration::ZERO, |started| started.elapsed());
+            let limit = app.optimize_limit;
+            if limit.is_zero() {
+                ui.spinner();
+            } else {
+                let fraction = (elapsed.as_secs_f32() / limit.as_secs_f32()).min(1.0);
+                let elapsed = elapsed.as_secs_f64();
+                let limit = limit.as_secs();
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .desired_width(140.0)
+                        .text(format!("{elapsed:.0}s / {limit}s")),
+                );
+            }
+            ctx.request_repaint_after(Duration::from_millis(100));
         }
 
         ui.separator();
         let score_text = match &app.shared.score_breakdown {
             Some(b) => format!(
-                "Score: {:.1}  (proximity {:+.1} · tables {:+.1} · size {:+.1})",
-                b.total, b.proximity, -b.used_table_penalty, -b.size_penalty
+                "Score: {:.1}  (proximity {:+.1} · tables {:+.1} · size {:+.1} · min {:+.1})",
+                b.total, b.proximity, -b.used_table_penalty, -b.size_penalty, -b.min_people_penalty
             ),
             None => "Score: —".to_string(),
         };

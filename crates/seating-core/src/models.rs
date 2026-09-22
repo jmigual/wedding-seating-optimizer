@@ -34,6 +34,15 @@ pub enum TableShape {
     Rectangular,
     /// Square table – seats are ordered around all four sides (equal length).
     Square,
+    /// Semicircle table – seats sit only on the curved arc, distance is linear (no wrap).
+    Semicircle,
+}
+
+impl TableShape {
+    /// Whether this shape has distinct sides, i.e. requires `people_per_side`.
+    pub fn has_sides(&self) -> bool {
+        matches!(self, TableShape::Rectangular | TableShape::Square)
+    }
 }
 
 /// Configuration for one table type, as parsed from the tables CSV file.
@@ -48,7 +57,7 @@ pub struct TableTypeConfig {
     pub max_people: usize,
     /// Soft preferred occupancy (deviations are penalized in scoring).
     pub recommended_people: Option<usize>,
-    /// Hard minimum occupancy for any used table of this type.
+    /// Soft minimum occupancy for any used table of this type (penalized in scoring).
     pub min_people: Option<usize>,
     /// Maximum number of table instances to create for this type.
     /// `None` means the optimizer may generate as many as needed.
@@ -118,7 +127,7 @@ pub struct TableInstance {
     pub shape: TableShape,
     /// Maximum number of guests that can sit here.
     pub max_people: usize,
-    /// Minimum occupancy when the table is used (hard constraint).
+    /// Minimum occupancy when the table is used (soft, penalized in scoring).
     pub min_people: Option<usize>,
     /// Preferred occupancy (soft constraint, penalized in scoring).
     pub recommended_people: Option<usize>,
@@ -158,14 +167,20 @@ pub struct SeatingSolution {
 pub struct OptimizationConfig {
     /// RNG seed for reproducible runs.
     pub seed: u64,
-    /// Number of independent random-restart attempts.
+    /// Number of independent random-restart attempts: exact when
+    /// `time_limit_secs` is `0`, otherwise a minimum (batches keep launching
+    /// until the deadline passes).
     ///
     /// More attempts increase the chance of finding a better global optimum.
     pub attempts: usize,
-    /// Number of local pairwise-swap improvement steps per attempt.
+    /// Local-search moves proposed per attempt.
     ///
-    /// More iterations refine each individual attempt further.
-    pub iterations: usize,
+    /// More steps refine each individual attempt further. Renamed from
+    /// `iterations`: old `.wseat` files persisted `iterations: 200`, which
+    /// would be uselessly small under the new default — the rename lets
+    /// them pick up the new default via `#[serde(default)]` instead of
+    /// silently deserializing a stale, too-small value.
+    pub steps: usize,
     /// How many top solutions to keep and return.
     pub solutions: usize,
     /// Global multiplier for closeness and proximity contributions.
@@ -174,6 +189,14 @@ pub struct OptimizationConfig {
     pub used_table_weight: f64,
     /// Weight applied to the penalty for deviating from `recommended_people`.
     pub optimal_table_size_weight: f64,
+    /// Wall-clock budget, in seconds, for [`crate::optimizer::HeuristicOptimizer::optimize_timed`].
+    ///
+    /// `0` means run exactly `attempts` attempts regardless of elapsed time.
+    pub time_limit_secs: u64,
+    /// Penalty per missing guest on a used table below its `min_people`;
+    /// large by default so the minimum is only violated when no feasible
+    /// arrangement exists or a guest is placed manually.
+    pub min_people_weight: f64,
 }
 
 impl Default for OptimizationConfig {
@@ -181,11 +204,13 @@ impl Default for OptimizationConfig {
         Self {
             seed: 42,
             attempts: 10,
-            iterations: 200,
+            steps: 50_000,
             solutions: 1,
             proximity_weight: 1.0,
             used_table_weight: 0.0,
             optimal_table_size_weight: 1.0,
+            time_limit_secs: 10,
+            min_people_weight: 1000.0,
         }
     }
 }
@@ -244,6 +269,11 @@ impl ProjectFile {
 pub struct OptimizationResult {
     /// Top solutions, sorted from best to worst score.
     pub solutions: Vec<SeatingSolution>,
+    /// Number of restart attempts actually completed. Combined with
+    /// `config.seed` and `config.steps`, this fully determines the run — see
+    /// the determinism contract documented on
+    /// [`crate::optimizer::HeuristicOptimizer::optimize_timed`].
+    pub attempts_completed: usize,
 }
 
 // ── Validation types ──────────────────────────────────────────────────────────
@@ -400,12 +430,6 @@ pub enum ValidationError {
         table_number: usize,
         count: usize,
         capacity: usize,
-    },
-    #[error("used table {table_number} violates min_people: {count} < {min}")]
-    TableBelowMin {
-        table_number: usize,
-        count: usize,
-        min: usize,
     },
     #[error("malformed input: {0}")]
     MalformedInput(String),

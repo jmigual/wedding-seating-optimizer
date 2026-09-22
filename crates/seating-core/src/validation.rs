@@ -11,7 +11,7 @@
 //! between validation, scoring, and the optimizer.
 
 use crate::models::{
-    ClosenessRule, Person, ProjectInput, SeatingAssignment, TableInstance, TableShape, TableTypeId,
+    ClosenessRule, Person, ProjectInput, SeatingAssignment, TableInstance, TableTypeId,
     ValidationError, ValidationReport,
 };
 use std::collections::{HashMap, HashSet};
@@ -96,7 +96,7 @@ pub fn generate_table_instances(project: &ProjectInput) -> Vec<TableInstance> {
 /// - Person ID / group ID namespace collisions
 /// - Unknown table types referenced by persons
 /// - Locked seat without a locked table
-/// - Shape constraints (`people_per_side` required for non-round tables)
+/// - Shape constraints (`people_per_side` required for rectangular/square tables)
 /// - `people_per_side` sum must equal `max_people`
 /// - `min_people` ≤ `max_people`
 /// - Unknown IDs in closeness rules
@@ -147,7 +147,8 @@ pub fn validate_project(project: &ProjectInput) -> Result<(), ValidationReport> 
 /// - `SeatingAssignment.table_type` matches the resolved instance type.
 /// - Person's required `table_type` (if any) is respected.
 /// - Locked-table and locked-seat constraints are honoured.
-/// - Occupancy bounds (`max_people`, `min_people`) are satisfied.
+/// - Occupancy bounds (`max_people`) are satisfied; `min_people` is a soft
+///   constraint enforced by scoring, not here.
 pub fn validate_seating_solution(
     project: &ProjectInput,
     assignments: &[SeatingAssignment],
@@ -256,16 +257,6 @@ pub fn validate_seating_solution(
                 capacity: table.max_people,
             });
         }
-        if count > 0
-            && let Some(min_people) = table.min_people
-            && count < min_people
-        {
-            errors.push(ValidationError::TableBelowMin {
-                table_number: table.number,
-                count,
-                min: min_people,
-            });
-        }
     }
 
     if errors.is_empty() {
@@ -321,9 +312,7 @@ fn collect_id_sets(
 /// Validate per-type constraints: shape/side consistency and min/max ordering.
 fn validate_table_type_configs(project: &ProjectInput, errors: &mut Vec<ValidationError>) {
     for (table_type, cfg) in &project.table_types {
-        if matches!(cfg.shape, TableShape::Rectangular | TableShape::Square)
-            && cfg.people_per_side.is_none()
-        {
+        if cfg.shape.has_sides() && cfg.people_per_side.is_none() {
             errors.push(ValidationError::MissingPeoplePerSide(table_type.clone()));
         }
         if let Some(side) = &cfg.people_per_side {

@@ -49,11 +49,10 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use seating_core::{
-    DEFAULT_SEARCH_TIME_LIMIT, HeuristicOptimizer, OptimizationConfig, ProjectFile, ProjectInput,
-    RenderOptions, build_layout, make_project, parse_people_csv, parse_project_file,
-    parse_seating_csv, parse_tables_csv, render_png, render_svg, score_solution,
-    validate_project, write_closeness_csv, write_people_csv, write_project_file,
-    write_seating_csv, write_tables_csv,
+    HeuristicOptimizer, OptimizationConfig, ProjectFile, ProjectInput, RenderOptions, build_layout,
+    make_project, parse_people_csv, parse_project_file, parse_seating_csv, parse_tables_csv,
+    render_png, render_svg, score_solution, validate_project, write_closeness_csv,
+    write_people_csv, write_project_file, write_seating_csv, write_tables_csv,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -117,9 +116,9 @@ enum Commands {
         /// Number of top solutions to keep (only the best is written to output).
         #[arg(long, default_value_t = 1)]
         solutions: usize,
-        /// Local-improvement swap iterations per attempt.
-        #[arg(long, default_value_t = 200)]
-        iterations: usize,
+        /// Local-search moves evaluated per attempt.
+        #[arg(long, default_value_t = OptimizationConfig::default().steps)]
+        steps: usize,
         /// Global multiplier for closeness and proximity scoring.
         #[arg(long, default_value_t = 1.0)]
         proximity_weight: f64,
@@ -129,6 +128,12 @@ enum Commands {
         /// Weight applied to the penalty for deviating from recommended table size.
         #[arg(long, default_value_t = 1.0)]
         optimal_table_size_weight: f64,
+        /// Wall-clock search budget in seconds; 0 runs exactly `attempts` attempts.
+        #[arg(long, default_value_t = OptimizationConfig::default().time_limit_secs)]
+        time_limit: u64,
+        /// Penalty per missing guest on a used table below its min_people.
+        #[arg(long, default_value_t = OptimizationConfig::default().min_people_weight)]
+        min_people_weight: f64,
     },
 
     /// Score a pre-existing seating CSV and print the aggregate score.
@@ -157,6 +162,9 @@ enum Commands {
         /// Weight applied to the penalty for deviating from recommended table size.
         #[arg(long, default_value_t = 1.0)]
         optimal_table_size_weight: f64,
+        /// Penalty per missing guest on a used table below its min_people.
+        #[arg(long, default_value_t = OptimizationConfig::default().min_people_weight)]
+        min_people_weight: f64,
     },
 
     /// Render a seating CSV as an SVG or PNG seating plan.
@@ -238,10 +246,12 @@ fn main() -> Result<()> {
             seed,
             attempts,
             solutions,
-            iterations,
+            steps,
             proximity_weight,
             used_table_weight,
             optimal_table_size_weight,
+            time_limit,
+            min_people_weight,
         } => {
             let project = load_project_input(
                 project.as_ref(),
@@ -250,18 +260,20 @@ fn main() -> Result<()> {
                 tables.as_ref(),
             )?;
             validate_project(&project)?;
-            let result = HeuristicOptimizer.optimize_for_duration(
+            let result = HeuristicOptimizer.optimize_timed(
                 &project,
                 &OptimizationConfig {
                     seed,
                     attempts,
-                    iterations,
+                    steps,
                     solutions,
                     proximity_weight,
                     used_table_weight,
                     optimal_table_size_weight,
+                    time_limit_secs: time_limit,
+                    min_people_weight,
                 },
-                DEFAULT_SEARCH_TIME_LIMIT,
+                None,
             )?;
             let best = result
                 .solutions
@@ -270,9 +282,10 @@ fn main() -> Result<()> {
             fs::write(&output, write_seating_csv(&best.assignments)?)
                 .with_context(|| format!("failed writing output {}", output.display()))?;
             println!(
-                "Wrote seating to {} with score {}",
+                "Wrote seating to {} with score {} ({} attempts completed)",
                 output.display(),
-                best.score
+                best.score,
+                result.attempts_completed
             );
         }
         Commands::Score {
@@ -284,6 +297,7 @@ fn main() -> Result<()> {
             proximity_weight,
             used_table_weight,
             optimal_table_size_weight,
+            min_people_weight,
         } => {
             let project = load_project_input(
                 project.as_ref(),
@@ -299,6 +313,7 @@ fn main() -> Result<()> {
                     proximity_weight,
                     used_table_weight,
                     optimal_table_size_weight,
+                    min_people_weight,
                     ..OptimizationConfig::default()
                 },
             )?;

@@ -8,9 +8,10 @@
 use crate::state::{ClosenessRow, ImportDecision, PendingImport, SharedState, TableConfigRow};
 use eframe::egui;
 use seating_core::{
-    ClosenessRule, OptimizationConfig, ReferenceIdOption, TableShape, ValidationError,
-    collect_group_ids, parse_f64_value, reference_id_options, reference_label, remove_group,
-    rename_group, rules_match,
+    CLOSENESS_CSV_HEADER, ClosenessRule, OptimizationConfig, PEOPLE_CSV_HEADER, ReferenceIdOption,
+    TABLES_CSV_HEADER, TableShape, ValidationError, collect_group_ids, generate_table_instances,
+    parse_f64_value, reference_id_options, reference_label, remove_group, rename_group,
+    rules_match, table_number_remap,
 };
 use std::collections::HashMap;
 
@@ -331,7 +332,14 @@ fn people_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
             state.new_group_inputs.push(String::new());
             shared.refresh();
         }
-        if ui.button("Import CSV…").clicked() {
+        if ui
+            .button("Import CSV…")
+            .on_hover_text(format!(
+                "{PEOPLE_CSV_HEADER}\n\ngroups is pipe-separated (e.g. family|friends). \
+                 table_type, locked_table, and locked_seat are optional."
+            ))
+            .clicked()
+        {
             shared.import_people_csv();
         }
     });
@@ -659,7 +667,15 @@ fn closeness_section(shared: &mut SharedState, ui: &mut egui::Ui) {
             });
             shared.refresh();
         }
-        if ui.button("Import CSV…").clicked() {
+        if ui
+            .button("Import CSV…")
+            .on_hover_text(format!(
+                "{CLOSENESS_CSV_HEADER}\n\nleft_id/right_id are person or group ids. \
+                 A group paired with itself means \"seat its members together\". \
+                 Negative scores keep people apart."
+            ))
+            .clicked()
+        {
             shared.import_closeness_csv();
         }
     });
@@ -756,6 +772,7 @@ fn table_shape_label(shape: &TableShape) -> &'static str {
         TableShape::Round => "round",
         TableShape::Rectangular => "rectangular",
         TableShape::Square => "square",
+        TableShape::Semicircle => "semicircle",
     }
 }
 
@@ -840,16 +857,52 @@ fn tables_section(shared: &mut SharedState, ui: &mut egui::Ui) {
                 });
             }
 
-            if matches!(
-                shared.table_configs[index].shape,
-                TableShape::Rectangular | TableShape::Square
-            ) {
+            if shared.table_configs[index].shape.has_sides() {
                 ui.horizontal(|ui| {
                     changed |= people_per_side_field(ui, shared, index);
                 });
             }
 
             let table_type_id = shared.table_configs[index].table_type_id.clone();
+            ui.horizontal(|ui| {
+                if ui
+                    .button("+1 table")
+                    .on_hover_text("Add one more table of this type")
+                    .clicked()
+                    && let Ok(project) = shared.materialize_project()
+                {
+                    // Bumping this type's count renumbers every later type's
+                    // instances (they're numbered by BTreeMap key order), so
+                    // existing assignments and locked tables must be remapped
+                    // by (table_type, ordinal) — not left pointing at their
+                    // old table numbers — or validation fails and the layout
+                    // is dropped.
+                    let old_instances = generate_table_instances(&project);
+                    let current = old_instances
+                        .iter()
+                        .filter(|table| table.table_type == table_type_id)
+                        .count();
+                    shared.table_configs[index].number_of_tables_input = (current + 1).to_string();
+
+                    if let Ok(new_project) = shared.materialize_project() {
+                        let new_instances = generate_table_instances(&new_project);
+                        let remap = table_number_remap(&old_instances, &new_instances);
+                        for assignment in shared.assignments.iter_mut() {
+                            if let Some(&new_number) = remap.get(&assignment.table_number) {
+                                assignment.table_number = new_number;
+                            }
+                        }
+                        for person in shared.people.iter_mut() {
+                            if let Some(locked) = person.locked_table
+                                && let Some(&new_number) = remap.get(&locked)
+                            {
+                                person.locked_table = Some(new_number);
+                            }
+                        }
+                    }
+                    changed = true;
+                }
+            });
             for error in &shared.validation {
                 if error.table_type_id() == Some(table_type_id.as_str()) {
                     ui.colored_label(ERROR_COLOR, error.to_string());
@@ -887,7 +940,16 @@ fn tables_section(shared: &mut SharedState, ui: &mut egui::Ui) {
             });
             shared.refresh();
         }
-        if ui.button("Import CSV…").clicked() {
+        if ui
+            .button("Import CSV…")
+            .on_hover_text(format!(
+                "{TABLES_CSV_HEADER}\n\nshape is round, rectangular, square, or semicircle. \
+                 people_per_side (e.g. 2|2|1|1) is required for rectangular/square and \
+                 must sum to max_people. Leave number_of_tables blank to auto-generate \
+                 enough tables."
+            ))
+            .clicked()
+        {
             shared.import_tables_csv();
         }
     });
@@ -918,6 +980,7 @@ fn shape_field(
                 TableShape::Round,
                 TableShape::Rectangular,
                 TableShape::Square,
+                TableShape::Semicircle,
             ] {
                 let is_selected = current_shape == shape;
                 if ui
@@ -1005,8 +1068,14 @@ fn settings_section(shared: &mut SharedState, ui: &mut egui::Ui) {
             changed |= ui.text_edit_singleline(&mut shared.attempts).changed();
             ui.end_row();
 
-            ui.label("Iterations");
-            changed |= ui.text_edit_singleline(&mut shared.iterations).changed();
+            ui.label("Steps per attempt");
+            changed |= ui.text_edit_singleline(&mut shared.steps).changed();
+            ui.end_row();
+
+            ui.label("Time limit (s)");
+            changed |= ui
+                .text_edit_singleline(&mut shared.time_limit_secs)
+                .changed();
             ui.end_row();
 
             ui.label("Solutions");
@@ -1030,17 +1099,25 @@ fn settings_section(shared: &mut SharedState, ui: &mut egui::Ui) {
                 .text_edit_singleline(&mut shared.optimal_table_size_weight)
                 .changed();
             ui.end_row();
+
+            ui.label("Min people weight");
+            changed |= ui
+                .text_edit_singleline(&mut shared.min_people_weight)
+                .changed();
+            ui.end_row();
         });
 
     if ui.button("Reset to defaults").clicked() {
         let defaults = OptimizationConfig::default();
         shared.seed = defaults.seed.to_string();
         shared.attempts = defaults.attempts.to_string();
-        shared.iterations = defaults.iterations.to_string();
+        shared.steps = defaults.steps.to_string();
         shared.solutions = defaults.solutions.to_string();
         shared.proximity_weight = defaults.proximity_weight.to_string();
         shared.used_table_weight = defaults.used_table_weight.to_string();
         shared.optimal_table_size_weight = defaults.optimal_table_size_weight.to_string();
+        shared.time_limit_secs = defaults.time_limit_secs.to_string();
+        shared.min_people_weight = defaults.min_people_weight.to_string();
         changed = true;
     }
 

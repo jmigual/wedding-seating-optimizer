@@ -1,23 +1,21 @@
 //! Optimizer abstraction and heuristic seating optimizer.
 //!
 //! [`SeatingOptimizer`] is the public trait that any optimizer must implement.
-//! [`HeuristicOptimizer`] provides a practical default: it performs multiple
-//! random restarts with local-swap hill-climbing and keeps the top-N solutions.
+//! [`HeuristicOptimizer`] provides a practical default: multiple random (or
+//! warm-started) restarts of late acceptance hill climbing, keeping the top-N
+//! solutions.
 
 use crate::models::{
     OptimizationConfig, OptimizationResult, Person, ProjectInput, SeatingAssignment,
     SeatingSolution, TableInstance, ValidationError, ValidationReport,
 };
 use crate::scoring::{ScoringContext, score_solution};
-use crate::validation::{generate_table_instances, validate_project};
+use crate::validation::{validate_project, validate_seating_solution};
 use rand::{RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::thread;
 use std::time::{Duration, Instant};
-
-/// Default wall-clock budget used by the CLI and GUIs for full optimizer runs.
-pub const DEFAULT_SEARCH_TIME_LIMIT: Duration = Duration::from_secs(10);
 
 // ── Optimizer trait ───────────────────────────────────────────────────────────
 
@@ -38,37 +36,88 @@ pub trait SeatingOptimizer {
 
 // ── Heuristic optimizer ───────────────────────────────────────────────────────
 
-/// Multi-restart hill-climbing optimizer.
+/// Multi-restart late acceptance hill climbing (LAHC) optimizer.
+///
+/// An **approximate** metaheuristic: it returns the best solution it visits,
+/// with no optimality guarantee.
 ///
 /// **Algorithm:**
-/// 1. For each of `config.attempts` independent random restarts, build a
-///    feasible assignment with a deterministic seed derived from `config.seed`,
-///    repairing any `min_people` violations by consolidating guests onto
-///    fewer tables (see [`HeuristicOptimizer::repair_min_constraints`]).
-/// 2. Apply local improvement: `config.iterations` greedy pairwise-swap
-///    steps, followed by `config.iterations` greedy single-guest relocation
-///    steps (see [`HeuristicOptimizer::local_improve`]).
-/// 3. Score the result and keep the top-N solutions.
+/// 1. For each restart attempt, build a structurally valid assignment with a
+///    deterministic seed derived from `config.seed` (or start from the
+///    warm-start solution), consolidating guests onto fewer tables when
+///    `min_people` allows (see [`HeuristicOptimizer::repair_min_constraints`]).
+/// 2. Run `config.steps` LAHC moves (see `lahc_search`):
+///    a move is accepted when it is at least as good as the current score
+///    *or* as the score held `LAHC_HISTORY_LEN` steps ago, which lets the
+///    search cross score-neutral and mildly worse plateaus. Moves: guest
+///    pair swap, "join" (move a guest onto the table of another guest, or
+///    to another seat of their own table), whole-table occupant swap (the
+///    move that opens an unused, larger table for a group), and table split
+///    (the move that empties a table by splitting its occupants across two
+///    smaller ones, for a group that doesn't fit either alone).
+/// 3. Score the best state visited and keep the top-N solutions.
 ///
-/// Reproducibility is guaranteed: the same `seed` always produces the same
-/// result for the same input.
+/// **Determinism:** attempt `i` is fully determined by
+/// `(config.seed, config.steps, i)` and, when given, the warm-start
+/// solution; the same input always produces the same result.
 #[derive(Debug, Default)]
 pub struct HeuristicOptimizer;
 
+/// Length of the LAHC acceptance history. Longer histories accept worse
+/// moves for longer (more exploration, escapes deeper local optima) at the
+/// cost of slower convergence within a fixed step budget.
+const LAHC_HISTORY_LEN: usize = 200;
+
+/// Move mix, in percent of proposed steps:
+/// - `SWAP_MOVE_PERCENT` guest pair swaps — cheap, local refinement.
+/// - `JOIN_MOVE_PERCENT` "join" moves — relocate one guest, the bulk of
+///   fine-grained exploration.
+/// - `TABLE_SWAP_MOVE_PERCENT` whole-table occupant swaps — opens an unused,
+///   larger table for a group that fits it whole.
+/// - the remainder, table splits — opens two smaller tables for a group that
+///   doesn't fit either alone (see [`SearchState::propose_table_split`]).
+///
+/// The last two are rarer because they only pay off for groups near a table
+/// boundary; most steps are spent on cheaper local moves.
+const SWAP_MOVE_PERCENT: u32 = 40;
+const JOIN_MOVE_PERCENT: u32 = 40;
+const TABLE_SWAP_MOVE_PERCENT: u32 = 10;
+
 impl HeuristicOptimizer {
-    /// Run the heuristic for up to `max_duration`, continuing seeded restart
-    /// attempts until the time budget is exhausted.
+    /// Run the heuristic for up to `config.time_limit_secs`, optionally warm
+    /// starting every restart attempt from `initial` instead of a random
+    /// feasible assignment.
     ///
-    /// Unlike [`SeatingOptimizer::optimize`], which executes exactly
-    /// `config.attempts` restarts, this method keeps exploring additional
-    /// deterministic attempts after that baseline while time remains.
-    pub fn optimize_for_duration(
+    /// **Determinism contract:** attempt `i` is fully determined by
+    /// `(config.seed, config.steps, i)` (and, when given, `initial`). The
+    /// time limit only changes how many attempts complete before the run
+    /// stops; results are always merged in ascending attempt order via a
+    /// stable sort, so a run is reproducible given the number of attempts
+    /// completed — reported as [`OptimizationResult::attempts_completed`].
+    /// `config.time_limit_secs == 0` runs exactly `config.attempts` attempts,
+    /// same as [`SeatingOptimizer::optimize`].
+    ///
+    /// Every returned solution's assignments are in `project.people` order,
+    /// regardless of `initial`'s ordering.
+    ///
+    /// # Errors
+    /// Returns a [`ValidationReport`] if `project` is invalid, or if
+    /// `initial` is `Some` and is not a valid seating solution for `project`.
+    pub fn optimize_timed(
         &self,
         project: &ProjectInput,
         config: &OptimizationConfig,
-        max_duration: Duration,
+        initial: Option<&[SeatingAssignment]>,
     ) -> Result<OptimizationResult, ValidationReport> {
-        self.optimize_parallel_for_duration(project, config, max_duration)
+        validate_project(project)?;
+        if let Some(initial) = initial {
+            validate_seating_solution(project, initial)?;
+        }
+        // An unrepresentable deadline (absurdly large limit) means no deadline.
+        let deadline = (config.time_limit_secs > 0)
+            .then(|| Instant::now().checked_add(Duration::from_secs(config.time_limit_secs)))
+            .flatten();
+        self.run_attempts(project, config, initial, deadline)
     }
 
     fn run_attempt(
@@ -76,15 +125,30 @@ impl HeuristicOptimizer {
         project: &ProjectInput,
         config: &OptimizationConfig,
         attempt: usize,
+        initial: Option<&[SeatingAssignment]>,
     ) -> Option<SeatingSolution> {
         let attempt_seed = config.seed.wrapping_add((attempt as u64) * 17);
-        let initial = self.random_feasible_assignment(project, attempt_seed)?;
-        let improved = self.local_improve(project, config, initial, attempt_seed ^ 0xA5A5_5A5A);
-        let score = score_solution(project, &improved, config).ok()?;
-        Some(SeatingSolution {
-            assignments: improved,
-            score,
-        })
+        let ctx = ScoringContext::build(project);
+        let positions = match initial {
+            Some(initial) => {
+                let mut positions = vec![(0, 0); project.people.len()];
+                for a in initial {
+                    let person = *ctx.person_index.get(a.person_id.as_str())?;
+                    positions[person] = (a.table_number, a.seat_index);
+                }
+                positions
+            }
+            None => self.random_feasible_assignment(project, &ctx.instances, attempt_seed)?,
+        };
+        let improved =
+            self.lahc_search(project, &ctx, config, positions, attempt_seed ^ 0xA5A5_5A5A);
+        let assignments = self.build_assignments(project, &ctx.instances, &improved);
+        debug_assert!(
+            validate_seating_solution(project, &assignments).is_ok(),
+            "lahc_search produced an illegal move: every candidate must be legal by construction"
+        );
+        let score = score_solution(project, &assignments, config).ok()?;
+        Some(SeatingSolution { assignments, score })
     }
 
     fn merge_solution(
@@ -98,25 +162,30 @@ impl HeuristicOptimizer {
         best.truncate(keep.max(1));
     }
 
-    fn optimize_parallel_for_duration(
+    /// Run restart attempts in parallel batches sized to the machine's core
+    /// count, until at least `config.attempts` have completed and, if
+    /// `deadline` is set, until it passes. A `None` deadline stops after
+    /// exactly `config.attempts.max(1)` attempts. When `initial` is `Some`,
+    /// every attempt warm-starts local improvement from it (with its own
+    /// per-attempt seed) instead of a fresh random feasible assignment.
+    /// `project` must already be validated by the caller.
+    fn run_attempts(
         &self,
         project: &ProjectInput,
         config: &OptimizationConfig,
-        max_duration: Duration,
+        initial: Option<&[SeatingAssignment]>,
+        deadline: Option<Instant>,
     ) -> Result<OptimizationResult, ValidationReport> {
-        validate_project(project)?;
-
         let worker_count = thread::available_parallelism()
             .map(|count| count.get())
             .unwrap_or(1)
             .max(1);
         let min_attempts = config.attempts.max(1);
-        let deadline = Instant::now() + max_duration;
         let mut best = Vec::new();
         let mut next_attempt = 0usize;
 
         loop {
-            if next_attempt >= min_attempts && Instant::now() >= deadline {
+            if next_attempt >= min_attempts && deadline.is_none_or(|end| Instant::now() >= end) {
                 break;
             }
 
@@ -135,7 +204,9 @@ impl HeuristicOptimizer {
                 for attempt in batch_start..batch_end {
                     let project_ref = &project_owned;
                     let config_ref = &config_owned;
-                    handles.push(scope.spawn(move || self.run_attempt(project_ref, config_ref, attempt)));
+                    handles.push(scope.spawn(move || {
+                        self.run_attempt(project_ref, config_ref, attempt, initial)
+                    }));
                 }
                 for handle in handles {
                     if let Some(solution) = handle.join().expect("optimizer worker panicked") {
@@ -153,19 +224,24 @@ impl HeuristicOptimizer {
             });
         }
 
-        Ok(OptimizationResult { solutions: best })
+        Ok(OptimizationResult {
+            solutions: best,
+            attempts_completed: next_attempt,
+        })
     }
 
-    /// Construct a random, constraint-satisfying seating assignment.
+    /// Construct a random, structurally valid seating assignment as
+    /// `positions[i] = (table_number, seat_index)` of `project.people[i]`.
     ///
-    /// Returns `None` if no feasible assignment can be found for the given seed
-    /// (e.g., due to tight min-capacity constraints).
+    /// Returns `None` only when locks conflict or a guest has no candidate
+    /// seat at all; an under-`min_people` start is returned as is (it is
+    /// penalized by scoring, not rejected).
     fn random_feasible_assignment(
         &self,
         project: &ProjectInput,
+        instances: &[TableInstance],
         seed: u64,
-    ) -> Option<Vec<SeatingAssignment>> {
-        let instances = generate_table_instances(project);
+    ) -> Option<Vec<(usize, usize)>> {
         let table_lookup: HashMap<usize, &TableInstance> =
             instances.iter().map(|t| (t.number, t)).collect();
         let mut occupied: HashSet<(usize, usize)> = HashSet::new();
@@ -189,7 +265,7 @@ impl HeuristicOptimizer {
             .filter(|p| !assigned.contains_key(&p.id))
             .collect();
         pending.shuffle(&mut rng);
-        pending.sort_by_key(|p| self.compatible_table_count(p, &instances));
+        pending.sort_by_key(|p| self.compatible_table_count(p, instances));
 
         let mut occupancy: HashMap<usize, usize> = HashMap::new();
         for (table_num, _) in assigned.values() {
@@ -197,39 +273,37 @@ impl HeuristicOptimizer {
         }
 
         for p in pending {
-            let candidates = self.seat_candidates(p, &instances, &occupied);
+            let candidates = self.seat_candidates(p, instances, &occupied);
             if candidates.is_empty() {
                 return None;
             }
-            let chosen = self.choose_initial_seat(
-                &mut rng,
-                &candidates,
-                &occupancy,
-                &table_lookup,
-            )?;
+            let chosen =
+                self.choose_initial_seat(&mut rng, &candidates, &occupancy, &table_lookup)?;
             occupied.insert(chosen);
             assigned.insert(p.id.clone(), chosen);
             *occupancy.entry(chosen.0).or_insert(0) += 1;
         }
 
         // Uniform random placement is the worst strategy for min_people: it
-        // spreads guests thinly across every table. Rather than rejecting
-        // the whole attempt, deterministically repair under-min tables by
-        // consolidating guests (respecting locks and table_type).
-        if !self.satisfies_min_constraints(&assigned, &instances) {
-            let repaired = self.repair_min_constraints(
+        // spreads guests thinly across every table. Deterministically repair
+        // under-min tables by consolidating guests (respecting locks and
+        // table_type) so the search starts near a feasible region.
+        // ponytail: min is soft (scored), so an unrepairable start is still a legal start.
+        if !self.satisfies_min_constraints(&assigned, instances) {
+            self.repair_min_constraints(
                 project,
-                &instances,
+                instances,
                 &table_lookup,
                 &mut assigned,
                 &mut occupied,
             );
-            if !repaired {
-                return None; // Genuinely unrepairable.
-            }
         }
 
-        Some(self.build_assignments(project, &assigned, &table_lookup))
+        project
+            .people
+            .iter()
+            .map(|p| assigned.get(&p.id).copied())
+            .collect()
     }
 
     fn compatible_table_count(&self, person: &Person, instances: &[TableInstance]) -> usize {
@@ -309,9 +383,7 @@ impl HeuristicOptimizer {
     /// by either vacating it entirely (relocating every occupant elsewhere,
     /// respecting locks and required `table_type`) or, when it has guests
     /// locked to it, topping it up from other tables instead. Uses no
-    /// randomness, so seed-determinism is preserved. Returns `false` only
-    /// when the deficiency is genuinely unrepairable (not enough compatible
-    /// guests or seats to consolidate around).
+    /// randomness, so seed-determinism is preserved.
     fn repair_min_constraints(
         &self,
         project: &ProjectInput,
@@ -319,7 +391,7 @@ impl HeuristicOptimizer {
         table_lookup: &HashMap<usize, &TableInstance>,
         assigned: &mut HashMap<String, (usize, usize)>,
         occupied: &mut HashSet<(usize, usize)>,
-    ) -> bool {
+    ) {
         let locked_people: HashSet<&str> = project
             .people
             .iter()
@@ -350,7 +422,7 @@ impl HeuristicOptimizer {
             deficient.sort_by_key(|&n| (counts.get(&n).copied().unwrap_or(0), n));
 
             let Some(table_num) = deficient.first().copied() else {
-                return true; // No deficiencies left.
+                return; // No deficiencies left.
             };
             let table = table_lookup[&table_num];
 
@@ -466,10 +538,9 @@ impl HeuristicOptimizer {
             }
 
             if !progressed || count < min {
-                return false; // Genuinely unrepairable.
+                return; // Genuinely unrepairable.
             }
         }
-        false
     }
 
     /// Enumerate all valid (table_number, seat_index) pairs for a guest.
@@ -527,262 +598,341 @@ impl HeuristicOptimizer {
         true
     }
 
-    /// Convert the internal assignment map to the public [`SeatingAssignment`] format.
+    /// Convert person-indexed `positions` to the public [`SeatingAssignment`]
+    /// format, in `project.people` order.
     fn build_assignments(
         &self,
         project: &ProjectInput,
-        assigned: &HashMap<String, (usize, usize)>,
-        table_lookup: &HashMap<usize, &TableInstance>,
+        instances: &[TableInstance],
+        positions: &[(usize, usize)],
     ) -> Vec<SeatingAssignment> {
         project
             .people
             .iter()
-            .map(|p| {
-                let &(table_number, seat_index) =
-                    assigned.get(&p.id).expect("every person was assigned");
-                SeatingAssignment {
-                    table_number,
-                    table_type: table_lookup[&table_number].table_type.clone(),
-                    seat_index,
-                    person_id: p.id.clone(),
-                    person_name: p.name.clone(),
-                }
+            .zip(positions)
+            .map(|(p, &(table_number, seat_index))| SeatingAssignment {
+                table_number,
+                table_type: instances[table_number - 1].table_type.clone(),
+                seat_index,
+                person_id: p.id.clone(),
+                person_name: p.name.clone(),
             })
             .collect()
     }
 
-    /// Apply local improvement: greedy pairwise-swap steps followed by greedy
-    /// single-guest relocation steps.
+    /// Late acceptance hill climbing over `positions` (person-indexed
+    /// `(table_number, seat_index)`), returning the best state visited.
     ///
-    /// **Phase 1 (swap):** at each of `config.iterations` steps, a random
-    /// pair of guests is chosen and their table/seat positions are swapped if
-    /// the swap improves the score and remains feasible.
+    /// Each step proposes one move — pair swap, join, whole-table swap, or
+    /// table split (see [`SearchState`]) — skips it if structurally illegal, and
+    /// otherwise accepts it when the new score is at least the current one
+    /// or at least the score recorded [`LAHC_HISTORY_LEN`] steps earlier.
+    /// Every candidate is legal by construction (locks, `table_type`,
+    /// capacity, no double booking), so scoring skips validation.
     ///
-    /// **Phase 2 (relocate):** at each of `config.iterations` steps, a random
-    /// guest is moved to a random compatible free seat if the move improves
-    /// the score and remains feasible.
-    ///
-    /// Guests with a `locked_seat` are frozen (excluded from both phases) —
-    /// there is nothing to optimize for them, since their seat is fixed.
-    /// Guests with only a `locked_table` (no `locked_seat`) still participate:
-    /// phase 2's candidate seats are already restricted to their locked table
-    /// by [`Self::seat_candidates`], and phase 1 only accepts swaps that keep
-    /// each locked-table guest on their required table — so a "head table"
-    /// where everyone is `locked_table`-only still gets its internal seating
-    /// optimized.
-    ///
-    /// Every move considered here is constructed to be structurally valid
-    /// (seat/table_type/lock/capacity-respecting) by construction, so this
-    /// loop scores candidates directly via a [`ScoringContext`] built once
-    /// per attempt, instead of re-running full project validation on every
-    /// iteration.
-    fn local_improve(
+    /// Guests with a `locked_seat` never move; guests with only a
+    /// `locked_table` change seats within it, so a "head table" of
+    /// locked-table guests still gets its internal seating optimized.
+    // ponytail: full rescoring per step; delta-scoring the two touched tables is the upgrade if step cost matters past ~200 guests.
+    fn lahc_search(
         &self,
         project: &ProjectInput,
+        ctx: &ScoringContext,
         config: &OptimizationConfig,
-        mut assignments: Vec<SeatingAssignment>,
+        positions: Vec<(usize, usize)>,
         seed: u64,
-    ) -> Vec<SeatingAssignment> {
+    ) -> Vec<(usize, usize)> {
+        if positions.is_empty() {
+            return positions;
+        }
         let mut rng = StdRng::seed_from_u64(seed);
-        let ctx = ScoringContext::build(project);
+        let mut state = SearchState::new(&project.people, &ctx.instances, positions);
+        let mut scratch: Vec<Vec<usize>> = Vec::new();
+        let mut current = ctx.score_positions(&state.positions, config, &mut scratch);
+        let mut best = state.positions.clone();
+        let mut best_score = current;
+        let mut history = vec![current; LAHC_HISTORY_LEN];
+        let mut moves: Vec<Move> = Vec::new();
+        let mut undo: Vec<Move> = Vec::new();
 
-        // Guests with a locked seat have exactly one legal seat: their own.
-        let locked_seat_ids: HashSet<&str> = project
-            .people
-            .iter()
-            .filter(|p| p.locked_seat.is_some())
-            .map(|p| p.id.as_str())
-            .collect();
-        // Guests with a locked table (seat or not) must stay on that table.
-        let locked_table_of: HashMap<&str, usize> = project
-            .people
-            .iter()
-            .filter_map(|p| p.locked_table.map(|table_num| (p.id.as_str(), table_num)))
-            .collect();
+        for step in 0..config.steps {
+            let slot = step % LAHC_HISTORY_LEN;
+            moves.clear();
+            let roll = rng.random_range(0..100u32);
+            let proposed = if roll < SWAP_MOVE_PERCENT {
+                state.propose_swap(&mut rng, &mut moves)
+            } else if roll < SWAP_MOVE_PERCENT + JOIN_MOVE_PERCENT {
+                state.propose_join(&mut rng, &mut moves)
+            } else if roll < SWAP_MOVE_PERCENT + JOIN_MOVE_PERCENT + TABLE_SWAP_MOVE_PERCENT {
+                state.propose_table_swap(&mut rng, &mut moves)
+            } else {
+                state.propose_table_split(&mut rng, &mut moves)
+            };
+            if !proposed {
+                history[slot] = current;
+                continue;
+            }
 
-        let mut best_score = ctx.score(&assignments, config);
-
-        // Phase 1: pairwise swaps. A swap never changes any table's
-        // occupancy count, so it cannot violate `min_people`; only the
-        // locked-table and locked-seat constraints need checking here.
-        if assignments.len() >= 2 {
-            for _ in 0..config.iterations {
-                let i = rng.random_range(0..assignments.len());
-                let j = rng.random_range(0..assignments.len());
-                if i == j {
-                    continue;
-                }
-                let (id_i, id_j) = (
-                    assignments[i].person_id.as_str(),
-                    assignments[j].person_id.as_str(),
-                );
-                if locked_seat_ids.contains(id_i) || locked_seat_ids.contains(id_j) {
-                    continue;
-                }
-                let new_table_i = assignments[j].table_number;
-                let new_table_j = assignments[i].table_number;
-                if locked_table_of.get(id_i).is_some_and(|&t| t != new_table_i)
-                    || locked_table_of.get(id_j).is_some_and(|&t| t != new_table_j)
-                {
-                    continue;
-                }
-                if let (Some(pi), Some(pj)) = (ctx.person_map.get(id_i), ctx.person_map.get(id_j)) {
-                    let type_i_ok = pi
-                        .table_type
-                        .as_ref()
-                        .is_none_or(|tt| tt == &assignments[j].table_type);
-                    let type_j_ok = pj
-                        .table_type
-                        .as_ref()
-                        .is_none_or(|tt| tt == &assignments[i].table_type);
-                    if !type_i_ok || !type_j_ok {
-                        continue;
-                    }
-                }
-
-                let (a, b) = (assignments[i].clone(), assignments[j].clone());
-                assignments[i].table_number = b.table_number;
-                assignments[i].table_type = b.table_type.clone();
-                assignments[i].seat_index = b.seat_index;
-                assignments[j].table_number = a.table_number;
-                assignments[j].table_type = a.table_type.clone();
-                assignments[j].seat_index = a.seat_index;
-
-                let score = ctx.score(&assignments, config);
+            undo.clear();
+            undo.extend(
+                moves
+                    .iter()
+                    .map(|&(person, _)| (person, state.positions[person])),
+            );
+            state.apply(&moves);
+            let score = ctx.score_positions(&state.positions, config, &mut scratch);
+            if score >= current || score >= history[slot] {
+                current = score;
                 if score > best_score {
                     best_score = score;
-                    continue; // Keep the swap.
+                    best.copy_from_slice(&state.positions);
                 }
-                assignments[i] = a;
-                assignments[j] = b;
+            } else {
+                state.apply(&undo);
             }
+            history[slot] = current;
         }
+        best
+    }
+}
 
-        // Phase 2: single-guest relocation.
-        if !assignments.is_empty() {
-            for _ in 0..config.iterations {
-                let i = rng.random_range(0..assignments.len());
-                if locked_seat_ids.contains(assignments[i].person_id.as_str()) {
-                    continue;
-                }
+/// Mutable state of one LAHC attempt: `positions[i]` is person `i`'s
+/// `(table_number, seat_index)`, mirrored by `seats[table_number - 1][seat]`
+/// for O(1) occupancy checks and cheap reverts.
+struct SearchState<'a> {
+    people: &'a [Person],
+    instances: &'a [TableInstance],
+    positions: Vec<(usize, usize)>,
+    seats: Vec<Vec<Option<usize>>>,
+    /// Reused shuffle buffer for [`Self::propose_table_split`], to avoid
+    /// reallocating one `Vec` per proposal.
+    shuffle_scratch: Vec<usize>,
+}
 
-                let mut occupied: HashSet<(usize, usize)> = HashSet::new();
-                let mut counts: HashMap<usize, usize> = HashMap::new();
-                for (index, assignment) in assignments.iter().enumerate() {
-                    if index == i {
-                        continue;
-                    }
-                    occupied.insert((assignment.table_number, assignment.seat_index));
-                    *counts.entry(assignment.table_number).or_insert(0) += 1;
-                }
+/// One relocation: `(person, (table_number, seat_index))`.
+type Move = (usize, (usize, usize));
 
-                let Some(&person) = ctx.person_map.get(assignments[i].person_id.as_str()) else {
-                    continue;
-                };
-                let candidates = self.seat_candidates(person, &ctx.instances, &occupied);
-                if candidates.is_empty() {
-                    continue;
-                }
-                let chosen = candidates[rng.random_range(0..candidates.len())];
-                let Some(dest_table) = ctx.table_by_number.get(&chosen.0) else {
-                    continue;
-                };
-
-                // Preserve min_people: removing the guest must not leave the
-                // source table with a non-zero, under-min remainder, and
-                // adding them must bring the destination to at least min.
-                let source_table_number = assignments[i].table_number;
-                if let Some(source_table) = ctx.table_by_number.get(&source_table_number)
-                    && let Some(min) = source_table.min_people
-                {
-                    let remaining = counts.get(&source_table_number).copied().unwrap_or(0);
-                    if remaining > 0 && remaining < min {
-                        continue;
-                    }
-                }
-                if let Some(min) = dest_table.min_people {
-                    let dest_count_before = counts.get(&chosen.0).copied().unwrap_or(0);
-                    if dest_count_before + 1 < min {
-                        continue;
-                    }
-                }
-
-                let original = assignments[i].clone();
-                assignments[i].table_number = chosen.0;
-                assignments[i].table_type = dest_table.table_type.clone();
-                assignments[i].seat_index = chosen.1;
-
-                let score = ctx.score(&assignments, config);
-                if score > best_score {
-                    best_score = score;
-                    continue; // Keep the move.
-                }
-                assignments[i] = original;
-            }
+impl<'a> SearchState<'a> {
+    fn new(
+        people: &'a [Person],
+        instances: &'a [TableInstance],
+        positions: Vec<(usize, usize)>,
+    ) -> Self {
+        let mut seats: Vec<Vec<Option<usize>>> = instances
+            .iter()
+            .map(|table| vec![None; table.max_people])
+            .collect();
+        for (person, &(table_number, seat)) in positions.iter().enumerate() {
+            seats[table_number - 1][seat] = Some(person);
         }
-        assignments
+        Self {
+            people,
+            instances,
+            positions,
+            seats,
+            shuffle_scratch: Vec::new(),
+        }
     }
 
-    fn optimize_internal(
-        &self,
-        project: &ProjectInput,
-        config: &OptimizationConfig,
-        attempt_limit: Option<usize>,
-        deadline: Option<Instant>,
-    ) -> Result<OptimizationResult, ValidationReport> {
-        validate_project(project)?;
+    /// Whether `person` may be moved onto `table_number` at all: not frozen
+    /// by a `locked_seat`, not locked to another table, and of a compatible
+    /// `table_type`.
+    fn may_sit_at(&self, person: usize, table_number: usize) -> bool {
+        let p = &self.people[person];
+        p.locked_seat.is_none()
+            && p.locked_table.is_none_or(|locked| locked == table_number)
+            && p.table_type
+                .as_deref()
+                .is_none_or(|tt| tt == self.instances[table_number - 1].table_type)
+    }
 
-        let mut best: Vec<SeatingSolution> = Vec::new();
-        let min_attempts = config.attempts.max(1);
-        let mut attempt = 0usize;
+    /// Exchange the positions of two random guests (possibly on the same table).
+    fn propose_swap(&self, rng: &mut StdRng, moves: &mut Vec<Move>) -> bool {
+        let i = rng.random_range(0..self.positions.len());
+        let j = rng.random_range(0..self.positions.len());
+        if i == j
+            || !self.may_sit_at(i, self.positions[j].0)
+            || !self.may_sit_at(j, self.positions[i].0)
+        {
+            return false;
+        }
+        moves.push((i, self.positions[j]));
+        moves.push((j, self.positions[i]));
+        true
+    }
 
-        loop {
-            if let Some(limit) = attempt_limit {
-                if attempt >= limit {
-                    break;
-                }
-            } else if attempt >= min_attempts && deadline.is_some_and(|end| Instant::now() >= end) {
-                break;
-            }
+    /// Move guest `p` to a random free seat on the table of guest `q` — a
+    /// table change, or a seat change when `q` shares `p`'s table.
+    fn propose_join(&self, rng: &mut StdRng, moves: &mut Vec<Move>) -> bool {
+        let p = rng.random_range(0..self.positions.len());
+        let q = rng.random_range(0..self.positions.len());
+        let dest = self.positions[q].0;
+        if p == q || !self.may_sit_at(p, dest) {
+            return false;
+        }
+        let row = &self.seats[dest - 1];
+        let free = row.iter().filter(|occupant| occupant.is_none()).count();
+        if free == 0 {
+            return false;
+        }
+        let pick = rng.random_range(0..free);
+        let Some((seat, _)) = row
+            .iter()
+            .enumerate()
+            .filter(|(_, occupant)| occupant.is_none())
+            .nth(pick)
+        else {
+            return false;
+        };
+        moves.push((p, (dest, seat)));
+        true
+    }
 
-            if let Some(solution) = self.run_attempt(project, config, attempt) {
-                self.merge_solution(&mut best, solution, config.solutions);
-            }
-
-            attempt += 1;
-
-            if attempt_limit.is_none()
-                && attempt >= min_attempts
-                && deadline.is_some_and(|end| Instant::now() >= end)
+    /// Exchange the whole occupant sets of two random tables. Seat indices
+    /// are kept when they all fit the destination, otherwise re-indexed by
+    /// rank. Score-neutral apart from size/min penalties, this is what
+    /// opens an unused larger table for a group that outgrows its current one.
+    fn propose_table_swap(&self, rng: &mut StdRng, moves: &mut Vec<Move>) -> bool {
+        let table_count = self.instances.len();
+        if table_count < 2 {
+            return false;
+        }
+        let a = rng.random_range(1..=table_count);
+        let b = rng.random_range(1..=table_count);
+        // Same-type tables are score-identical (same shape/max/min/recommended),
+        // so swapping their occupants is a pure relabel: no scoring gain, and
+        // it gratuitously renumbers the guests' tables.
+        if a == b || self.instances[a - 1].table_type == self.instances[b - 1].table_type {
+            return false;
+        }
+        let occupants =
+            |table_number: usize| self.seats[table_number - 1].iter().flatten().copied();
+        if occupants(a).next().is_none() && occupants(b).next().is_none() {
+            return false;
+        }
+        for (from, dest) in [(a, b), (b, a)] {
+            let capacity = self.instances[dest - 1].max_people;
+            if occupants(from).count() > capacity
+                || occupants(from).any(|person| !self.may_sit_at(person, dest))
             {
-                break;
+                return false;
+            }
+            let keep_seats = occupants(from).all(|person| self.positions[person].1 < capacity);
+            for (rank, person) in occupants(from).enumerate() {
+                let seat = if keep_seats {
+                    self.positions[person].1
+                } else {
+                    rank
+                };
+                moves.push((person, (dest, seat)));
             }
         }
+        true
+    }
 
-        if best.is_empty() {
-            return Err(ValidationReport {
-                errors: vec![ValidationError::NoFeasibleAssignment],
-            });
+    /// Empty a source table by splitting its occupants across two other
+    /// tables. Unlike [`Self::propose_table_swap`] (which only fires when
+    /// the whole group fits one destination), this handles a group that
+    /// fits neither destination alone but fits split across both — and,
+    /// because the source ends up with zero occupants, it never pays a
+    /// `min_people` penalty for the source along the way, letting the
+    /// search cross a valley that single-person relocations can't.
+    fn propose_table_split(&mut self, rng: &mut StdRng, moves: &mut Vec<Move>) -> bool {
+        let table_count = self.instances.len();
+        if table_count < 3 {
+            return false;
+        }
+        let source = rng.random_range(1..=table_count);
+        let seats = &self.seats;
+        let occupants = |table_number: usize| seats[table_number - 1].iter().flatten().copied();
+        self.shuffle_scratch.clear();
+        self.shuffle_scratch.extend(occupants(source));
+        let k = self.shuffle_scratch.len();
+        if k < 2 {
+            return false;
         }
 
-        Ok(OptimizationResult { solutions: best })
+        let b = rng.random_range(1..=table_count);
+        let c = rng.random_range(1..=table_count);
+        if b == source || c == source || b == c {
+            return false;
+        }
+
+        let free_seats = |table_number: usize| {
+            seats[table_number - 1]
+                .iter()
+                .enumerate()
+                .filter(|(_, occupant)| occupant.is_none())
+                .map(|(seat, _)| seat)
+        };
+        let free_b_count = free_seats(b).count();
+        let free_c_count = free_seats(c).count();
+        if free_b_count == 0 || free_c_count == 0 || free_b_count + free_c_count < k {
+            return false;
+        }
+
+        let to_b_count = free_b_count.min(k);
+        let to_c_count = k - to_b_count;
+        // A whole-table move onto an empty, same-type table B is the
+        // score-neutral relabel `propose_table_swap` already refuses to
+        // avoid gratuitous table renumbering; only take it here when B is a
+        // different (e.g. larger) table type.
+        if to_c_count == 0
+            && self.instances[b - 1].table_type == self.instances[source - 1].table_type
+        {
+            return false;
+        }
+
+        self.shuffle_scratch.shuffle(rng);
+        let (to_b, to_c) = self.shuffle_scratch.split_at(to_b_count);
+
+        if to_b.iter().any(|&person| !self.may_sit_at(person, b))
+            || to_c.iter().any(|&person| !self.may_sit_at(person, c))
+        {
+            return false;
+        }
+
+        for (&person, seat) in to_b.iter().zip(free_seats(b)) {
+            moves.push((person, (b, seat)));
+        }
+        for (&person, seat) in to_c.iter().zip(free_seats(c)) {
+            moves.push((person, (c, seat)));
+        }
+        true
+    }
+
+    /// Relocate every listed guest to its new position. All old seats are
+    /// vacated before any new seat is taken, so a move set may permute
+    /// seats among its own members.
+    fn apply(&mut self, moves: &[Move]) {
+        for &(person, _) in moves {
+            let (table_number, seat) = self.positions[person];
+            self.seats[table_number - 1][seat] = None;
+        }
+        for &(person, (table_number, seat)) in moves {
+            self.seats[table_number - 1][seat] = Some(person);
+            self.positions[person] = (table_number, seat);
+        }
     }
 }
 
 impl SeatingOptimizer for HeuristicOptimizer {
     /// Run the multi-restart heuristic and return the best solutions.
     ///
-    /// Runs `config.attempts` independent random restarts. Each attempt
-    /// applies `config.iterations` local improvement steps. Only the top
-    /// `config.solutions` solutions (by score) are returned.
+    /// Runs exactly `config.attempts.max(1)` independent random restarts.
+    /// Each attempt applies `config.steps` local improvement steps. Only the
+    /// top `config.solutions` solutions (by score) are returned.
     ///
     /// Each attempt uses a distinct, deterministic seed derived from
-    /// `config.seed` so results are reproducible.
+    /// `config.seed` so results are reproducible — see the determinism
+    /// contract documented on [`HeuristicOptimizer::optimize_timed`], which
+    /// this delegates to with no warm start and no deadline.
     fn optimize(
         &self,
         project: &ProjectInput,
         config: &OptimizationConfig,
     ) -> Result<OptimizationResult, ValidationReport> {
-        self.optimize_internal(project, config, Some(config.attempts.max(1)), None)
+        validate_project(project)?;
+        self.run_attempts(project, config, None, None)
     }
 }

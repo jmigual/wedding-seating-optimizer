@@ -52,30 +52,30 @@ pub mod validation;
 
 pub use editing::{
     ReferenceIdOption, SeatDropOutcome, apply_seat_drop, build_table_type_map, collect_group_ids,
-    merge_closeness_rules, merge_people, merge_table_types, parse_f64_value,
+    compact_table_numbers, merge_closeness_rules, merge_people, merge_table_types, parse_f64_value,
     parse_optional_usize_value, parse_people_per_side, parse_required_usize_value,
     reference_id_options, reference_label, reference_matches, remove_group, rename_group,
-    rules_match,
+    rules_match, table_number_remap,
 };
 pub use io::{
-    make_project, parse_closeness_csv, parse_people_csv, parse_project_file, parse_seating_csv,
-    parse_tables_csv, write_closeness_csv, write_people_csv, write_project_file, write_seating_csv,
-    write_tables_csv,
+    CLOSENESS_CSV_HEADER, PEOPLE_CSV_HEADER, SEATING_CSV_HEADER, TABLES_CSV_HEADER, make_project,
+    parse_closeness_csv, parse_people_csv, parse_project_file, parse_seating_csv, parse_tables_csv,
+    write_closeness_csv, write_people_csv, write_project_file, write_seating_csv, write_tables_csv,
 };
 pub use models::{
     ClosenessRule, GroupId, OptimizationConfig, OptimizationResult, PROJECT_FILE_VERSION, Person,
     PersonId, ProjectFile, ProjectInput, SeatIndex, SeatingAssignment, SeatingSolution,
     TableInstance, TableShape, TableTypeConfig, TableTypeId, ValidationError, ValidationReport,
 };
-pub use optimizer::{DEFAULT_SEARCH_TIME_LIMIT, HeuristicOptimizer, SeatingOptimizer};
+pub use optimizer::{HeuristicOptimizer, SeatingOptimizer};
 pub use render::{
     COLOR_BACKGROUND, COLOR_CARD, COLOR_GUEST_TEXT, COLOR_MUTED, COLOR_SEAT_FILL,
     COLOR_SEAT_STROKE, COLOR_STROKE, COLOR_TABLE_FILL, COLOR_TABLE_STROKE, LayoutSeat, LayoutTable,
-    RenderOptions, RenderingError, SeatingLayout, TableSurface, build_layout, render_png,
-    render_svg,
+    RenderOptions, RenderingError, SeatingLayout, TableSurface, build_layout,
+    build_layout_with_empty_tables, render_png, render_svg,
 };
 pub use scoring::{
     ScoreBreakdown, circular_distance, default_proximity_weight, effective_person_pair_score,
-    perimeter_distance, score_solution, score_solution_breakdown,
+    linear_distance, perimeter_distance, score_solution, score_solution_breakdown, seat_distance,
 };
 pub use validation::{generate_table_instances, validate_project, validate_seating_solution};

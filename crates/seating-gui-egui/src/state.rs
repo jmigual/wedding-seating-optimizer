@@ -9,11 +9,12 @@
 use seating_core::{
     ClosenessRule, OptimizationConfig, Person, ProjectFile, ProjectInput, ScoreBreakdown,
     SeatingAssignment, SeatingLayout, TableShape, TableTypeConfig, TableTypeId, ValidationError,
-    ValidationReport, build_layout, build_table_type_map, generate_table_instances,
-    merge_closeness_rules, merge_people, merge_table_types, parse_closeness_csv, parse_f64_value,
-    parse_optional_usize_value, parse_people_csv, parse_people_per_side, parse_project_file,
-    parse_required_usize_value, parse_tables_csv, score_solution_breakdown, validate_project,
-    write_closeness_csv, write_people_csv, write_project_file, write_tables_csv,
+    ValidationReport, build_layout, build_layout_with_empty_tables, build_table_type_map,
+    generate_table_instances, merge_closeness_rules, merge_people, merge_table_types,
+    parse_closeness_csv, parse_f64_value, parse_optional_usize_value, parse_people_csv,
+    parse_people_per_side, parse_project_file, parse_required_usize_value, parse_tables_csv,
+    score_solution_breakdown, validate_project, write_closeness_csv, write_people_csv,
+    write_project_file, write_tables_csv,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -128,6 +129,9 @@ pub(crate) struct SharedState {
     pub(crate) table_configs: Vec<TableConfigRow>,
     pub(crate) assignments: Vec<SeatingAssignment>,
     pub(crate) layout: Option<SeatingLayout>,
+    /// View-only toggle for whether empty (unoccupied) tables render on the
+    /// canvas. Not persisted in the project file.
+    pub(crate) show_empty_tables: bool,
     pub(crate) validation: Vec<ValidationError>,
     pub(crate) generated_table_numbers: Vec<usize>,
     pub(crate) table_capacities: BTreeMap<usize, usize>,
@@ -135,11 +139,13 @@ pub(crate) struct SharedState {
     pub(crate) score_breakdown: Option<ScoreBreakdown>,
     pub(crate) seed: String,
     pub(crate) attempts: String,
-    pub(crate) iterations: String,
+    pub(crate) steps: String,
     pub(crate) solutions: String,
     pub(crate) proximity_weight: String,
     pub(crate) used_table_weight: String,
     pub(crate) optimal_table_size_weight: String,
+    pub(crate) time_limit_secs: String,
+    pub(crate) min_people_weight: String,
     pub(crate) message: String,
     pub(crate) message_kind: MessageKind,
     pub(crate) project_path: Option<PathBuf>,
@@ -158,6 +164,7 @@ impl SharedState {
             table_configs: Vec::new(),
             assignments: Vec::new(),
             layout: None,
+            show_empty_tables: true,
             validation: Vec::new(),
             generated_table_numbers: Vec::new(),
             table_capacities: BTreeMap::new(),
@@ -165,11 +172,13 @@ impl SharedState {
             score_breakdown: None,
             seed: defaults.seed.to_string(),
             attempts: defaults.attempts.to_string(),
-            iterations: defaults.iterations.to_string(),
+            steps: defaults.steps.to_string(),
             solutions: defaults.solutions.to_string(),
             proximity_weight: defaults.proximity_weight.to_string(),
             used_table_weight: defaults.used_table_weight.to_string(),
             optimal_table_size_weight: defaults.optimal_table_size_weight.to_string(),
+            time_limit_secs: defaults.time_limit_secs.to_string(),
+            min_people_weight: defaults.min_people_weight.to_string(),
             message: "Create a new project or open a .wseat file.".to_string(),
             message_kind: MessageKind::Info,
             project_path: None,
@@ -250,7 +259,7 @@ impl SharedState {
                         None
                     }
                 };
-            let people_per_side = if row.shape == TableShape::Round {
+            let people_per_side = if !row.shape.has_sides() {
                 None
             } else {
                 match parse_people_per_side(&row.people_per_side_input) {
@@ -337,12 +346,12 @@ impl SharedState {
                 defaults.attempts
             }
         };
-        let iterations = match parse_optional_usize_value(&self.iterations, "iterations") {
+        let steps = match parse_optional_usize_value(&self.steps, "steps") {
             Ok(Some(value)) => value,
-            Ok(None) => defaults.iterations,
+            Ok(None) => defaults.steps,
             Err(error) => {
                 errors.push(error);
-                defaults.iterations
+                defaults.steps
             }
         };
         let solutions = match parse_optional_usize_value(&self.solutions, "solutions") {
@@ -376,16 +385,35 @@ impl SharedState {
                     defaults.optimal_table_size_weight
                 }
             };
+        let min_people_weight = match parse_f64_value(&self.min_people_weight, "min_people_weight")
+        {
+            Ok(value) => value,
+            Err(error) => {
+                errors.push(error);
+                defaults.min_people_weight
+            }
+        };
+        let time_limit_secs =
+            match parse_optional_usize_value(&self.time_limit_secs, "time_limit_secs") {
+                Ok(Some(value)) => value as u64,
+                Ok(None) => defaults.time_limit_secs,
+                Err(error) => {
+                    errors.push(error);
+                    defaults.time_limit_secs
+                }
+            };
 
         if errors.is_empty() {
             Ok(OptimizationConfig {
                 seed,
                 attempts,
-                iterations,
+                steps,
                 solutions,
                 proximity_weight,
                 used_table_weight,
                 optimal_table_size_weight,
+                time_limit_secs,
+                min_people_weight,
             })
         } else {
             Err(ValidationReport { errors })
@@ -433,19 +461,23 @@ impl SharedState {
         self.assignments = project.seating;
         self.seed = project.optimization.seed.to_string();
         self.attempts = project.optimization.attempts.to_string();
-        self.iterations = project.optimization.iterations.to_string();
+        self.steps = project.optimization.steps.to_string();
         self.solutions = project.optimization.solutions.to_string();
         self.proximity_weight = project.optimization.proximity_weight.to_string();
         self.used_table_weight = project.optimization.used_table_weight.to_string();
         self.optimal_table_size_weight = project.optimization.optimal_table_size_weight.to_string();
+        self.time_limit_secs = project.optimization.time_limit_secs.to_string();
+        self.min_people_weight = project.optimization.min_people_weight.to_string();
         self.recompute();
         self.dirty = false;
     }
 
     /// Recompute derived state (generated tables, validation, layout, score)
     /// from the current editable fields. Does not touch `dirty`; user edits
-    /// should go through [`Self::refresh`] instead.
-    fn recompute(&mut self) {
+    /// should go through [`Self::refresh`] instead. `pub(crate)` so the
+    /// canvas's "Show empty tables" toggle — a view-only setting — can
+    /// recompute the layout without marking the project dirty.
+    pub(crate) fn recompute(&mut self) {
         self.layout = None;
         self.score = None;
         self.score_breakdown = None;
@@ -474,7 +506,12 @@ impl SharedState {
             return;
         }
 
-        match build_layout(&project, &self.assignments) {
+        let build = if self.show_empty_tables {
+            build_layout_with_empty_tables
+        } else {
+            build_layout
+        };
+        match build(&project, &self.assignments) {
             Ok(layout) => self.layout = Some(layout),
             Err(error) => self.set_message(
                 MessageKind::Error,

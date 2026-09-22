@@ -119,6 +119,8 @@ pub enum TableSurface {
         width: f32,
         height: f32,
     },
+    /// Semicircle table: flat edge on `y = cy`, arc above (seats sit at `y < cy`).
+    Semicircle { cx: f32, cy: f32, radius: f32 },
 }
 
 /// One rendered seat marker within a table layout.
@@ -149,9 +151,30 @@ pub enum RenderingError {
 }
 
 /// Build a reusable layout from a validated project and seating assignment.
+///
+/// Tables with no occupants are omitted; see
+/// [`build_layout_with_empty_tables`] to include them.
 pub fn build_layout(
     project: &ProjectInput,
     assignments: &[SeatingAssignment],
+) -> Result<SeatingLayout, ValidationReport> {
+    build_layout_impl(project, assignments, false)
+}
+
+/// Build a reusable layout like [`build_layout`], but including tables with
+/// no occupants (e.g. a table just added via the GUI), so the canvas can
+/// still render and hit-test drops onto them.
+pub fn build_layout_with_empty_tables(
+    project: &ProjectInput,
+    assignments: &[SeatingAssignment],
+) -> Result<SeatingLayout, ValidationReport> {
+    build_layout_impl(project, assignments, true)
+}
+
+fn build_layout_impl(
+    project: &ProjectInput,
+    assignments: &[SeatingAssignment],
+    include_empty_tables: bool,
 ) -> Result<SeatingLayout, ValidationReport> {
     validate_seating_solution(project, assignments)?;
 
@@ -170,7 +193,7 @@ pub fn build_layout(
 
     let used_instances = instances
         .iter()
-        .filter(|table| assignments_by_table.contains_key(&table.number))
+        .filter(|table| include_empty_tables || assignments_by_table.contains_key(&table.number))
         .collect::<Vec<_>>();
     let columns = columns_for(used_instances.len());
     let mut tables = Vec::new();
@@ -293,6 +316,17 @@ pub fn render_svg(layout: &SeatingLayout, options: &RenderOptions) -> String {
             } => svg.push_str(&format!(
                 "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"12\" fill=\"{}\" stroke=\"{}\" stroke-width=\"2\"/>",
                 x, y, width, height, hex(COLOR_TABLE_FILL), hex(COLOR_TABLE_STROKE)
+            )),
+            TableSurface::Semicircle { cx, cy, radius } => svg.push_str(&format!(
+                "<path d=\"M{:.1},{:.1} A{:.1},{:.1} 0 0 1 {:.1},{:.1} Z\" fill=\"{}\" stroke=\"{}\" stroke-width=\"2\"/>",
+                cx - radius,
+                cy,
+                radius,
+                radius,
+                cx + radius,
+                cy,
+                hex(COLOR_TABLE_FILL),
+                hex(COLOR_TABLE_STROKE)
             )),
         }
 
@@ -418,6 +452,30 @@ fn round_table_metrics(x: f32, y: f32, options: &RenderOptions) -> (f32, f32, f3
     (center_x, center_y, radius)
 }
 
+/// Center and ring radius for a semicircle table's seats, sized to use the
+/// card's full available height instead of half of it.
+///
+/// [`round_table_metrics`] centers its ring in the card so a full circle
+/// fits, giving a semicircle (which only draws its upper arc) roughly half
+/// the usable height. Centering the flat edge near the card's bottom
+/// instead lets the arc span almost the full height below the header,
+/// roughly doubling how many seats fit before adjacent markers overlap.
+fn semicircle_table_metrics(x: f32, y: f32, options: &RenderOptions) -> (f32, f32, f32) {
+    let top = header_bottom(y, options);
+    let bottom = y + options.table_height - options.font_size - 6.0;
+    let center_x = x + options.table_width / 2.0;
+    let center_y = bottom;
+    let vertical_radius = (bottom - top - options.seat_radius - 20.0).max(20.0);
+    // No extra aesthetic buffer here (unlike `round_table_metrics`'s
+    // `- 20.0`): the arc needs every available pixel of width to seat a
+    // realistic 10-12 person table without overlapping markers, and the
+    // `- seat_radius` term alone already keeps seats from spilling past the
+    // card edge.
+    let horizontal_radius = (options.table_width / 2.0 - options.seat_radius).max(20.0);
+    let radius = vertical_radius.min(horizontal_radius);
+    (center_x, center_y, radius)
+}
+
 /// Table-surface geometry for `shape`, using the same center/insets as the
 /// corresponding `build_*_seats` function so the drawn surface never drifts
 /// from the seat ring/perimeter.
@@ -444,6 +502,15 @@ fn build_surface(shape: &TableShape, x: f32, y: f32, options: &RenderOptions) ->
             width: options.table_width - 120.0,
             height: options.table_height - 110.0,
         },
+        TableShape::Semicircle => {
+            let (center_x, center_y, ring_radius) = semicircle_table_metrics(x, y, options);
+            let surface_radius = (ring_radius - options.seat_radius - 6.0).max(20.0);
+            TableSurface::Semicircle {
+                cx: center_x,
+                cy: center_y,
+                radius: surface_radius,
+            }
+        }
     }
 }
 
@@ -467,6 +534,9 @@ fn build_seat_positions(
             y,
             options,
         ),
+        TableShape::Semicircle => {
+            build_semicircle_seats(max_people, table_assignments, x, y, options)
+        }
     }
 }
 
@@ -499,6 +569,35 @@ fn build_round_seats(
         .map(|seat_index| {
             let angle = std::f32::consts::TAU * seat_index as f32 / seat_count as f32
                 - std::f32::consts::FRAC_PI_2;
+            LayoutSeat {
+                seat_index,
+                x: center_x + radius * angle.cos(),
+                y: center_y + radius * angle.sin(),
+                person_name: occupant_at(table_assignments, seat_index)
+                    .map(|assignment| assignment.person_name.clone()),
+            }
+        })
+        .collect()
+}
+
+/// Places one seat per capacity slot along the arc of a semicircle table,
+/// on the ring [`semicircle_table_metrics`] computes. Seats span angles
+/// `PI..2*PI` (the upper half of the ring in screen space, where `y`
+/// increases downward), so `x` increases and `y` stays above the flat edge
+/// (`y < cy`) for every seat — no wrap-around, unlike a round table.
+fn build_semicircle_seats(
+    max_people: usize,
+    table_assignments: &[&SeatingAssignment],
+    x: f32,
+    y: f32,
+    options: &RenderOptions,
+) -> Vec<LayoutSeat> {
+    let (center_x, center_y, radius) = semicircle_table_metrics(x, y, options);
+    let seat_count = max_people.max(1);
+    (0..max_people)
+        .map(|seat_index| {
+            let angle = std::f32::consts::PI
+                + std::f32::consts::PI * (seat_index as f32 + 0.5) / seat_count as f32;
             LayoutSeat {
                 seat_index,
                 x: center_x + radius * angle.cos(),
@@ -648,5 +747,6 @@ fn shape_label(shape: &TableShape) -> &'static str {
         TableShape::Round => "round",
         TableShape::Rectangular => "rectangular",
         TableShape::Square => "square",
+        TableShape::Semicircle => "semicircle",
     }
 }

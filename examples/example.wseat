@@ -78,11 +78,13 @@
   "optimization": {
     "seed": 42,
     "attempts": 10,
-    "iterations": 200,
+    "steps": 50000,
     "solutions": 1,
     "proximity_weight": 1.0,
     "used_table_weight": 0.0,
-    "optimal_table_size_weight": 1.0
+    "optimal_table_size_weight": 1.0,
+    "time_limit_secs": 10,
+    "min_people_weight": 1000.0
   },
   "seating": [
     {

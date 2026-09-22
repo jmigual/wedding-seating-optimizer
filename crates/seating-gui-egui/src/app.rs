@@ -4,11 +4,12 @@ use crate::panels::{self, CanvasState, EditorsState};
 use crate::state::{MessageKind, SharedState};
 use eframe::egui::{self, Color32};
 use seating_core::{
-    validate_project, COLOR_BACKGROUND, COLOR_CARD, DEFAULT_SEARCH_TIME_LIMIT,
-    HeuristicOptimizer, OptimizationResult, ValidationReport,
+    COLOR_BACKGROUND, COLOR_CARD, HeuristicOptimizer, OptimizationResult, ValidationReport,
+    validate_project,
 };
 use std::sync::mpsc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 /// A whole-project action that would discard unsaved work, awaiting a
 /// second confirming activation of the same button.
@@ -25,6 +26,15 @@ pub(crate) struct SeatingApp {
     pub(crate) is_optimizing: bool,
     optimize_rx: Option<mpsc::Receiver<Result<OptimizationResult, ValidationReport>>>,
     pub(crate) pending_confirm: Option<PendingConfirm>,
+    /// When the running optimize started, for the progress bar. `None` when
+    /// not optimizing.
+    pub(crate) optimize_started: Option<Instant>,
+    /// `config.time_limit_secs` of the running optimize, as a `Duration`.
+    /// Zero means unbounded (attempts-only), shown as an indeterminate bar.
+    pub(crate) optimize_limit: Duration,
+    /// Whether to warm-start the next optimize from the current seating
+    /// instead of a random one. Not persisted to the project file.
+    pub(crate) warm_start: bool,
     /// Last `dirty` value reflected in the window title, so we only send a
     /// `ViewportCommand::Title` when it actually changes.
     shown_dirty: bool,
@@ -46,6 +56,9 @@ impl SeatingApp {
             is_optimizing: false,
             optimize_rx: None,
             pending_confirm: None,
+            optimize_started: None,
+            optimize_limit: Duration::ZERO,
+            warm_start: true,
             shown_dirty: false,
             chrome_set: false,
         }
@@ -96,15 +109,19 @@ impl SeatingApp {
             return;
         }
 
+        let initial = (self.warm_start && self.shared.score_breakdown.is_some())
+            .then(|| self.shared.assignments.clone());
+
         let (tx, rx) = mpsc::channel();
         self.optimize_rx = Some(rx);
         self.is_optimizing = true;
+        self.optimize_started = Some(Instant::now());
+        self.optimize_limit = Duration::from_secs(config.time_limit_secs);
         self.shared.set_message(MessageKind::Info, "Optimizing…");
 
         let repaint_ctx = ctx.clone();
         thread::spawn(move || {
-            let result = HeuristicOptimizer
-                .optimize_for_duration(&project, &config, DEFAULT_SEARCH_TIME_LIMIT);
+            let result = HeuristicOptimizer.optimize_timed(&project, &config, initial.as_deref());
             let _ = tx.send(result);
             repaint_ctx.request_repaint();
         });
@@ -120,6 +137,7 @@ impl SeatingApp {
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.is_optimizing = false;
                 self.optimize_rx = None;
+                self.optimize_started = None;
                 self.shared
                     .set_message(MessageKind::Error, "Optimizer thread stopped unexpectedly.");
                 return;
@@ -127,15 +145,19 @@ impl SeatingApp {
         };
         self.is_optimizing = false;
         self.optimize_rx = None;
+        self.optimize_started = None;
         match result {
             Ok(result) => match result.solutions.into_iter().next() {
                 Some(solution) => {
                     let score = solution.score;
+                    let attempts_completed = result.attempts_completed;
                     self.shared.assignments = solution.assignments;
                     self.shared.refresh();
                     self.shared.set_message(
                         MessageKind::Success,
-                        format!("Optimization complete. Score: {score:.3}"),
+                        format!(
+                            "Optimized. Score: {score:.3} ({attempts_completed} attempts completed)"
+                        ),
                     );
                 }
                 None => self
