@@ -11,10 +11,10 @@
 //! between validation, scoring, and the optimizer.
 
 use crate::models::{
-    ClosenessRule, Person, ProjectInput, SeatingAssignment, TableInstance, TableTypeId,
-    ValidationError, ValidationReport,
+    ClosenessRule, Person, ProjectInput, SeatingAssignment, TableInstance, TableTypeConfig,
+    TableTypeId, ValidationError, ValidationReport,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 // ── Table instance generation ─────────────────────────────────────────────────
 
@@ -33,9 +33,21 @@ use std::collections::{HashMap, HashSet};
 /// covered here; [`validate_locked_assignments`] reports the dangling lock as
 /// [`ValidationError::LockedTableDoesNotExist`].
 ///
-/// Instances are numbered sequentially (1-based). Because [`ProjectInput::table_types`]
-/// is a [`std::collections::BTreeMap`], types are iterated in **lexicographic key order**,
-/// so table numbers are stable and deterministic across platforms.
+/// Instances are numbered sequentially (1-based) in emission order. The
+/// **derived order** (used when [`ProjectInput::table_order`] is empty) groups
+/// instances by type in **lexicographic key order**, since
+/// [`ProjectInput::table_types`] is a [`std::collections::BTreeMap`] — so table
+/// numbers are stable and deterministic across platforms.
+///
+/// A non-empty [`ProjectInput::table_order`] overrides that: it is walked in
+/// order, and each entry claims one not-yet-emitted instance of the type it
+/// names. The order is **self-healing**, so a list that drifted from the
+/// current configuration never produces an error or an incomplete set of
+/// instances:
+/// - an entry naming a type with no instances left (its count shrank) or a
+///   type that no longer exists is skipped;
+/// - every instance not claimed by the list is appended afterwards in derived
+///   order (so a type whose count grew gets its extra tables at the end).
 pub fn generate_table_instances(project: &ProjectInput) -> Vec<TableInstance> {
     let max_locked = project
         .people
@@ -45,46 +57,65 @@ pub fn generate_table_instances(project: &ProjectInput) -> Vec<TableInstance> {
         .unwrap_or(0);
     let person_count = project.people.len().max(1);
 
-    let mut counts: Vec<(&TableTypeId, usize)> = project
+    let mut counts: Vec<(&TableTypeId, &TableTypeConfig, usize)> = project
         .table_types
         .iter()
         .map(|(table_type_id, cfg)| {
             let count = cfg
                 .number_of_tables
                 .unwrap_or_else(|| person_count.div_ceil(cfg.max_people));
-            (table_type_id, count)
+            (table_type_id, cfg, count)
         })
         .collect();
 
-    let total: usize = counts.iter().map(|(_, count)| count).sum();
+    let total: usize = counts.iter().map(|(_, _, count)| count).sum();
     if total < max_locked {
         let shortfall = max_locked - total;
-        if let Some(entry) = counts.iter_mut().rev().find(|(table_type_id, _)| {
-            project.table_types[*table_type_id]
-                .number_of_tables
-                .is_none()
-        }) {
-            entry.1 += shortfall;
+        if let Some(entry) = counts
+            .iter_mut()
+            .rev()
+            .find(|(_, cfg, _)| cfg.number_of_tables.is_none())
+        {
+            entry.2 += shortfall;
         }
     }
 
-    let mut instances = Vec::new();
-    let mut number = 1usize;
-    for (table_type_id, count) in counts {
-        let cfg = &project.table_types[table_type_id];
-        for _ in 0..count {
-            instances.push(TableInstance {
-                number,
-                table_type: table_type_id.clone(),
-                shape: cfg.shape.clone(),
-                max_people: cfg.max_people,
-                min_people: cfg.min_people,
-                recommended_people: cfg.recommended_people,
-            });
-            number += 1;
+    // Instances still to emit, keyed by type. A `BTreeMap` keeps the leftover
+    // pass in lexicographic (derived) order, matching `counts`.
+    let mut remaining: BTreeMap<&TableTypeId, (&TableTypeConfig, usize)> = counts
+        .iter()
+        .map(|&(table_type_id, cfg, count)| (table_type_id, (cfg, count)))
+        .collect();
+
+    let mut emitted: Vec<(&TableTypeId, &TableTypeConfig)> = Vec::new();
+    for wanted in &project.table_order {
+        let Some((cfg, left)) = remaining.get_mut(wanted) else {
+            continue;
+        };
+        if *left == 0 {
+            continue;
+        }
+        *left -= 1;
+        emitted.push((wanted, *cfg));
+    }
+    for (table_type_id, (cfg, left)) in &remaining {
+        for _ in 0..*left {
+            emitted.push((*table_type_id, *cfg));
         }
     }
-    instances
+
+    emitted
+        .into_iter()
+        .enumerate()
+        .map(|(index, (table_type_id, cfg))| TableInstance {
+            number: index + 1,
+            table_type: table_type_id.clone(),
+            shape: cfg.shape.clone(),
+            max_people: cfg.max_people,
+            min_people: cfg.min_people,
+            recommended_people: cfg.recommended_people,
+        })
+        .collect()
 }
 
 // ── Project validation ────────────────────────────────────────────────────────

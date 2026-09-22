@@ -423,6 +423,90 @@ pub fn table_number_remap(
         .collect()
 }
 
+// ── Table reordering ──────────────────────────────────────────────────────────
+
+/// The current type of every table, indexed by table number − 1.
+///
+/// Materialized from [`generate_table_instances`] so the reorder helpers work
+/// whether or not [`ProjectInput::table_order`] was already set.
+fn current_table_order(project: &ProjectInput) -> Vec<TableTypeId> {
+    generate_table_instances(project)
+        .into_iter()
+        .map(|instance| instance.table_type)
+        .collect()
+}
+
+/// Build the old→new table-number map implied by `numbers`, where `numbers[i]`
+/// is the table that now carries number `i + 1`.
+fn table_number_map(numbers: &[usize]) -> BTreeMap<usize, usize> {
+    numbers
+        .iter()
+        .enumerate()
+        .map(|(index, &old)| (old, index + 1))
+        .collect()
+}
+
+/// Swap the numbers of tables `a` and `b`, returning the new explicit
+/// [`ProjectInput::table_order`] and an old→new table-number map covering
+/// every table.
+///
+/// The **whole table** moves: its type, its shape *and* its guests. Callers
+/// must therefore apply the returned map to every
+/// [`SeatingAssignment::table_number`] and every [`Person::locked_table`], and
+/// store the returned order in [`ProjectInput::table_order`].
+/// [`SeatingAssignment::table_type`] needs no update — the type travels with
+/// the number.
+///
+/// Score-preserving up to f64 summation order and validity-preserving: every
+/// table keeps its own occupants and its own type, so capacity, seat and lock
+/// constraints still hold even when the two tables have different
+/// capacities; only the labels change.
+///
+/// Returns `None` if `a` or `b` is not an existing (1-based) table number.
+pub fn swap_table_numbers(
+    project: &ProjectInput,
+    a: usize,
+    b: usize,
+) -> Option<(Vec<TableTypeId>, BTreeMap<usize, usize>)> {
+    let mut order = current_table_order(project);
+    if a == 0 || b == 0 || a > order.len() || b > order.len() {
+        return None;
+    }
+    let mut numbers: Vec<usize> = (1..=order.len()).collect();
+    order.swap(a - 1, b - 1);
+    numbers.swap(a - 1, b - 1);
+    Some((order, table_number_map(&numbers)))
+}
+
+/// Renumber the table currently numbered `from` to `to`, shifting every table
+/// in between (drag-to-reorder), and return the new explicit
+/// [`ProjectInput::table_order`] plus an old→new table-number map covering
+/// every table.
+///
+/// Carries the same semantics as [`swap_table_numbers`]: whole tables move
+/// with their type, shape and guests, so the caller applies the map to
+/// [`SeatingAssignment::table_number`] and [`Person::locked_table`], and the
+/// operation is score-preserving up to f64 summation order and
+/// validity-preserving.
+///
+/// Returns `None` if `from` or `to` is not an existing (1-based) table number.
+pub fn move_table_number(
+    project: &ProjectInput,
+    from: usize,
+    to: usize,
+) -> Option<(Vec<TableTypeId>, BTreeMap<usize, usize>)> {
+    let mut order = current_table_order(project);
+    if from == 0 || to == 0 || from > order.len() || to > order.len() {
+        return None;
+    }
+    let mut numbers: Vec<usize> = (1..=order.len()).collect();
+    let moved_type = order.remove(from - 1);
+    order.insert(to - 1, moved_type);
+    let moved_number = numbers.remove(from - 1);
+    numbers.insert(to - 1, moved_number);
+    Some((order, table_number_map(&numbers)))
+}
+
 // ── Table compaction ──────────────────────────────────────────────────────────
 
 /// Repack each table type's used instances onto that type's lowest-numbered
@@ -434,12 +518,16 @@ pub fn table_number_remap(
 /// set is pinned: it keeps its number, and the other used tables of that
 /// type fill the remaining lowest, non-pinned numbers in order.
 ///
-/// Score-neutral and validity-preserving: instances of the same table type
-/// are identical for scoring (same shape/capacity/min/recommended), so this
-/// only relabels which interchangeable instance a guest's occupant set sits
-/// at — it never changes [`crate::scoring::score_solution`]'s result, and
-/// moving a whole occupant set between same-type tables cannot violate
-/// capacity, seat, or lock invariants.
+/// Score-preserving up to f64 summation order and validity-preserving:
+/// instances of the same table type are identical for scoring (same
+/// shape/capacity/min/recommended), so this only relabels which
+/// interchangeable instance a guest's occupant set sits at — it does not
+/// change which pairs of guests share a table, and moving a whole occupant
+/// set between same-type tables cannot violate capacity, seat, or lock
+/// invariants.
+///
+/// For the same reason it leaves [`ProjectInput::table_order`] valid: each
+/// table number keeps its type, so the order needs no update.
 pub fn compact_table_numbers(
     project: &ProjectInput,
     assignments: &[SeatingAssignment],

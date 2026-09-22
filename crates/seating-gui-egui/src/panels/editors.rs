@@ -5,13 +5,15 @@
 //! the spec): only `crate::state::SharedState` is read/mutated from here,
 //! and every mutation ends with [`SharedState::refresh`].
 
-use crate::state::{ClosenessRow, ImportDecision, PendingImport, SharedState, TableConfigRow};
+use crate::state::{
+    ClosenessRow, ImportDecision, MessageKind, PendingImport, SharedState, TableConfigRow,
+};
 use eframe::egui;
 use seating_core::{
     CLOSENESS_CSV_HEADER, ClosenessRule, OptimizationConfig, PEOPLE_CSV_HEADER, ReferenceIdOption,
     TABLES_CSV_HEADER, TableShape, ValidationError, collect_group_ids, generate_table_instances,
-    parse_f64_value, reference_id_options, reference_label, remove_group, rename_group,
-    rules_match, table_number_remap,
+    move_table_number, parse_f64_value, reference_id_options, reference_label, remove_group,
+    rename_group, rules_match, table_number_remap,
 };
 use std::collections::HashMap;
 
@@ -872,11 +874,11 @@ fn tables_section(shared: &mut SharedState, ui: &mut egui::Ui) {
                     && let Ok(project) = shared.materialize_project()
                 {
                     // Bumping this type's count renumbers every later type's
-                    // instances (they're numbered by BTreeMap key order), so
-                    // existing assignments and locked tables must be remapped
-                    // by (table_type, ordinal) — not left pointing at their
-                    // old table numbers — or validation fails and the layout
-                    // is dropped.
+                    // instances (numbered by `table_order`, or BTreeMap key
+                    // order when it is empty), so existing assignments and
+                    // locked tables must be remapped by (table_type, ordinal)
+                    // — not left pointing at their old table numbers — or
+                    // validation fails and the layout is dropped.
                     let old_instances = generate_table_instances(&project);
                     let current = old_instances
                         .iter()
@@ -887,18 +889,7 @@ fn tables_section(shared: &mut SharedState, ui: &mut egui::Ui) {
                     if let Ok(new_project) = shared.materialize_project() {
                         let new_instances = generate_table_instances(&new_project);
                         let remap = table_number_remap(&old_instances, &new_instances);
-                        for assignment in shared.assignments.iter_mut() {
-                            if let Some(&new_number) = remap.get(&assignment.table_number) {
-                                assignment.table_number = new_number;
-                            }
-                        }
-                        for person in shared.people.iter_mut() {
-                            if let Some(locked) = person.locked_table
-                                && let Some(&new_number) = remap.get(&locked)
-                            {
-                                person.locked_table = Some(new_number);
-                            }
-                        }
+                        shared.apply_table_number_map(&remap);
                     }
                     changed = true;
                 }
@@ -953,6 +944,90 @@ fn tables_section(shared: &mut SharedState, ui: &mut egui::Ui) {
             shared.import_tables_csv();
         }
     });
+
+    table_order_section(shared, ui);
+}
+
+/// Drag-to-reorder list of generated table instances. Dropping a row moves
+/// that table's number (and with it, its type, shape and guests) via
+/// [`move_table_number`], mirroring the canvas's right-click "Swap with".
+fn table_order_section(shared: &mut SharedState, ui: &mut egui::Ui) {
+    let Ok(project) = shared.materialize_project() else {
+        return;
+    };
+
+    ui.separator();
+    ui.label("Table order — drag to reorder (a table's whole occupant set moves with it):");
+
+    let instances = generate_table_instances(&project);
+    if instances.is_empty() {
+        ui.label(egui::RichText::new("No tables generated yet.").weak());
+        return;
+    }
+
+    let mut from_number: Option<usize> = None;
+    let mut to_index: Option<usize> = None;
+
+    ui.dnd_drop_zone::<usize, _>(egui::Frame::default(), |ui| {
+        for (index, instance) in instances.iter().enumerate() {
+            let item_id = egui::Id::new(("table_order_row", instance.number));
+            let response = ui
+                .dnd_drag_source(item_id, instance.number, |ui| {
+                    ui.label(format!(
+                        "Table {} — {} ({})",
+                        instance.number,
+                        instance.table_type,
+                        table_shape_label(&instance.shape)
+                    ));
+                })
+                .response;
+
+            if let (Some(pointer), Some(hovered)) = (
+                ui.ctx().input(|i| i.pointer.interact_pos()),
+                response.dnd_hover_payload::<usize>(),
+            ) {
+                let rect = response.rect;
+                let stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(90, 200, 120));
+                let insert_index = if *hovered == instance.number {
+                    ui.painter().hline(rect.x_range(), rect.center().y, stroke);
+                    index
+                } else if pointer.y < rect.center().y {
+                    ui.painter().hline(rect.x_range(), rect.top(), stroke);
+                    index
+                } else {
+                    ui.painter().hline(rect.x_range(), rect.bottom(), stroke);
+                    index + 1
+                };
+
+                if let Some(dragged) = response.dnd_release_payload::<usize>() {
+                    from_number = Some(*dragged);
+                    to_index = Some(insert_index);
+                }
+            }
+        }
+    });
+
+    let (Some(from_number), Some(mut to_index)) = (from_number, to_index) else {
+        return;
+    };
+    let from_index = from_number - 1;
+    if to_index > from_index {
+        to_index -= 1;
+    }
+    let to_number = to_index + 1;
+    if to_number == from_number {
+        return;
+    }
+    let Some((order, map)) = move_table_number(&project, from_number, to_number) else {
+        return;
+    };
+    shared.apply_table_number_map(&map);
+    shared.table_order = order;
+    shared.refresh();
+    shared.set_message(
+        MessageKind::Success,
+        format!("Moved table {from_number} to position {to_number}."),
+    );
 }
 
 fn table_id_field(ui: &mut egui::Ui, shared: &mut SharedState, index: usize, width: f32) -> bool {

@@ -13,6 +13,7 @@ use seating_core::{
     COLOR_TABLE_FILL, COLOR_TABLE_STROKE, LayoutSeat, LayoutTable, Person, ProjectInput,
     RenderOptions, SeatDropOutcome, SeatingAssignment, SeatingLayout, TableSurface,
     apply_seat_drop, build_layout, compact_table_numbers, render_png, render_svg,
+    swap_table_numbers,
 };
 use std::collections::HashMap;
 
@@ -272,9 +273,23 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
     let mut pending_drop: Option<(usize, usize)> = None;
     let mut drag_cancelled = false;
     let mut pending_lock: Option<(String, Option<usize>, Option<usize>)> = None;
+    let mut pending_swap: Option<(usize, usize)> = None;
 
     for table in &layout.tables {
         draw_table(&painter, table, transform, state.zoom);
+
+        let card_rect = Rect::from_two_pos(
+            transform.to_screen((table.x, table.y)),
+            transform.to_screen((table.x + table.width, table.y + table.height)),
+        );
+        let table_id = Id::new(("table_surface", table.table_number));
+        let table_response = ui.interact(card_rect, table_id, Sense::click());
+        if state.drag.is_none() {
+            table_response.context_menu(|ui| {
+                table_swap_menu(ui, &layout, table.table_number, &mut pending_swap);
+            });
+        }
+
         for seat in &table.seats {
             let center = transform.to_screen((seat.x, seat.y));
             let radius = seat_radius_base * state.zoom;
@@ -391,7 +406,56 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
         );
     } else if let Some((person_id, locked_table, locked_seat)) = pending_lock {
         finish_lock(shared, &person_id, locked_table, locked_seat);
+    } else if let Some((a, b)) = pending_swap {
+        finish_swap(shared, a, b);
     }
+}
+
+/// Submenu contents for right-clicking a table's surface: swap its number
+/// (and with it, its whole occupant set) with another table currently drawn
+/// on the canvas.
+fn table_swap_menu(
+    ui: &mut egui::Ui,
+    layout: &SeatingLayout,
+    table_number: usize,
+    pending_swap: &mut Option<(usize, usize)>,
+) {
+    ui.menu_button("Swap with", |ui| {
+        for other in &layout.tables {
+            if other.table_number == table_number {
+                continue;
+            }
+            if ui
+                .button(format!(
+                    "Table {} — {}",
+                    other.table_number, other.table_type
+                ))
+                .clicked()
+            {
+                *pending_swap = Some((table_number, other.table_number));
+                ui.close();
+            }
+        }
+    });
+}
+
+/// Applies a right-click "Swap with" selection: renumbers tables `a` and `b`
+/// (whole occupant set and lock travel with the number) via
+/// [`swap_table_numbers`], then re-validates and re-scores.
+fn finish_swap(shared: &mut SharedState, a: usize, b: usize) {
+    let Ok(project) = shared.materialize_project() else {
+        return;
+    };
+    let Some((order, map)) = swap_table_numbers(&project, a, b) else {
+        return;
+    };
+    shared.apply_table_number_map(&map);
+    shared.table_order = order;
+    shared.refresh();
+    shared.set_message(
+        MessageKind::Success,
+        format!("Swapped table {a} and table {b}."),
+    );
 }
 
 /// Menu contents for right-clicking an occupied seat: lock the guest to

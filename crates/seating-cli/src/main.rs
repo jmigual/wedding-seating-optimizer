@@ -415,6 +415,7 @@ fn load_render_project(
         people: parse_people_csv(&read_file(people, "people")?)?,
         closeness_rules: Vec::new(),
         table_types: parse_tables_csv(&read_file(tables, "tables")?)?,
+        table_order: Vec::new(),
     })
 }
 

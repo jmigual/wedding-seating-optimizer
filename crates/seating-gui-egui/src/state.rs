@@ -127,6 +127,7 @@ pub(crate) struct SharedState {
     pub(crate) people: Vec<Person>,
     pub(crate) closeness_rules: Vec<ClosenessRow>,
     pub(crate) table_configs: Vec<TableConfigRow>,
+    pub(crate) table_order: Vec<TableTypeId>,
     pub(crate) assignments: Vec<SeatingAssignment>,
     pub(crate) layout: Option<SeatingLayout>,
     /// View-only toggle for whether empty (unoccupied) tables render on the
@@ -162,6 +163,7 @@ impl SharedState {
             people: Vec::new(),
             closeness_rules: Vec::new(),
             table_configs: Vec::new(),
+            table_order: Vec::new(),
             assignments: Vec::new(),
             layout: None,
             show_empty_tables: true,
@@ -319,6 +321,7 @@ impl SharedState {
                 people: self.people.clone(),
                 closeness_rules,
                 table_types,
+                table_order: self.table_order.clone(),
             })
         } else {
             Err(ValidationReport { errors })
@@ -458,6 +461,7 @@ impl SharedState {
             .into_iter()
             .map(|(table_type_id, config)| TableConfigRow::from_pair(table_type_id, config))
             .collect();
+        self.table_order = project.table_order;
         self.assignments = project.seating;
         self.seed = project.optimization.seed.to_string();
         self.attempts = project.optimization.attempts.to_string();
@@ -532,6 +536,25 @@ impl SharedState {
     pub(crate) fn refresh(&mut self) {
         self.dirty = true;
         self.recompute();
+    }
+
+    /// Apply an old→new table-number map (as returned by
+    /// [`seating_core::swap_table_numbers`]/[`seating_core::move_table_number`])
+    /// to every seating assignment and locked-table guest, so a whole
+    /// table's occupants and lock travel with its new number.
+    pub(crate) fn apply_table_number_map(&mut self, map: &BTreeMap<usize, usize>) {
+        for assignment in self.assignments.iter_mut() {
+            if let Some(&new_number) = map.get(&assignment.table_number) {
+                assignment.table_number = new_number;
+            }
+        }
+        for person in self.people.iter_mut() {
+            if let Some(locked) = person.locked_table
+                && let Some(&new_number) = map.get(&locked)
+            {
+                person.locked_table = Some(new_number);
+            }
+        }
     }
 
     pub(crate) fn new_project(&mut self) {

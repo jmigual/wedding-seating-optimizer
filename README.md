@@ -41,7 +41,9 @@ cargo run -p seating-gui-egui
 
 Edit guests, groups, closeness rules, and tables in the side panel; run the optimizer in the
 background; then fine-tune the plan directly on the canvas — drag a guest onto another seat to
-move or swap them (locks and table compatibility are enforced), and watch the score update with
-each change. The plan exports to SVG/PNG with the same palette the app uses.
+move or swap them (locks and table compatibility are enforced), right-click a table to swap its
+number with another or drag rows in the "Table order" list (the whole table — type, shape and
+guests — moves with the number), and watch the score update with each change. The plan exports
+to SVG/PNG with the same palette the app uses.
 
 ![Wedding Seating egui GUI with drag-and-drop seating canvas](docs/gui-egui-canvas.png)

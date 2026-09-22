@@ -429,6 +429,7 @@ pub fn make_project(
         people: parse_people_csv(people_csv)?,
         closeness_rules: parse_closeness_csv(closeness_csv)?,
         table_types: parse_tables_csv(tables_csv)?,
+        table_order: Vec::new(),
     })
 }
 

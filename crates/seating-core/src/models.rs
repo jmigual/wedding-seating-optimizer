@@ -110,6 +110,13 @@ pub struct ProjectInput {
     pub closeness_rules: Vec<ClosenessRule>,
     /// All table type configurations keyed by type name.
     pub table_types: BTreeMap<TableTypeId, TableTypeConfig>,
+    /// Explicit table ordering: the type of table 1, table 2, and so on.
+    ///
+    /// Empty (the default) means table numbers follow the derived order
+    /// documented on [`crate::validation::generate_table_instances`], which
+    /// also describes how a drifted order heals itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub table_order: Vec<TableTypeId>,
 }
 
 // ── Table instances ───────────────────────────────────────────────────────────
@@ -229,6 +236,10 @@ pub struct ProjectFile {
     pub closeness_rules: Vec<ClosenessRule>,
     /// All table type configurations keyed by type name.
     pub table_types: BTreeMap<TableTypeId, TableTypeConfig>,
+    /// Explicit table ordering; see [`ProjectInput::table_order`]. Absent in
+    /// files saved before tables could be reordered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub table_order: Vec<TableTypeId>,
     /// Optimization settings last used by the project.
     #[serde(default)]
     pub optimization: OptimizationConfig,
@@ -249,6 +260,7 @@ impl ProjectFile {
             people: project.people,
             closeness_rules: project.closeness_rules,
             table_types: project.table_types,
+            table_order: project.table_order,
             optimization,
             seating,
         }
@@ -260,6 +272,7 @@ impl ProjectFile {
             people: self.people.clone(),
             closeness_rules: self.closeness_rules.clone(),
             table_types: self.table_types.clone(),
+            table_order: self.table_order.clone(),
         }
     }
 }
