@@ -73,7 +73,7 @@ pub use render::{
     COLOR_BACKGROUND, COLOR_CARD, COLOR_GUEST_TEXT, COLOR_MUTED, COLOR_SEAT_FILL,
     COLOR_SEAT_STROKE, COLOR_STROKE, COLOR_TABLE_FILL, COLOR_TABLE_STROKE, LayoutSeat, LayoutTable,
     RenderOptions, RenderingError, SeatingLayout, TableSurface, build_layout,
-    build_layout_with_empty_tables, render_png, render_svg,
+    build_layout_with_empty_tables, min_seat_spacing, render_png, render_svg,
 };
 pub use scoring::{
     ScoreBreakdown, circular_distance, default_proximity_weight, effective_person_pair_score,

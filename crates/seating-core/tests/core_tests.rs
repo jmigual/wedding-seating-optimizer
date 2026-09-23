@@ -542,6 +542,42 @@ fn round_table_surface_center_matches_seat_ring_center() {
     }
 }
 
+/// The seats of a regular n-gon are all equidistant from their two
+/// neighbors and strictly farther from every other seat, so the smallest
+/// center-to-center distance is exactly the chord length `2 * r * sin(pi/n)`
+/// for the seat ring's radius `r`.
+#[test]
+fn min_seat_spacing_matches_the_regular_polygon_chord_length() {
+    let layout = build_layout(&round_project(), &round_assignments()).unwrap();
+    let table = &layout.tables[0];
+    let TableSurface::Round { cx, cy, .. } = &table.surface else {
+        panic!("expected a round surface for a round table");
+    };
+
+    let seat_count = table.seats.len();
+    let seat_ring_radius =
+        ((table.seats[0].x - cx).powi(2) + (table.seats[0].y - cy).powi(2)).sqrt();
+    let expected_chord = 2.0 * seat_ring_radius * (std::f32::consts::PI / seat_count as f32).sin();
+
+    let spacing = min_seat_spacing(&table.seats).unwrap();
+    assert!(
+        (spacing - expected_chord).abs() < 0.01,
+        "expected chord length {expected_chord}, got {spacing}"
+    );
+}
+
+#[test]
+fn min_seat_spacing_is_none_below_two_seats() {
+    let seat = LayoutSeat {
+        seat_index: 0,
+        x: 0.0,
+        y: 0.0,
+        person_name: None,
+    };
+    assert_eq!(min_seat_spacing(&[seat]), None);
+    assert_eq!(min_seat_spacing(&[]), None);
+}
+
 #[test]
 fn square_table_layout_generation_preserves_perimeter_order() {
     let layout = build_layout(&square_project(), &square_assignments()).unwrap();
