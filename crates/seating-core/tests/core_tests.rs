@@ -3257,6 +3257,82 @@ fn unassigned_people_preserves_project_order() {
 }
 
 #[test]
+fn unassign_person_removes_their_assignment() {
+    let project = drop_project();
+    let assignments = drop_assignments();
+
+    let updated = unassign_person(&project, &assignments, "p1").unwrap();
+
+    assert!(!updated.iter().any(|a| a.person_id == "p1"));
+    assert_eq!(updated.len(), assignments.len() - 1);
+}
+
+#[test]
+fn unassign_person_refuses_a_locked_guest() {
+    let project = drop_project();
+    let assignments = drop_assignments();
+
+    let err = unassign_person(&project, &assignments, "p3").unwrap_err();
+
+    assert!(
+        err.errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::LockedGuestUnassigned(id) if id == "p3"))
+    );
+}
+
+/// A `locked_table`-only guest (no `locked_seat`) is refused just like a
+/// fully seat-locked one — the lock, not the seat specifically, is what's
+/// enforced.
+#[test]
+fn unassign_person_refuses_a_table_only_locked_guest() {
+    let mut project = drop_project();
+    let p1 = project
+        .people
+        .iter_mut()
+        .find(|p| p.id == "p1")
+        .expect("p1 exists in drop_project");
+    p1.locked_table = Some(2);
+    let assignments = drop_assignments();
+
+    let err = unassign_person(&project, &assignments, "p1").unwrap_err();
+
+    assert!(
+        err.errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::LockedGuestUnassigned(id) if id == "p1"))
+    );
+}
+
+/// A locked guest who is already unassigned is a no-op, not an error — the
+/// lock only prevents *unassigning* a currently seated guest.
+#[test]
+fn unassign_person_locked_guest_already_unassigned_is_a_no_op() {
+    let project = drop_project();
+    let assignments: Vec<SeatingAssignment> = drop_assignments()
+        .into_iter()
+        .filter(|a| a.person_id != "p3")
+        .collect();
+
+    let updated = unassign_person(&project, &assignments, "p3").unwrap();
+
+    assert_eq!(updated, assignments);
+}
+
+#[test]
+fn unassign_person_already_unassigned_is_a_no_op() {
+    let project = drop_project();
+    let assignments: Vec<SeatingAssignment> = drop_assignments()
+        .into_iter()
+        .filter(|a| a.person_id != "p1")
+        .collect();
+
+    let updated = unassign_person(&project, &assignments, "p1").unwrap();
+
+    assert_eq!(updated, assignments);
+}
+
+#[test]
 fn seating_csv_round_trip_is_sorted() {
     let shuffled = vec![
         SeatingAssignment {

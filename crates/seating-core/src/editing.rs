@@ -447,6 +447,41 @@ pub fn unassigned_people<'a>(
         .collect()
 }
 
+/// Remove `person_id`'s seat assignment, sending them back to unassigned.
+///
+/// A no-op (the person is already unassigned) always succeeds and returns
+/// `assignments` unchanged, even for a locked guest — there is nothing to
+/// unassign them *from*. Otherwise, refuses to unassign a `locked_table`/
+/// `locked_seat` guest — dropped with
+/// [`ValidationError::LockedGuestUnassigned`] — since a lock means the guest
+/// must stay seated (the same product decision [`apply_seat_drop`] enforces
+/// by refusing to bump a locked occupant off their seat).
+pub fn unassign_person(
+    project: &ProjectInput,
+    assignments: &[SeatingAssignment],
+    person_id: &str,
+) -> Result<Vec<SeatingAssignment>, ValidationReport> {
+    if !assignments
+        .iter()
+        .any(|assignment| assignment.person_id == person_id)
+    {
+        return Ok(assignments.to_vec());
+    }
+    let is_locked = project.people.iter().any(|person| {
+        person.id == person_id && (person.locked_table.is_some() || person.locked_seat.is_some())
+    });
+    if is_locked {
+        return Err(ValidationReport {
+            errors: vec![ValidationError::LockedGuestUnassigned(
+                person_id.to_string(),
+            )],
+        });
+    }
+    let mut updated = assignments.to_vec();
+    updated.retain(|assignment| assignment.person_id != person_id);
+    Ok(updated)
+}
+
 // ── Table renumbering ─────────────────────────────────────────────────────────
 
 /// Map old table numbers to their new numbers after [`generate_table_instances`]
@@ -727,6 +762,7 @@ impl ValidationError {
             ValidationError::SeatingViolatesLockedTable { person_id, .. } => Some(person_id),
             ValidationError::SeatingViolatesLockedSeat { person_id, .. } => Some(person_id),
             ValidationError::LockedGuestDisplaced(id) => Some(id),
+            ValidationError::LockedGuestUnassigned(id) => Some(id),
             ValidationError::DuplicateTableTypeId(_)
             | ValidationError::EmptyTableTypeId
             | ValidationError::EmptyPersonId
@@ -799,7 +835,8 @@ impl ValidationError {
             | ValidationError::NoFeasibleAssignment
             | ValidationError::SeatingViolatesLockedTable { .. }
             | ValidationError::SeatingViolatesLockedSeat { .. }
-            | ValidationError::LockedGuestDisplaced(_) => None,
+            | ValidationError::LockedGuestDisplaced(_)
+            | ValidationError::LockedGuestUnassigned(_) => None,
         }
     }
 
@@ -845,7 +882,8 @@ impl ValidationError {
             | ValidationError::SeatingPersonTableTypeMismatch { .. }
             | ValidationError::SeatingViolatesLockedTable { .. }
             | ValidationError::SeatingViolatesLockedSeat { .. }
-            | ValidationError::LockedGuestDisplaced(_) => None,
+            | ValidationError::LockedGuestDisplaced(_)
+            | ValidationError::LockedGuestUnassigned(_) => None,
         }
     }
 }
