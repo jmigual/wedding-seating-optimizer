@@ -7,7 +7,7 @@ use crate::models::{ProjectInput, SeatingAssignment, TableShape, ValidationRepor
 use crate::validation::{
     generate_table_instances, validate_partial_seating_solution, validate_seating_solution,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// Geometry and spacing options for layout/rendering.
@@ -175,7 +175,10 @@ pub fn build_layout(
 /// actually has sitting empty — a *limited* type materializes every one of
 /// its `number_of_tables` instances up front (see
 /// [`generate_table_instances`]), so without this cap they would all show
-/// up as guests are moved out of them.
+/// up as guests are moved out of them. An empty table some guest is
+/// `locked_table`ed to is always shown regardless of that cap (and
+/// regardless of `include_empty_tables`), so an unseated locked guest
+/// always has their table rendered as a drop target.
 pub fn build_editor_layout(
     project: &ProjectInput,
     assignments: &[SeatingAssignment],
@@ -209,11 +212,13 @@ fn build_layout_impl(
         table_assignments.sort_by_key(|assignment| assignment.seat_index);
     }
 
-    // When showing empty tables, cap them at one per type: `ensure_spare_tables`
-    // already keeps an *unlimited* type down to one spare, but a *limited*
-    // type always has every one of its `number_of_tables` instances
-    // materialized from the start (see `generate_table_instances`), so
-    // without this it would show every one of them as they empty out.
+    // When showing empty tables, cap them at one per type: a *limited* type
+    // always has every one of its `number_of_tables` instances materialized
+    // from the start (see `generate_table_instances`), and even an
+    // *unlimited* type's derived floor (`ceil(person_count / max_people)`)
+    // can leave more than one spare once guests move out — `ensure_spare_tables`
+    // only tops a type back up when it runs dry, it doesn't cap it — so
+    // without this filter every empty instance would render.
     let mut lowest_empty_by_type: HashMap<&str, usize> = HashMap::new();
     for table in &instances {
         if !assignments_by_table.contains_key(&table.number) {
@@ -223,10 +228,20 @@ fn build_layout_impl(
                 .or_insert(table.number);
         }
     }
+    // A table some guest is locked to is always shown, even if empty and
+    // not the lowest-numbered spare of its type — otherwise an unseated
+    // locked guest would have no valid drop target rendered at all. Mirrors
+    // the same exception in `compact_table_numbers`.
+    let locked_numbers: HashSet<usize> = project
+        .people
+        .iter()
+        .filter_map(|person| person.locked_table)
+        .collect();
     let used_instances = instances
         .iter()
         .filter(|table| {
             assignments_by_table.contains_key(&table.number)
+                || locked_numbers.contains(&table.number)
                 || (include_empty_tables
                     && lowest_empty_by_type.get(table.table_type.as_str()) == Some(&table.number))
         })
