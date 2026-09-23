@@ -9,11 +9,12 @@
 use seating_core::{
     ClosenessRule, OptimizationConfig, Person, ProjectFile, ProjectInput, ScoreBreakdown,
     SeatingAssignment, SeatingLayout, TableShape, TableTypeConfig, TableTypeId, ValidationError,
-    ValidationReport, build_editor_layout, build_table_type_map, generate_table_instances,
-    merge_closeness_rules, merge_people, merge_table_types, parse_closeness_csv, parse_f64_value,
-    parse_optional_usize_value, parse_people_csv, parse_people_per_side, parse_project_file,
-    parse_required_usize_value, parse_tables_csv, score_solution_breakdown, validate_project,
-    write_closeness_csv, write_people_csv, write_project_file, write_tables_csv,
+    ValidationReport, build_editor_layout, build_table_type_map, ensure_spare_tables,
+    generate_table_instances, merge_closeness_rules, merge_people, merge_table_types,
+    parse_closeness_csv, parse_f64_value, parse_optional_usize_value, parse_people_csv,
+    parse_people_per_side, parse_project_file, parse_required_usize_value, parse_tables_csv,
+    score_solution_breakdown, validate_project, write_closeness_csv, write_people_csv,
+    write_project_file, write_tables_csv,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -527,8 +528,19 @@ impl SharedState {
     }
 
     /// Recompute derived state after a user edit, marking the project dirty.
+    ///
+    /// Before recomputing, tops up the table order via
+    /// [`ensure_spare_tables`] so every growable table type keeps a spare
+    /// table that seat drops, seat/person edits, and optimizer runs can
+    /// land on — covering every path that can fill a type's last empty
+    /// table.
     pub(crate) fn refresh(&mut self) {
         self.dirty = true;
+        if let Ok(project) = self.materialize_project()
+            && let Some(order) = ensure_spare_tables(&project, &self.assignments)
+        {
+            self.table_order = order;
+        }
         self.recompute();
     }
 

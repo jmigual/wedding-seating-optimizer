@@ -157,7 +157,9 @@ fn toolbar(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui::Ui)
             .clicked()
             && let Ok(project) = shared.materialize_project()
         {
-            shared.assignments = compact_table_numbers(&project, &shared.assignments);
+            let (order, map) = compact_table_numbers(&project, &shared.assignments);
+            shared.apply_table_number_map(&map);
+            shared.table_order = order;
             shared.refresh();
             shared.set_message(MessageKind::Success, "Compacted table numbers");
         }
