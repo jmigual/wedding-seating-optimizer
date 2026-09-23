@@ -31,6 +31,10 @@ const NAME_WRAP_MIN_LAYOUT: f32 = 40.0;
 /// bottom of the canvas when at least one guest is unassigned. Unlike the
 /// rest of the canvas, the band ignores zoom/pan.
 const UNASSIGNED_BAND_HEIGHT: f32 = 120.0;
+/// Height of the band when nobody is unassigned — it shrinks to a slim
+/// strip rather than disappearing, since it's still the only drop target
+/// for unassigning a seated guest.
+const UNASSIGNED_BAND_MIN_HEIGHT: f32 = 36.0;
 /// Font size for name chips in the unassigned band, in screen pixels
 /// (unaffected by zoom, unlike seat labels).
 const CHIP_FONT: f32 = 13.0;
@@ -236,24 +240,24 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
     // Unassigned guests get a fixed band at the bottom of the canvas
     // (screen space, unaffected by zoom/pan); its height is carved out of
     // the canvas's own drawing area up front so tables never end up hidden
-    // underneath it, and collapses to zero once everyone is seated.
-    // Keep the band visible while a drag is in flight even if nobody is
-    // currently unassigned: it's the only drop target for unassigning a
-    // seated guest, including the very last one.
+    // underneath it. Its height depends only on `unassigned` (never on
+    // `state.drag`): if it depended on the drag too, starting a drag would
+    // change `rect` between frames, so a seat that was interactive when the
+    // drag started could fall outside the now-smaller `rect` mid-drag —
+    // `drag_stopped` on it would then never be read again, leaving
+    // `state.drag` stuck. When nobody is unassigned the band shrinks to a
+    // slim strip instead of disappearing, since it's the only drop target
+    // for unassigning a seated guest, including the very last one.
     let unassigned = unassigned_people(&shared.people, &shared.assignments);
-    let band_height = if unassigned.is_empty() && state.drag.is_none() {
-        0.0
+    let band_height = if unassigned.is_empty() {
+        UNASSIGNED_BAND_MIN_HEIGHT
     } else {
         UNASSIGNED_BAND_HEIGHT
     };
     // Also reserve the vertical spacing egui inserts between the two
     // allocations below, so the band's own bottom border isn't pushed past
     // the visible panel bounds.
-    let band_spacing = if band_height > 0.0 {
-        ui.spacing().item_spacing.y
-    } else {
-        0.0
-    };
+    let band_spacing = ui.spacing().item_spacing.y;
 
     let desired_size = ui.available_size();
     let canvas_size = Vec2::new(
@@ -261,14 +265,13 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
         (desired_size.y - band_height - band_spacing).max(0.0),
     );
     let (rect, _) = ui.allocate_exact_size(canvas_size, Sense::hover());
-    let band_rect = if band_height > 0.0 {
-        Some(
-            ui.allocate_exact_size(Vec2::new(desired_size.x, band_height), Sense::hover())
-                .0,
-        )
-    } else {
-        None
-    };
+    // Always `Some`: the band never fully disappears (see above), so this
+    // stays an `Option` only because `draw_unassigned_band`'s callers treat
+    // "no band" as a possibility elsewhere in this function.
+    let band_rect = Some(
+        ui.allocate_exact_size(Vec2::new(desired_size.x, band_height), Sense::hover())
+            .0,
+    );
     let painter = ui.painter_at(rect);
 
     // Pan-drag sense is inset a few points from the left edge so this
@@ -299,19 +302,6 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
     }
 
     painter.rect_filled(rect, 0.0, rgb(COLOR_BACKGROUND));
-
-    // Tables render as soon as guests + a table type exist, even before the
-    // first Optimize run — surface the same "nothing seated yet" hint
-    // `empty_state` used to show instead, now as an overlay on the canvas.
-    if shared.assignments.is_empty() {
-        painter.text(
-            Pos2::new(rect.center().x, rect.top() + 16.0),
-            Align2::CENTER_TOP,
-            "No seating plan yet — click Optimize in the top bar to generate one.",
-            FontId::proportional(14.0),
-            rgb(COLOR_MUTED),
-        );
-    }
 
     let transform = Transform {
         origin: rect.min,
@@ -522,6 +512,20 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
         painter.galley(pos, galley, color);
     }
 
+    // Tables render as soon as guests + a table type exist, even before the
+    // first Optimize run — surface the same "nothing seated yet" hint
+    // `empty_state` used to show instead, now as an overlay on the canvas.
+    // Painted after every table card so it isn't hidden underneath them.
+    if shared.assignments.is_empty() {
+        painter.text(
+            Pos2::new(rect.center().x, rect.top() + 16.0),
+            Align2::CENTER_TOP,
+            "No seating plan yet — click Optimize in the top bar to generate one.",
+            FontId::proportional(14.0),
+            rgb(COLOR_MUTED),
+        );
+    }
+
     draw_toast(&painter, rect, state, ui.ctx());
 
     if let Some(band_rect) = band_rect {
@@ -567,6 +571,12 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
         finish_lock(shared, &person_id, locked_table, locked_seat);
     } else if let Some((a, b)) = pending_swap {
         finish_swap(shared, a, b);
+    } else if state.drag.is_some() && ui.ctx().input(|i| i.pointer.primary_released()) {
+        // Safety net: the primary button was released this frame but no
+        // path above consumed it (e.g. the dragged seat ended up outside
+        // every interactive rect this frame) — clear the drag quietly
+        // rather than leaving it stuck forever.
+        state.drag = None;
     }
 }
 
@@ -1048,6 +1058,21 @@ fn draw_unassigned_band(
         Stroke::new(1.0_f32, rgb(COLOR_STROKE)),
         StrokeKind::Middle,
     );
+
+    if unassigned.is_empty() {
+        // Slim strip: no chips to lay out, just the drop-target hint. A
+        // seated guest dropped here is still handled by the seat loop in
+        // `canvas_area`, which checks `band_rect` directly.
+        painter.text(
+            band_rect.center(),
+            Align2::CENTER_CENTER,
+            "Unassigned (0) — drop a guest here to unassign",
+            FontId::proportional(CHIP_FONT),
+            rgb(COLOR_GUEST_TEXT),
+        );
+        return (None, false);
+    }
+
     painter.text(
         band_rect.min + Vec2::new(12.0, 8.0),
         Align2::LEFT_TOP,
