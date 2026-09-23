@@ -2665,6 +2665,55 @@ fn partial_validation_accepts_missing_people_but_rejects_duplicates() {
 }
 
 #[test]
+fn apply_seat_drop_places_an_unassigned_guest() {
+    let project = drop_project();
+    let assignments: Vec<SeatingAssignment> = drop_assignments()
+        .into_iter()
+        .filter(|a| a.person_id != "p1")
+        .collect();
+
+    let (updated, outcome) = apply_seat_drop(&project, &assignments, "p1", 1, 3).unwrap();
+
+    assert_eq!(outcome, SeatDropOutcome::Moved);
+    let p1 = updated.iter().find(|a| a.person_id == "p1").unwrap();
+    assert_eq!((p1.table_number, p1.seat_index), (1, 3));
+    assert_eq!(p1.table_type, "round_4");
+}
+
+#[test]
+fn apply_seat_drop_from_unassigned_onto_occupied_seat_unassigns_the_occupant() {
+    let project = drop_project();
+    let assignments: Vec<SeatingAssignment> = drop_assignments()
+        .into_iter()
+        .filter(|a| a.person_id != "p1")
+        .collect();
+
+    // p1 (currently unassigned) drops onto p2's occupied seat.
+    let (updated, outcome) = apply_seat_drop(&project, &assignments, "p1", 2, 0).unwrap();
+
+    assert_eq!(outcome, SeatDropOutcome::Swapped);
+    let p1 = updated.iter().find(|a| a.person_id == "p1").unwrap();
+    assert_eq!((p1.table_number, p1.seat_index), (2, 0));
+    assert!(!updated.iter().any(|a| a.person_id == "p2"));
+}
+
+#[test]
+fn unassigned_people_preserves_project_order() {
+    let people = drop_project().people;
+    let assignments: Vec<SeatingAssignment> = drop_assignments()
+        .into_iter()
+        .filter(|a| a.person_id != "p1" && a.person_id != "p4")
+        .collect();
+
+    let unassigned = unassigned_people(&people, &assignments);
+
+    assert_eq!(
+        unassigned.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+        vec!["p1", "p4"]
+    );
+}
+
+#[test]
 fn seating_csv_round_trip_is_sorted() {
     let shuffled = vec![
         SeatingAssignment {

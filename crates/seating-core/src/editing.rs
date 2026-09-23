@@ -7,7 +7,9 @@ use crate::models::{
     ClosenessRule, GroupId, Person, ProjectInput, SeatingAssignment, TableInstance,
     TableTypeConfig, TableTypeId, ValidationError, ValidationReport,
 };
-use crate::validation::{canonical_pair, generate_table_instances, validate_seating_solution};
+use crate::validation::{
+    canonical_pair, generate_table_instances, validate_partial_seating_solution,
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Describes an identifier that can be referenced by a closeness rule.
@@ -313,10 +315,16 @@ pub enum SeatDropOutcome {
 
 /// Apply a drag-and-drop of `person_id` onto (`target_table`, `target_seat`).
 ///
-/// An empty target seat results in a move; an occupied one results in a swap
-/// of the two guests' `(table, seat)` positions. The candidate result is
-/// validated via [`validate_seating_solution`], so locks, table_type
-/// compatibility, capacity, and seat range are all enforced by that call.
+/// `person_id` may currently be unassigned (present in
+/// [`ProjectInput::people`] but absent from `assignments`); dropping an
+/// unassigned guest onto an empty seat seats them there, and dropping them
+/// onto an occupied seat bumps that seat's occupant back to unassigned
+/// (rather than swapping the occupant into a seat the mover never had).
+/// Otherwise, an empty target seat results in a move; an occupied one
+/// results in a swap of the two guests' `(table, seat)` positions. The
+/// candidate result is validated via [`validate_partial_seating_solution`],
+/// so locks, table_type compatibility, capacity, and seat range are all
+/// enforced by that call, while any guest left unassigned is not an error.
 /// The input `assignments` is not mutated on failure.
 ///
 /// A no-op drop (dropping a guest onto their own current seat) always
@@ -329,15 +337,10 @@ pub fn apply_seat_drop(
     target_table: usize,
     target_seat: usize,
 ) -> Result<(Vec<SeatingAssignment>, SeatDropOutcome), ValidationReport> {
-    let Some(mover_index) = assignments.iter().position(|a| a.person_id == person_id) else {
-        return Err(ValidationReport {
-            errors: vec![ValidationError::MissingOrDuplicatePerson(
-                person_id.to_string(),
-            )],
-        });
-    };
+    let mover_index = assignments.iter().position(|a| a.person_id == person_id);
 
-    if assignments[mover_index].table_number == target_table
+    if let Some(mover_index) = mover_index
+        && assignments[mover_index].table_number == target_table
         && assignments[mover_index].seat_index == target_seat
     {
         return Ok((assignments.to_vec(), SeatDropOutcome::Moved));
@@ -347,38 +350,87 @@ pub fn apply_seat_drop(
     let target_table_type = instances
         .iter()
         .find(|instance| instance.number == target_table)
-        .map(|instance| instance.table_type.clone())
-        .unwrap_or_else(|| assignments[mover_index].table_type.clone());
+        .map(|instance| instance.table_type.clone());
 
     let occupant_index = assignments
         .iter()
         .position(|a| a.table_number == target_table && a.seat_index == target_seat);
 
     let mut updated = assignments.to_vec();
-    let outcome = if let Some(occupant_index) = occupant_index {
-        let mover_table = updated[mover_index].table_number;
-        let mover_seat = updated[mover_index].seat_index;
-        let mover_table_type = updated[mover_index].table_type.clone();
 
-        updated[mover_index].table_number = target_table;
-        updated[mover_index].seat_index = target_seat;
-        updated[mover_index].table_type = target_table_type;
+    let outcome = if let Some(mover_index) = mover_index {
+        let target_table_type =
+            target_table_type.unwrap_or_else(|| updated[mover_index].table_type.clone());
+        if let Some(occupant_index) = occupant_index {
+            let mover_table = updated[mover_index].table_number;
+            let mover_seat = updated[mover_index].seat_index;
+            let mover_table_type = updated[mover_index].table_type.clone();
 
-        updated[occupant_index].table_number = mover_table;
-        updated[occupant_index].seat_index = mover_seat;
-        updated[occupant_index].table_type = mover_table_type;
+            updated[mover_index].table_number = target_table;
+            updated[mover_index].seat_index = target_seat;
+            updated[mover_index].table_type = target_table_type;
 
-        SeatDropOutcome::Swapped
+            updated[occupant_index].table_number = mover_table;
+            updated[occupant_index].seat_index = mover_seat;
+            updated[occupant_index].table_type = mover_table_type;
+
+            SeatDropOutcome::Swapped
+        } else {
+            updated[mover_index].table_number = target_table;
+            updated[mover_index].seat_index = target_seat;
+            updated[mover_index].table_type = target_table_type;
+
+            SeatDropOutcome::Moved
+        }
     } else {
-        updated[mover_index].table_number = target_table;
-        updated[mover_index].seat_index = target_seat;
-        updated[mover_index].table_type = target_table_type;
-
-        SeatDropOutcome::Moved
+        // The dragged guest has no current seat; they must still be a known
+        // person for the drop to mean anything.
+        let Some(person) = project.people.iter().find(|p| p.id == person_id) else {
+            return Err(ValidationReport {
+                errors: vec![ValidationError::UnknownPersonInSeating(
+                    person_id.to_string(),
+                )],
+            });
+        };
+        let new_assignment = SeatingAssignment {
+            table_number: target_table,
+            table_type: target_table_type.unwrap_or_default(),
+            seat_index: target_seat,
+            person_id: person.id.clone(),
+            person_name: person.name.clone(),
+        };
+        // Dropping an unassigned guest onto an occupied seat bumps its
+        // current occupant to unassigned, rather than swapping them into the
+        // mover's (nonexistent) old seat.
+        if let Some(occupant_index) = occupant_index {
+            updated.remove(occupant_index);
+            updated.push(new_assignment);
+            SeatDropOutcome::Swapped
+        } else {
+            updated.push(new_assignment);
+            SeatDropOutcome::Moved
+        }
     };
 
-    validate_seating_solution(project, &updated)?;
+    validate_partial_seating_solution(project, &updated)?;
     Ok((updated, outcome))
+}
+
+// ── Unassigned guests ─────────────────────────────────────────────────────────
+
+/// Guests in `people` with no entry in `assignments`, in `people`'s order.
+pub fn unassigned_people<'a>(
+    people: &'a [Person],
+    assignments: &[SeatingAssignment],
+) -> Vec<&'a Person> {
+    let seated: HashSet<&str> = assignments
+        .iter()
+        .map(|assignment| assignment.person_id.as_str())
+        .collect();
+    people
+        .iter()
+        .filter(|person| !seated.contains(person.id.as_str()))
+        .collect()
 }
 
 // ── Table renumbering ─────────────────────────────────────────────────────────
