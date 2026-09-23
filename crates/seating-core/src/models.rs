@@ -492,4 +492,9 @@ pub enum ValidationError {
     /// somewhere still consistent with their lock.
     #[error("cannot displace locked guest '{0}' from their required seat")]
     LockedGuestDisplaced(String),
+    /// [`crate::editing::unassign_person`] refuses to send a `locked_table`/
+    /// `locked_seat` guest back to unassigned — a lock means the guest must
+    /// stay seated, not just that others may not displace them.
+    #[error("cannot unassign locked guest '{0}' from their required table")]
+    LockedGuestUnassigned(String),
 }
