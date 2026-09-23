@@ -299,7 +299,7 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
         // smallest center-to-center distance between two seats at this
         // table (or the layout-unit floor for a lone-seat table), scaled
         // by the label font's own zoom ratio.
-        let spacing = min_seat_spacing(&table.seats).unwrap_or(f32::INFINITY);
+        let spacing = min_seat_spacing(&table.seats).unwrap_or(NAME_WRAP_MIN_LAYOUT);
         let name_wrap_width = spacing.max(NAME_WRAP_MIN_LAYOUT) * name_font_scale;
         let surface_center = surface_center_screen(&table.surface, transform);
 
@@ -679,21 +679,30 @@ fn surface_center_screen(surface: &TableSurface, transform: Transform) -> Pos2 {
 /// center. Radiating labels outward (rather than always dropping them
 /// straight down) keeps a ring table's labels spread apart like its seats,
 /// and keeps a semicircle's top-row labels off the table surface.
+///
+/// The offset moves along the dominant axis of that direction only (not
+/// diagonally): a diagonal seat still gets the full `radius + gap` of
+/// clearance on the axis that matters, instead of splitting it between both
+/// axes and landing the label closer to the seat circle (and its lock icon)
+/// than intended.
 fn label_anchor(seat_center: Pos2, surface_center: Pos2, radius: f32, gap: f32) -> (Pos2, Align2) {
     let dir = (seat_center - surface_center).normalized();
-    let anchor = seat_center + dir * (radius + gap);
-    let align = if dir.x.abs() > dir.y.abs() {
-        if dir.x >= 0.0 {
+    let offset = radius + gap;
+    if dir.x.abs() > dir.y.abs() {
+        let align = if dir.x >= 0.0 {
             Align2::LEFT_CENTER
         } else {
             Align2::RIGHT_CENTER
-        }
-    } else if dir.y >= 0.0 {
-        Align2::CENTER_TOP
+        };
+        (seat_center + Vec2::new(dir.x.signum() * offset, 0.0), align)
     } else {
-        Align2::CENTER_BOTTOM
-    };
-    (anchor, align)
+        let align = if dir.y >= 0.0 {
+            Align2::CENTER_TOP
+        } else {
+            Align2::CENTER_BOTTOM
+        };
+        (seat_center + Vec2::new(0.0, dir.y.signum() * offset), align)
+    }
 }
 
 /// Alpha multiplier for a seat's fill/text while it's mid-drag (dimmed) vs.

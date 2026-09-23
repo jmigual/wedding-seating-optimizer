@@ -704,9 +704,7 @@ fn spread_evenly(seat_count: usize) -> Vec<usize> {
 
 /// Smallest center-to-center distance between any two seats at a table,
 /// used as a guest-label width budget so labels don't overlap their
-/// neighbors: SVG's [`fit_label`] truncation budget and the GUI's egui wrap
-/// width both derive from it. `None` when there are fewer than two seats to
-/// compare.
+/// neighbors. `None` when there are fewer than two seats to compare.
 pub fn min_seat_spacing(seats: &[LayoutSeat]) -> Option<f32> {
     let mut min_dist = f32::INFINITY;
     for i in 0..seats.len() {
