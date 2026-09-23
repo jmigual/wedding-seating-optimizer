@@ -632,8 +632,9 @@ impl HeuristicOptimizer {
     /// Late acceptance hill climbing over `positions` (person-indexed
     /// `(table_number, seat_index)`), returning the best state visited.
     ///
-    /// Each step proposes one move — pair swap, join, whole-table swap, or
-    /// table split (see [`SearchState`]) — skips it if structurally illegal, and
+    /// Each step proposes one move — pair swap, join, whole-table swap,
+    /// cluster exchange, or table split (see [`SearchState`]) — skips it if
+    /// structurally illegal, and
     /// otherwise accepts it when the new score is at least the current one
     /// or at least the score recorded [`LAHC_HISTORY_LEN`] steps earlier.
     /// Every candidate is legal by construction (locks, `table_type`,
@@ -873,8 +874,19 @@ impl<'a> SearchState<'a> {
     /// `q`'s (different) table. The two clusters swap tables: each first
     /// takes the seats the other vacated, then any remaining free seats in
     /// ascending order, if it is the larger cluster. Rejected if either
-    /// destination table lacks room, or if `may_sit_at` disallows any
-    /// member of either cluster at the other's table (locks, `table_type`).
+    /// destination table lacks room, if `may_sit_at` disallows any member of
+    /// either cluster at the other's table (locks, `table_type`), or if the
+    /// exchange would be a pure relabel (both clusters are a whole,
+    /// same-type table — `propose_table_swap` already covers that case with
+    /// no scoring gain).
+    ///
+    /// Cluster membership is entirely group-based, which is both the
+    /// mechanism and its limitation: a group shared by everyone at a table
+    /// makes the "cluster" the whole table (fine — that degenerates to a
+    /// whole-table exchange), while a single locked-table or locked-seat
+    /// guest sharing a group with `p` or `q` makes `may_sit_at` reject the
+    /// whole cluster, blocking the move even though the other members could
+    /// otherwise move freely.
     fn propose_cluster_exchange(&mut self, rng: &mut StdRng, moves: &mut Vec<Move>) -> bool {
         let n = self.positions.len();
         let p = rng.random_range(0..n);
@@ -885,10 +897,10 @@ impl<'a> SearchState<'a> {
             return false;
         }
 
-        // A plain `&[Person]` local (rather than calling `self.shares_group`
-        // from the closures below) so the compiler sees these filters borrow
-        // only `people`, not all of `self` — which would otherwise conflict
-        // with the disjoint `self.cluster_a`/`self.cluster_b` mutation.
+        // A plain `&[Person]` local (rather than a `&self` method) so the
+        // compiler sees the filters below borrow only `people`, not all of
+        // `self` — which would otherwise conflict with the disjoint
+        // `self.cluster_a`/`self.cluster_b` mutation in the same statement.
         let people = self.people;
         let shares_group = |a: usize, b: usize| {
             people[a]
@@ -917,6 +929,16 @@ impl<'a> SearchState<'a> {
 
         let occ_a = self.seats[table_a - 1].iter().flatten().count();
         let occ_b = self.seats[table_b - 1].iter().flatten().count();
+        // Same-type tables are score-identical (same shape/max/min/recommended),
+        // so exchanging their whole occupant sets is a pure relabel with no
+        // scoring gain — `propose_table_swap` already refuses this for the
+        // same reason.
+        if k1 == occ_a
+            && k2 == occ_b
+            && self.instances[table_a - 1].table_type == self.instances[table_b - 1].table_type
+        {
+            return false;
+        }
         if occ_a - k1 + k2 > self.instances[table_a - 1].max_people
             || occ_b - k2 + k1 > self.instances[table_b - 1].max_people
         {
