@@ -10,6 +10,11 @@ use crate::validation::{
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+/// Height added to a table card in [`build_editor_layout`] to fit the
+/// [`LayoutTable::empty_seats`] row below the table area. The strict
+/// [`build_layout`] never adds this since it never populates `empty_seats`.
+const EMPTY_SEAT_ROW_HEIGHT: f32 = 40.0;
+
 /// Geometry and spacing options for layout/rendering.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderOptions {
@@ -99,8 +104,17 @@ pub struct LayoutTable {
     pub width: f32,
     /// Card height.
     pub height: f32,
-    /// Concrete seat positions around the table, one per capacity slot.
+    /// Concrete seat positions for the table's OCCUPIED seats only, spaced
+    /// evenly by rank (position among occupants, `0..k`) rather than by raw
+    /// capacity slot — an empty seat never leaves a visual gap. `seat_index`
+    /// on each entry is still the real seat index, so drops keep identifying
+    /// the correct seat.
     pub seats: Vec<LayoutSeat>,
+    /// Markers for the table's free (unoccupied) seats, populated only by
+    /// [`build_editor_layout`] and laid out in a row below the table area
+    /// (the card is one row taller to fit it); always empty for the strict
+    /// [`build_layout`] used by exports.
+    pub empty_seats: Vec<LayoutSeat>,
     /// Geometry of the table surface itself, computed from the same center
     /// used to place `seats` so renderers never re-derive divergent geometry.
     pub surface: TableSurface,
@@ -127,8 +141,9 @@ pub enum TableSurface {
 
 /// One rendered seat marker within a table layout.
 ///
-/// Every capacity slot for the table is represented, not just occupied ones,
-/// so the rendered geometry always matches the table's real seat count.
+/// Used for both [`LayoutTable::seats`] (occupied seats, `person_name` always
+/// `Some`) and [`LayoutTable::empty_seats`] (free seats, `person_name` always
+/// `None`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutSeat {
     /// Zero-based seat index.
@@ -247,13 +262,21 @@ fn build_layout_impl(
         })
         .collect::<Vec<_>>();
     let columns = columns_for(used_instances.len());
+    // Editor tables reserve one extra row of height for `empty_seats`, which
+    // only the editor layout ever populates; the strict export layout keeps
+    // the plain card height.
+    let card_height = if require_all_people {
+        options.table_height
+    } else {
+        options.table_height + EMPTY_SEAT_ROW_HEIGHT
+    };
     let mut tables = Vec::new();
 
     for (index, table) in used_instances.iter().enumerate() {
         let column = index % columns;
         let row = index / columns;
         let x = options.margin + column as f32 * (options.table_width + options.column_gap);
-        let y = options.margin + row as f32 * (options.table_height + options.row_gap);
+        let y = options.margin + row as f32 * (card_height + options.row_gap);
         let config = &project.table_types[&table.table_type];
         let table_assignments = assignments_by_table
             .get(&table.number)
@@ -268,6 +291,18 @@ fn build_layout_impl(
             &options,
             table_assignments,
         );
+        let empty_seats = if require_all_people {
+            Vec::new()
+        } else {
+            let occupied: HashSet<usize> = table_assignments
+                .iter()
+                .map(|assignment| assignment.seat_index)
+                .collect();
+            let free_seats: Vec<usize> = (0..table.max_people)
+                .filter(|seat| !occupied.contains(seat))
+                .collect();
+            build_empty_seat_row(&free_seats, x, y, &options)
+        };
         let surface = build_surface(&table.shape, x, y, &options);
         tables.push(LayoutTable {
             table_number: table.number,
@@ -276,8 +311,9 @@ fn build_layout_impl(
             x,
             y,
             width: options.table_width,
-            height: options.table_height,
+            height: card_height,
             seats,
+            empty_seats,
             surface,
         });
     }
@@ -298,7 +334,7 @@ fn build_layout_impl(
         options.margin * 2.0
     } else {
         options.margin * 2.0
-            + rows as f32 * options.table_height
+            + rows as f32 * card_height
             + rows.saturating_sub(1) as f32 * options.row_gap
     };
 
@@ -615,7 +651,7 @@ fn build_seat_positions(
     table_assignments: &[&SeatingAssignment],
 ) -> Vec<LayoutSeat> {
     match shape {
-        TableShape::Round => build_round_seats(max_people, table_assignments, x, y, options),
+        TableShape::Round => build_round_seats(table_assignments, x, y, options),
         TableShape::Rectangular | TableShape::Square => build_rectangular_seats(
             max_people,
             people_per_side.unwrap_or(&[]),
@@ -624,83 +660,73 @@ fn build_seat_positions(
             y,
             options,
         ),
-        TableShape::Semicircle => {
-            build_semicircle_seats(max_people, table_assignments, x, y, options)
-        }
+        TableShape::Semicircle => build_semicircle_seats(table_assignments, x, y, options),
     }
 }
 
-/// Look up the assignment occupying `seat_index`, if any. `table_assignments`
-/// is sorted by `seat_index` (see [`build_layout`]).
-fn occupant_at<'a>(
-    table_assignments: &[&'a SeatingAssignment],
-    seat_index: usize,
-) -> Option<&'a SeatingAssignment> {
-    table_assignments
-        .binary_search_by_key(&seat_index, |assignment| assignment.seat_index)
-        .ok()
-        .map(|position| table_assignments[position])
-}
-
-/// Places one seat per capacity slot evenly around a ring, regardless of how
-/// many are actually occupied, so the rendered angle always matches
-/// `TAU * seat_index / max_people` — the same geometry `scoring::circular_distance`
-/// assumes.
+/// Places one seat per OCCUPIED seat, evenly spaced around the ring by rank
+/// (position among occupants, `0..k`) rather than by raw seat index — an
+/// empty seat between two guests never opens a visual (or scoring) gap. The
+/// same rank-based angle `scoring::circular_distance` assumes.
+/// `table_assignments` is sorted by `seat_index` (see [`build_layout`]).
 fn build_round_seats(
-    max_people: usize,
     table_assignments: &[&SeatingAssignment],
     x: f32,
     y: f32,
     options: &RenderOptions,
 ) -> Vec<LayoutSeat> {
     let (center_x, center_y, radius) = round_table_metrics(x, y, options);
-    let seat_count = max_people.max(1);
-    (0..max_people)
-        .map(|seat_index| {
-            let angle = std::f32::consts::TAU * seat_index as f32 / seat_count as f32
-                - std::f32::consts::FRAC_PI_2;
+    let k = table_assignments.len();
+    table_assignments
+        .iter()
+        .enumerate()
+        .map(|(rank, assignment)| {
+            let angle =
+                std::f32::consts::TAU * rank as f32 / k as f32 - std::f32::consts::FRAC_PI_2;
             LayoutSeat {
-                seat_index,
+                seat_index: assignment.seat_index,
                 x: center_x + radius * angle.cos(),
                 y: center_y + radius * angle.sin(),
-                person_name: occupant_at(table_assignments, seat_index)
-                    .map(|assignment| assignment.person_name.clone()),
+                person_name: Some(assignment.person_name.clone()),
             }
         })
         .collect()
 }
 
-/// Places one seat per capacity slot along the arc of a semicircle table,
-/// on the ring [`semicircle_table_metrics`] computes. Seats span angles
+/// Places one seat per OCCUPIED seat along the arc of a semicircle table,
+/// spaced by rank the same way [`build_round_seats`] is. Seats span angles
 /// `PI..2*PI` (the upper half of the ring in screen space, where `y`
 /// increases downward), so `x` increases and `y` stays above the flat edge
 /// (`y < cy`) for every seat — no wrap-around, unlike a round table.
 fn build_semicircle_seats(
-    max_people: usize,
     table_assignments: &[&SeatingAssignment],
     x: f32,
     y: f32,
     options: &RenderOptions,
 ) -> Vec<LayoutSeat> {
     let (center_x, center_y, radius) = semicircle_table_metrics(x, y, options);
-    let seat_count = max_people.max(1);
-    (0..max_people)
-        .map(|seat_index| {
-            let angle = std::f32::consts::PI
-                + std::f32::consts::PI * (seat_index as f32 + 0.5) / seat_count as f32;
+    let k = table_assignments.len();
+    table_assignments
+        .iter()
+        .enumerate()
+        .map(|(rank, assignment)| {
+            let angle =
+                std::f32::consts::PI + std::f32::consts::PI * (rank as f32 + 0.5) / k as f32;
             LayoutSeat {
-                seat_index,
+                seat_index: assignment.seat_index,
                 x: center_x + radius * angle.cos(),
                 y: center_y + radius * angle.sin(),
-                person_name: occupant_at(table_assignments, seat_index)
-                    .map(|assignment| assignment.person_name.clone()),
+                person_name: Some(assignment.person_name.clone()),
             }
         })
         .collect()
 }
 
-/// Places one seat per capacity slot around the table perimeter, regardless
-/// of how many are actually occupied.
+/// Places one seat per OCCUPIED seat around the table perimeter. The seat
+/// counts per side are apportioned from `people_per_side` (or an even spread)
+/// down to the number actually occupied — see [`apportion`] — so a
+/// half-empty table still spaces its occupants evenly along each side
+/// instead of leaving capacity-sized gaps.
 fn build_rectangular_seats(
     max_people: usize,
     people_per_side: &[usize],
@@ -716,12 +742,13 @@ fn build_rectangular_seats(
     let right = x + options.table_width - 52.0;
     let top = y + 68.0;
     let bottom = y + options.table_height - 58.0;
-    let counts =
+    let base_counts =
         if people_per_side.len() == 4 && people_per_side.iter().sum::<usize>() == max_people {
             people_per_side.to_vec()
         } else {
             spread_evenly(max_people)
         };
+    let counts = apportion(&base_counts, table_assignments.len());
 
     points.extend(line_points(counts[0], left + 14.0, right - 14.0, top, top));
     points.extend(line_points(
@@ -748,14 +775,66 @@ fn build_rectangular_seats(
 
     points
         .into_iter()
-        .take(max_people)
-        .enumerate()
-        .map(|(seat_index, (seat_x, seat_y))| LayoutSeat {
+        .zip(table_assignments.iter())
+        .map(|((seat_x, seat_y), assignment)| LayoutSeat {
+            seat_index: assignment.seat_index,
+            x: seat_x,
+            y: seat_y,
+            person_name: Some(assignment.person_name.clone()),
+        })
+        .collect()
+}
+
+/// Apportion `total` items across `weights.len()` buckets, proportionally to
+/// `weights`, via the largest-remainder method: each bucket gets
+/// `floor(weight * total / sum(weights))`, then the leftover units go to the
+/// buckets with the largest fractional remainder, lower-index buckets
+/// breaking ties. Used to shrink a table's per-side seat counts down to the
+/// number actually occupied while keeping the same side proportions.
+fn apportion(weights: &[usize], total: usize) -> Vec<usize> {
+    let sum_weights: usize = weights.iter().sum();
+    if sum_weights == 0 {
+        return vec![0; weights.len()];
+    }
+    let mut counts = Vec::with_capacity(weights.len());
+    let mut remainders = Vec::with_capacity(weights.len());
+    for &weight in weights {
+        let product = weight * total;
+        counts.push(product / sum_weights);
+        remainders.push(product % sum_weights);
+    }
+    let mut remaining = total - counts.iter().sum::<usize>();
+    let mut order: Vec<usize> = (0..weights.len()).collect();
+    order.sort_by(|&a, &b| remainders[b].cmp(&remainders[a]).then(a.cmp(&b)));
+    for index in order {
+        if remaining == 0 {
+            break;
+        }
+        counts[index] += 1;
+        remaining -= 1;
+    }
+    counts
+}
+
+/// Lays out `free_seat_indices` as one evenly-spaced row of markers below the
+/// table area, inside the card's reserved [`EMPTY_SEAT_ROW_HEIGHT`] strip.
+fn build_empty_seat_row(
+    free_seat_indices: &[usize],
+    x: f32,
+    y: f32,
+    options: &RenderOptions,
+) -> Vec<LayoutSeat> {
+    let row_y = y + options.table_height + EMPTY_SEAT_ROW_HEIGHT / 2.0;
+    let left = x + 24.0;
+    let right = x + options.table_width - 24.0;
+    line_points(free_seat_indices.len(), left, right, row_y, row_y)
+        .into_iter()
+        .zip(free_seat_indices.iter())
+        .map(|((seat_x, seat_y), &seat_index)| LayoutSeat {
             seat_index,
             x: seat_x,
             y: seat_y,
-            person_name: occupant_at(table_assignments, seat_index)
-                .map(|assignment| assignment.person_name.clone()),
+            person_name: None,
         })
         .collect()
 }
@@ -868,7 +947,15 @@ fn shape_label(shape: &TableShape) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::wrap_label;
+    use super::{apportion, wrap_label};
+
+    /// `apportion` is the largest-remainder method: each side gets its exact
+    /// proportional share (5|5|0|0 scaled to 6 total is exactly 3|3|0|0 with
+    /// no remainder to distribute).
+    #[test]
+    fn rectangular_layout_apportions_occupied_seats_by_side() {
+        assert_eq!(apportion(&[5, 5, 0, 0], 6), vec![3, 3, 0, 0]);
+    }
 
     /// Every line `wrap_label` returns must fit the same width estimate the
     /// budget was computed with, and rejoining the lines (ignoring the

@@ -51,7 +51,7 @@ pub mod validation;
 // ── Public re-exports ─────────────────────────────────────────────────────────
 
 pub use editing::{
-    ReferenceIdOption, SeatDropOutcome, apply_seat_drop, build_table_type_map,
+    ReferenceIdOption, SeatDropOutcome, apply_seat_append, apply_seat_drop, build_table_type_map,
     closeness_display_order, collect_group_ids, compact_table_numbers, ensure_spare_tables,
     merge_closeness_rules, merge_people, merge_table_types, move_table_number, parse_f64_value,
     parse_optional_usize_value, parse_people_per_side, parse_required_usize_value,
