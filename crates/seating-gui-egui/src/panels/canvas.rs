@@ -6,8 +6,8 @@
 
 use crate::state::{ClosenessRow, MessageKind, SharedState};
 use eframe::egui::{
-    self, Align2, Color32, FontId, Galley, Id, Pos2, Rect, ScrollArea, Sense, Stroke, StrokeKind,
-    UiBuilder, Vec2,
+    self, Align2, Color32, FontId, Galley, Id, LayerId, Order, Pos2, Rect, ScrollArea, Sense,
+    Stroke, StrokeKind, UiBuilder, Vec2,
 };
 use seating_core::{
     COLOR_BACKGROUND, COLOR_CARD, COLOR_GUEST_TEXT, COLOR_MUTED, COLOR_SEAT_FILL,
@@ -112,11 +112,14 @@ pub(crate) fn show(shared: &mut SharedState, state: &mut CanvasState, ui: &mut e
     toolbar(shared, state, ui);
     ui.separator();
 
-    // Also gate on `generated_table_numbers`: a brand-new project with no
-    // table types yet still builds a trivial empty layout (nothing to
-    // render), and should keep showing `empty_state`'s hints rather than a
-    // blank canvas.
-    if shared.layout.is_some() && !shared.generated_table_numbers.is_empty() {
+    // Also gate on `people`/`generated_table_numbers`: a brand-new project
+    // with no guests or table types yet still builds a trivial empty
+    // layout (nothing to render), and should keep showing `empty_state`'s
+    // hints rather than a blank canvas.
+    if shared.layout.is_some()
+        && !shared.people.is_empty()
+        && !shared.generated_table_numbers.is_empty()
+    {
         canvas_area(shared, state, ui);
     } else {
         empty_state(shared, ui);
@@ -197,8 +200,10 @@ fn toolbar(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui::Ui)
     });
 }
 
-/// Friendly hints distinguishing "data isn't valid yet" from "valid but
-/// nothing optimized yet" from "nothing entered yet".
+/// Friendly hints distinguishing "data isn't valid yet" from "nothing
+/// entered yet" from a genuine render failure. Once there are guests and at
+/// least one table type, `canvas_area` takes over even before Optimize has
+/// run — see its own "Click Optimize" hint drawn on the canvas.
 fn empty_state(shared: &SharedState, ui: &mut egui::Ui) {
     ui.vertical_centered(|ui| {
         ui.add_space(48.0);
@@ -211,9 +216,6 @@ fn empty_state(shared: &SharedState, ui: &mut egui::Ui) {
         } else if shared.people.is_empty() || shared.generated_table_numbers.is_empty() {
             ui.heading("Nothing to seat yet");
             ui.label("Add guests and at least one table type, then click Optimize.");
-        } else if shared.assignments.is_empty() {
-            ui.heading("No seating plan yet");
-            ui.label("Click Optimize in the top bar to generate a seating plan.");
         } else {
             ui.heading("Seating plan unavailable");
             ui.label(shared.message.clone());
@@ -235,15 +237,29 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
     // (screen space, unaffected by zoom/pan); its height is carved out of
     // the canvas's own drawing area up front so tables never end up hidden
     // underneath it, and collapses to zero once everyone is seated.
+    // Keep the band visible while a drag is in flight even if nobody is
+    // currently unassigned: it's the only drop target for unassigning a
+    // seated guest, including the very last one.
     let unassigned = unassigned_people(&shared.people, &shared.assignments);
-    let band_height = if unassigned.is_empty() {
+    let band_height = if unassigned.is_empty() && state.drag.is_none() {
         0.0
     } else {
         UNASSIGNED_BAND_HEIGHT
     };
+    // Also reserve the vertical spacing egui inserts between the two
+    // allocations below, so the band's own bottom border isn't pushed past
+    // the visible panel bounds.
+    let band_spacing = if band_height > 0.0 {
+        ui.spacing().item_spacing.y
+    } else {
+        0.0
+    };
 
     let desired_size = ui.available_size();
-    let canvas_size = Vec2::new(desired_size.x, (desired_size.y - band_height).max(0.0));
+    let canvas_size = Vec2::new(
+        desired_size.x,
+        (desired_size.y - band_height - band_spacing).max(0.0),
+    );
     let (rect, _) = ui.allocate_exact_size(canvas_size, Sense::hover());
     let band_rect = if band_height > 0.0 {
         Some(
@@ -284,6 +300,19 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
 
     painter.rect_filled(rect, 0.0, rgb(COLOR_BACKGROUND));
 
+    // Tables render as soon as guests + a table type exist, even before the
+    // first Optimize run — surface the same "nothing seated yet" hint
+    // `empty_state` used to show instead, now as an overlay on the canvas.
+    if shared.assignments.is_empty() {
+        painter.text(
+            Pos2::new(rect.center().x, rect.top() + 16.0),
+            Align2::CENTER_TOP,
+            "No seating plan yet — click Optimize in the top bar to generate one.",
+            FontId::proportional(14.0),
+            rgb(COLOR_MUTED),
+        );
+    }
+
     let transform = Transform {
         origin: rect.min,
         pan: state.pan,
@@ -299,9 +328,13 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
         .collect();
 
     let pointer_pos = ui.ctx().input(|i| i.pointer.interact_pos());
+    // `find_seat_under` has no notion of clipping and will happily match a
+    // table clipped out of view below the band, so it must never see a
+    // pointer that isn't actually over the visible canvas.
+    let canvas_pointer = pointer_pos.filter(|p| rect.contains(*p));
     let hit_radius = (seat_radius_base + 10.0) * state.zoom;
     let drop_preview = state.drag.as_ref().and_then(|drag| {
-        let pointer = pointer_pos?;
+        let pointer = canvas_pointer?;
         let (table_number, seat_index) = find_seat_under(&layout, transform, pointer, hit_radius)?;
         let ok = apply_seat_drop(
             &drag.project,
@@ -346,12 +379,18 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
             transform.to_screen((table.x, table.y)),
             transform.to_screen((table.x + table.width, table.y + table.height)),
         );
-        let table_id = Id::new(("table_surface", table.table_number));
-        let table_response = ui.interact(card_rect, table_id, Sense::click());
-        if state.drag.is_none() {
-            table_response.context_menu(|ui| {
-                table_swap_menu(ui, &layout, table.table_number, &mut pending_swap);
-            });
+        // Intersect with `rect` before interacting: a table clipped out of
+        // view under the band still occupies this screen-space rect, and
+        // `ui.interact` isn't clipped to the painter's clip rect on its own.
+        let interactive_card_rect = card_rect.intersect(rect);
+        if interactive_card_rect.is_positive() {
+            let table_id = Id::new(("table_surface", table.table_number));
+            let table_response = ui.interact(interactive_card_rect, table_id, Sense::click());
+            if state.drag.is_none() {
+                table_response.context_menu(|ui| {
+                    table_swap_menu(ui, &layout, table.table_number, &mut pending_swap);
+                });
+            }
         }
 
         for seat in &table.seats {
@@ -404,67 +443,75 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
             }
 
             let hit_rect = Rect::from_center_size(center, Vec2::splat((radius * 2.0).max(20.0)));
-            if draggable {
-                let seat_id = Id::new(("seat_drag", table.table_number, seat.seat_index));
-                let mut seat_response = ui.interact(hit_rect, seat_id, Sense::click_and_drag());
+            // Intersect with `rect` before interacting: a seat clipped out
+            // of view under the band still occupies this screen-space rect,
+            // and `ui.interact` isn't clipped to the painter's clip rect on
+            // its own.
+            let interactive_hit_rect = hit_rect.intersect(rect);
+            if interactive_hit_rect.is_positive() {
+                if draggable {
+                    let seat_id = Id::new(("seat_drag", table.table_number, seat.seat_index));
+                    let mut seat_response =
+                        ui.interact(interactive_hit_rect, seat_id, Sense::click_and_drag());
 
-                if state.drag.is_none()
-                    && let Some(person) = person
-                {
-                    seat_response =
-                        seat_response.on_hover_ui(|ui| person_tooltip(ui, person, shared));
-                    seat_response.context_menu(|ui| {
-                        seat_lock_menu(
-                            ui,
-                            person,
-                            table.table_number,
-                            seat.seat_index,
-                            &mut pending_lock,
-                        );
-                    });
-                }
-                if seat_response.drag_started()
-                    && state.drag.is_none()
-                    && let (Some(assignment), Some(person)) = (
-                        assignment_by_seat.get(&(table.table_number, seat.seat_index)),
-                        person,
-                    )
-                    && let Ok(project) = shared.materialize_project()
-                {
-                    state.drag = Some(DragState {
-                        person_id: assignment.person_id.clone(),
-                        person_name: person.name.clone(),
-                        project,
-                        allowed_table: person.locked_table,
-                    });
-                }
-                if seat_response.drag_stopped() {
-                    if let Some(target) = pointer_pos.and_then(|pointer| {
-                        find_seat_under(&layout, transform, pointer, hit_radius)
-                    }) {
-                        pending_drop = Some(target);
-                    } else if pointer_pos.is_some_and(|pointer| {
-                        band_rect.is_some_and(|band_rect| band_rect.contains(pointer))
-                    }) {
-                        pending_unassign = true;
-                    } else {
-                        drag_cancelled = true;
+                    if state.drag.is_none()
+                        && let Some(person) = person
+                    {
+                        seat_response =
+                            seat_response.on_hover_ui(|ui| person_tooltip(ui, person, shared));
+                        seat_response.context_menu(|ui| {
+                            seat_lock_menu(
+                                ui,
+                                person,
+                                table.table_number,
+                                seat.seat_index,
+                                &mut pending_lock,
+                            );
+                        });
                     }
-                }
-            } else if let Some(person) = person {
-                let seat_id = Id::new(("seat_hover", table.table_number, seat.seat_index));
-                let seat_response = ui.interact(hit_rect, seat_id, Sense::click());
-                if state.drag.is_none() {
-                    seat_response.context_menu(|ui| {
-                        seat_lock_menu(
-                            ui,
+                    if seat_response.drag_started()
+                        && state.drag.is_none()
+                        && let (Some(assignment), Some(person)) = (
+                            assignment_by_seat.get(&(table.table_number, seat.seat_index)),
                             person,
-                            table.table_number,
-                            seat.seat_index,
-                            &mut pending_lock,
-                        );
-                    });
-                    seat_response.on_hover_ui(|ui| person_tooltip(ui, person, shared));
+                        )
+                        && let Ok(project) = shared.materialize_project()
+                    {
+                        state.drag = Some(DragState {
+                            person_id: assignment.person_id.clone(),
+                            person_name: person.name.clone(),
+                            project,
+                            allowed_table: person.locked_table,
+                        });
+                    }
+                    if seat_response.drag_stopped() {
+                        if let Some(target) = canvas_pointer.and_then(|pointer| {
+                            find_seat_under(&layout, transform, pointer, hit_radius)
+                        }) {
+                            pending_drop = Some(target);
+                        } else if pointer_pos.is_some_and(|pointer| {
+                            band_rect.is_some_and(|band_rect| band_rect.contains(pointer))
+                        }) {
+                            pending_unassign = true;
+                        } else {
+                            drag_cancelled = true;
+                        }
+                    }
+                } else if let Some(person) = person {
+                    let seat_id = Id::new(("seat_hover", table.table_number, seat.seat_index));
+                    let seat_response = ui.interact(interactive_hit_rect, seat_id, Sense::click());
+                    if state.drag.is_none() {
+                        seat_response.context_menu(|ui| {
+                            seat_lock_menu(
+                                ui,
+                                person,
+                                table.table_number,
+                                seat.seat_index,
+                                &mut pending_lock,
+                            );
+                        });
+                        seat_response.on_hover_ui(|ui| person_tooltip(ui, person, shared));
+                    }
                 }
             }
         }
@@ -473,10 +520,6 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
     for (anchor, align, galley, color) in pending_labels {
         let pos = align.anchor_size(anchor, galley.size()).min;
         painter.galley(pos, galley, color);
-    }
-
-    if let (Some(drag), Some(pointer)) = (&state.drag, pointer_pos) {
-        draw_ghost(&painter, pointer, &drag.person_name);
     }
 
     draw_toast(&painter, rect, state, ui.ctx());
@@ -490,11 +533,22 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
             &layout,
             transform,
             pointer_pos,
+            canvas_pointer,
             hit_radius,
             &unassigned,
         );
         pending_drop = pending_drop.or(chip_drop);
         drag_cancelled = drag_cancelled || chip_cancelled;
+    }
+
+    // Drawn last, on an unclipped top layer: the ghost must stay visible
+    // even while the pointer is over the band, which `painter` (clipped to
+    // the canvas's own reduced `rect`) can't paint into.
+    if let (Some(drag), Some(pointer)) = (&state.drag, pointer_pos) {
+        let ghost_painter = ui
+            .ctx()
+            .layer_painter(LayerId::new(Order::Tooltip, Id::new("drag_ghost")));
+        draw_ghost(&ghost_painter, pointer, &drag.person_name);
     }
 
     // Every borrow of `shared` taken above (person_by_id, assignment_by_seat,
@@ -970,7 +1024,9 @@ fn draw_seat(
 ///
 /// Returns the seat a released chip landed on (if any) and whether a chip
 /// drag ended outside both a seat and the band (a cancel, same as a seat
-/// drag released outside every seat).
+/// drag released outside every seat). A chip released back over the band
+/// itself is neither: it's a silent no-op (the guest was already
+/// unassigned).
 #[allow(clippy::too_many_arguments)]
 fn draw_unassigned_band(
     ui: &mut egui::Ui,
@@ -980,6 +1036,7 @@ fn draw_unassigned_band(
     layout: &SeatingLayout,
     transform: Transform,
     pointer_pos: Option<Pos2>,
+    canvas_pointer: Option<Pos2>,
     hit_radius: f32,
     unassigned: &[&Person],
 ) -> (Option<(usize, usize)>, bool) {
@@ -1014,10 +1071,16 @@ fn draw_unassigned_band(
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     for person in unassigned {
-                        let galley = ui.painter().layout_no_wrap(
+                        // Only kicks in for a pathologically long name: wraps
+                        // it across lines rather than clipping it, instead
+                        // of the fixed-width `layout_no_wrap` most names fit
+                        // on one line anyway.
+                        let wrap_width = (ui.available_width() - 16.0).max(1.0);
+                        let galley = ui.painter().layout(
                             person.name.clone(),
                             FontId::proportional(CHIP_FONT),
                             rgb(COLOR_BACKGROUND),
+                            wrap_width,
                         );
                         let chip_size = galley.size() + Vec2::new(16.0, 10.0);
                         let (chip_rect, response) =
@@ -1051,11 +1114,18 @@ fn draw_unassigned_band(
                             });
                         }
                         if response.drag_stopped() {
-                            match pointer_pos.and_then(|pointer| {
+                            if let Some(target) = canvas_pointer.and_then(|pointer| {
                                 find_seat_under(layout, transform, pointer, hit_radius)
                             }) {
-                                Some(target) => pending_drop = Some(target),
-                                None => drag_cancelled = true,
+                                pending_drop = Some(target);
+                            } else if pointer_pos.is_some_and(|pointer| band_rect.contains(pointer))
+                            {
+                                // Released back over the band: the guest
+                                // was already unassigned, so this is a
+                                // silent no-op, not a cancel.
+                                state.drag = None;
+                            } else {
+                                drag_cancelled = true;
                             }
                         }
                         if state.drag.is_none() {
