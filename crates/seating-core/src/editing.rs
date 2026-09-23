@@ -447,6 +447,30 @@ pub fn unassigned_people<'a>(
         .collect()
 }
 
+/// Remove `person_id`'s seat assignment, sending them back to unassigned.
+///
+/// Refuses to unassign a `locked_table`/`locked_seat` guest — dropped with
+/// [`ValidationError::LockedGuestDisplaced`], the same way [`apply_seat_drop`]
+/// refuses to bump a locked occupant off their seat. A no-op (the person is
+/// already unassigned) succeeds and returns `assignments` unchanged.
+pub fn unassign_person(
+    project: &ProjectInput,
+    assignments: &[SeatingAssignment],
+    person_id: &str,
+) -> Result<Vec<SeatingAssignment>, ValidationReport> {
+    let is_locked = project.people.iter().any(|person| {
+        person.id == person_id && (person.locked_table.is_some() || person.locked_seat.is_some())
+    });
+    if is_locked {
+        return Err(ValidationReport {
+            errors: vec![ValidationError::LockedGuestDisplaced(person_id.to_string())],
+        });
+    }
+    let mut updated = assignments.to_vec();
+    updated.retain(|assignment| assignment.person_id != person_id);
+    Ok(updated)
+}
+
 // ── Table renumbering ─────────────────────────────────────────────────────────
 
 /// Map old table numbers to their new numbers after [`generate_table_instances`]

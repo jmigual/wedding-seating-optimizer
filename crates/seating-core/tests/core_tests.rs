@@ -3184,6 +3184,44 @@ fn unassigned_people_preserves_project_order() {
 }
 
 #[test]
+fn unassign_person_removes_their_assignment() {
+    let project = drop_project();
+    let assignments = drop_assignments();
+
+    let updated = unassign_person(&project, &assignments, "p1").unwrap();
+
+    assert!(!updated.iter().any(|a| a.person_id == "p1"));
+    assert_eq!(updated.len(), assignments.len() - 1);
+}
+
+#[test]
+fn unassign_person_refuses_a_locked_guest() {
+    let project = drop_project();
+    let assignments = drop_assignments();
+
+    let err = unassign_person(&project, &assignments, "p3").unwrap_err();
+
+    assert!(
+        err.errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::LockedGuestDisplaced(id) if id == "p3"))
+    );
+}
+
+#[test]
+fn unassign_person_already_unassigned_is_a_no_op() {
+    let project = drop_project();
+    let assignments: Vec<SeatingAssignment> = drop_assignments()
+        .into_iter()
+        .filter(|a| a.person_id != "p1")
+        .collect();
+
+    let updated = unassign_person(&project, &assignments, "p1").unwrap();
+
+    assert_eq!(updated, assignments);
+}
+
+#[test]
 fn seating_csv_round_trip_is_sorted() {
     let shuffled = vec![
         SeatingAssignment {
