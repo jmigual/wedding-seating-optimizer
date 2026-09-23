@@ -265,13 +265,9 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
         (desired_size.y - band_height - band_spacing).max(0.0),
     );
     let (rect, _) = ui.allocate_exact_size(canvas_size, Sense::hover());
-    // Always `Some`: the band never fully disappears (see above), so this
-    // stays an `Option` only because `draw_unassigned_band`'s callers treat
-    // "no band" as a possibility elsewhere in this function.
-    let band_rect = Some(
-        ui.allocate_exact_size(Vec2::new(desired_size.x, band_height), Sense::hover())
-            .0,
-    );
+    let band_rect = ui
+        .allocate_exact_size(Vec2::new(desired_size.x, band_height), Sense::hover())
+        .0;
     let painter = ui.painter_at(rect);
 
     // Pan-drag sense is inset a few points from the left edge so this
@@ -479,9 +475,7 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
                             find_seat_under(&layout, transform, pointer, hit_radius)
                         }) {
                             pending_drop = Some(target);
-                        } else if pointer_pos.is_some_and(|pointer| {
-                            band_rect.is_some_and(|band_rect| band_rect.contains(pointer))
-                        }) {
+                        } else if pointer_pos.is_some_and(|pointer| band_rect.contains(pointer)) {
                             pending_unassign = true;
                         } else {
                             drag_cancelled = true;
@@ -528,22 +522,20 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
 
     draw_toast(&painter, rect, state, ui.ctx());
 
-    if let Some(band_rect) = band_rect {
-        let (chip_drop, chip_cancelled) = draw_unassigned_band(
-            ui,
-            band_rect,
-            shared,
-            state,
-            &layout,
-            transform,
-            pointer_pos,
-            canvas_pointer,
-            hit_radius,
-            &unassigned,
-        );
-        pending_drop = pending_drop.or(chip_drop);
-        drag_cancelled = drag_cancelled || chip_cancelled;
-    }
+    let (chip_drop, chip_cancelled) = draw_unassigned_band(
+        ui,
+        band_rect,
+        shared,
+        state,
+        &layout,
+        transform,
+        pointer_pos,
+        canvas_pointer,
+        hit_radius,
+        &unassigned,
+    );
+    pending_drop = pending_drop.or(chip_drop);
+    drag_cancelled = drag_cancelled || chip_cancelled;
 
     // Drawn last, on an unclipped top layer: the ghost must stay visible
     // even while the pointer is over the band, which `painter` (clipped to
