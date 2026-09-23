@@ -3262,76 +3262,27 @@ fn apply_seat_append_reindexes_when_no_higher_seat_is_free() {
         );
     }
 
-    // Score invariant: a/b/c/d's mutual proximity score (computed against
-    // the same round_6 table, ignoring the 5th guest) is unchanged whether
-    // they occupy the original gapped seats or the renumbered ones — their
-    // ranks (0, 1, 2, 3 in the same order) never moved.
+    // Score invariant: a/b/c/d's mutual proximity score (computed against a
+    // round_6 table holding only the four of them, ignoring the 5th guest)
+    // is unchanged between the original gapped seats and the seats
+    // `apply_seat_append` actually renumbered them to — derived from
+    // `assignments`/`updated` themselves, not hand-written, so this fails if
+    // the renumbering logic ever stops preserving rank order.
     let four_person_project = make_project(
         "id,name,table_type,groups,locked_table,locked_seat\na,A,,,,\nb,B,,,,\nc,C,,,,\nd,D,,,,\n",
         "left_id,right_id,score\na,d,10\n",
         "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_6,round,6,,,1,\n",
     )
     .unwrap();
-    let before = vec![
-        SeatingAssignment {
-            table_number: 1,
-            table_type: "round_6".to_string(),
-            seat_index: 0,
-            person_id: "a".to_string(),
-            person_name: "A".to_string(),
-        },
-        SeatingAssignment {
-            table_number: 1,
-            table_type: "round_6".to_string(),
-            seat_index: 2,
-            person_id: "b".to_string(),
-            person_name: "B".to_string(),
-        },
-        SeatingAssignment {
-            table_number: 1,
-            table_type: "round_6".to_string(),
-            seat_index: 4,
-            person_id: "c".to_string(),
-            person_name: "C".to_string(),
-        },
-        SeatingAssignment {
-            table_number: 1,
-            table_type: "round_6".to_string(),
-            seat_index: 5,
-            person_id: "d".to_string(),
-            person_name: "D".to_string(),
-        },
-    ];
-    let after = vec![
-        SeatingAssignment {
-            table_number: 1,
-            table_type: "round_6".to_string(),
-            seat_index: 0,
-            person_id: "a".to_string(),
-            person_name: "A".to_string(),
-        },
-        SeatingAssignment {
-            table_number: 1,
-            table_type: "round_6".to_string(),
-            seat_index: 1,
-            person_id: "b".to_string(),
-            person_name: "B".to_string(),
-        },
-        SeatingAssignment {
-            table_number: 1,
-            table_type: "round_6".to_string(),
-            seat_index: 2,
-            person_id: "c".to_string(),
-            person_name: "C".to_string(),
-        },
-        SeatingAssignment {
-            table_number: 1,
-            table_type: "round_6".to_string(),
-            seat_index: 3,
-            person_id: "d".to_string(),
-            person_name: "D".to_string(),
-        },
-    ];
+    let before: Vec<SeatingAssignment> = assignments
+        .iter()
+        .filter(|a| a.person_id != "mover")
+        .cloned()
+        .collect();
+    let after: Vec<SeatingAssignment> = updated
+        .into_iter()
+        .filter(|a| a.person_id != "mover")
+        .collect();
     let config = OptimizationConfig::default();
     let before_score = score_solution(&four_person_project, &before, &config).unwrap();
     let after_score = score_solution(&four_person_project, &after, &config).unwrap();
@@ -3427,6 +3378,491 @@ fn apply_seat_append_seats_an_unassigned_guest() {
     assert_eq!((mover.table_number, mover.seat_index), (1, 1));
     assert_eq!(mover.table_type, "round_6");
     assert_eq!(mover.person_name, "Mover");
+}
+
+/// Regression: a locked-seat guest already sitting at the seat renumbering
+/// would give them anyway (bride locked to seat 0, which is also rank 0)
+/// must not block renumbering — only an occupant whose seat would actually
+/// *change* should. `y` (seat 5) has the only real gap to close (seats 3
+/// and 4 are free), so renumbering should proceed and the mover should land
+/// at the true end (seat 4), not wherever the lowest free seat happens to be.
+#[test]
+fn apply_seat_append_reindexes_despite_a_locked_guest_who_would_not_move() {
+    let project = make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\nbride,Bride,,,1,0\ngroom,Groom,,,,\nx,X,,,,\ny,Y,,,,\nmover,Mover,,,,\n",
+        "left_id,right_id,score\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_6,round,6,,,2,\n",
+    )
+    .unwrap();
+    let assignments = vec![
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 0,
+            person_id: "bride".to_string(),
+            person_name: "Bride".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 1,
+            person_id: "groom".to_string(),
+            person_name: "Groom".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 2,
+            person_id: "x".to_string(),
+            person_name: "X".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 5,
+            person_id: "y".to_string(),
+            person_name: "Y".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 2,
+            table_type: "round_6".to_string(),
+            seat_index: 0,
+            person_id: "mover".to_string(),
+            person_name: "Mover".to_string(),
+        },
+    ];
+
+    let updated = apply_seat_append(&project, &assignments, "mover", 1).unwrap();
+
+    for (id, expected_seat) in [("bride", 0), ("groom", 1), ("x", 2), ("y", 3)] {
+        let seat = updated
+            .iter()
+            .find(|a| a.person_id == id)
+            .unwrap()
+            .seat_index;
+        assert_eq!(
+            seat, expected_seat,
+            "{id} should be at seat {expected_seat}"
+        );
+    }
+    let mover = updated.iter().find(|a| a.person_id == "mover").unwrap();
+    assert_eq!((mover.table_number, mover.seat_index), (1, 4));
+}
+
+/// A mover already seated at the target table is excluded from "the
+/// table's other occupants", so appending just goes after whoever else's
+/// seat is highest.
+#[test]
+fn apply_seat_append_moves_a_mover_already_at_the_target_table() {
+    let project = make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\na,A,,,,\nmover,Mover,,,,\nb,B,,,,\n",
+        "left_id,right_id,score\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_6,round,6,,,1,\n",
+    )
+    .unwrap();
+    let assignments = vec![
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 0,
+            person_id: "a".to_string(),
+            person_name: "A".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 1,
+            person_id: "mover".to_string(),
+            person_name: "Mover".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 2,
+            person_id: "b".to_string(),
+            person_name: "B".to_string(),
+        },
+    ];
+
+    let updated = apply_seat_append(&project, &assignments, "mover", 1).unwrap();
+
+    let mover = updated.iter().find(|a| a.person_id == "mover").unwrap();
+    assert_eq!((mover.table_number, mover.seat_index), (1, 3));
+    assert_eq!(
+        updated
+            .iter()
+            .find(|a| a.person_id == "a")
+            .unwrap()
+            .seat_index,
+        0
+    );
+    assert_eq!(
+        updated
+            .iter()
+            .find(|a| a.person_id == "b")
+            .unwrap()
+            .seat_index,
+        2
+    );
+}
+
+/// A mover already at the target table can also trigger the renumbering
+/// path: excluding the mover, `a` and `b` occupy the table's first and last
+/// seats, so there's no room above `b` and the two of them are renumbered
+/// (preserving order) with the mover appended after.
+#[test]
+fn apply_seat_append_reindexes_a_mover_already_at_the_target_table() {
+    let project = make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\na,A,,,,\nmover,Mover,,,,\nb,B,,,,\n",
+        "left_id,right_id,score\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_4,round,4,,,1,\n",
+    )
+    .unwrap();
+    let assignments = vec![
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 0,
+            person_id: "a".to_string(),
+            person_name: "A".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 1,
+            person_id: "mover".to_string(),
+            person_name: "Mover".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 3,
+            person_id: "b".to_string(),
+            person_name: "B".to_string(),
+        },
+    ];
+
+    let updated = apply_seat_append(&project, &assignments, "mover", 1).unwrap();
+
+    // a0, b1 (renumbered from 3), mover2 — three distinct seats, in order.
+    let seat_of = |id: &str| {
+        updated
+            .iter()
+            .find(|a| a.person_id == id)
+            .unwrap()
+            .seat_index
+    };
+    assert_eq!(seat_of("a"), 0);
+    assert_eq!(seat_of("b"), 1);
+    assert_eq!(seat_of("mover"), 2);
+}
+
+/// When the table is already completely full (every capacity seat taken,
+/// no gaps), renumbering the other occupants is a no-op — they're already
+/// at `0..k-1` — so the mover simply overflows capacity.
+#[test]
+fn apply_seat_append_errors_when_the_table_is_already_full() {
+    let project = make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\na,A,,,,\nb,B,,,,\nc,C,,,,\nd,D,,,,\nmover,Mover,,,,\n",
+        "left_id,right_id,score\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_4,round,4,,,2,\n",
+    )
+    .unwrap();
+    let assignments = vec![
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 0,
+            person_id: "a".to_string(),
+            person_name: "A".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 1,
+            person_id: "b".to_string(),
+            person_name: "B".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 2,
+            person_id: "c".to_string(),
+            person_name: "C".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 3,
+            person_id: "d".to_string(),
+            person_name: "D".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 2,
+            table_type: "round_4".to_string(),
+            seat_index: 0,
+            person_id: "mover".to_string(),
+            person_name: "Mover".to_string(),
+        },
+    ];
+
+    let err = apply_seat_append(&project, &assignments, "mover", 1).unwrap_err();
+
+    assert!(err.errors.iter().any(|e| matches!(
+        e,
+        ValidationError::SeatIndexOutOfRange { .. } | ValidationError::TableCapacityExceeded { .. }
+    )));
+}
+
+/// Same as [`apply_seat_append_errors_when_the_table_is_already_full`], but
+/// with a locked-seat guest already at their natural (unchanged) position —
+/// proving the locked-guest check doesn't accidentally "rescue" a genuinely
+/// full table via the fallback path when nobody would actually be renumbered.
+#[test]
+fn apply_seat_append_errors_when_full_table_has_a_non_blocking_lock() {
+    let project = make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\na,A,,,,\nb,B,,,,\nc,C,,,,\nd,D,,,1,3\nmover,Mover,,,,\n",
+        "left_id,right_id,score\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_4,round,4,,,2,\n",
+    )
+    .unwrap();
+    let assignments = vec![
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 0,
+            person_id: "a".to_string(),
+            person_name: "A".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 1,
+            person_id: "b".to_string(),
+            person_name: "B".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 2,
+            person_id: "c".to_string(),
+            person_name: "C".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 3,
+            person_id: "d".to_string(),
+            person_name: "D".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 2,
+            table_type: "round_4".to_string(),
+            seat_index: 0,
+            person_id: "mover".to_string(),
+            person_name: "Mover".to_string(),
+        },
+    ];
+
+    let err = apply_seat_append(&project, &assignments, "mover", 1).unwrap_err();
+
+    assert!(err.errors.iter().any(|e| matches!(
+        e,
+        ValidationError::SeatIndexOutOfRange { .. } | ValidationError::TableCapacityExceeded { .. }
+    )));
+}
+
+/// The mover's own lock is enforced the same way `apply_seat_drop` enforces
+/// it — appending onto a table other than their `locked_table` fails.
+#[test]
+fn apply_seat_append_respects_the_movers_own_locked_table() {
+    let project = make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\na,A,,,,\nmover,Mover,,,2,\n",
+        "left_id,right_id,score\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_6,round,6,,,2,\n",
+    )
+    .unwrap();
+    let assignments = vec![SeatingAssignment {
+        table_number: 1,
+        table_type: "round_6".to_string(),
+        seat_index: 0,
+        person_id: "a".to_string(),
+        person_name: "A".to_string(),
+    }];
+
+    let err = apply_seat_append(&project, &assignments, "mover", 1).unwrap_err();
+
+    assert!(err.errors.iter().any(|e| matches!(
+        e,
+        ValidationError::SeatingViolatesLockedTable {
+            person_id,
+            locked_table: 2,
+            assigned_table: 1,
+        } if person_id == "mover"
+    )));
+}
+
+/// A mover that is neither in `assignments` nor in `project.people` is
+/// unknown, not merely unassigned.
+#[test]
+fn apply_seat_append_unknown_person_errors() {
+    let project = make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\na,A,,,,\n",
+        "left_id,right_id,score\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_6,round,6,,,1,\n",
+    )
+    .unwrap();
+    let assignments = vec![SeatingAssignment {
+        table_number: 1,
+        table_type: "round_6".to_string(),
+        seat_index: 0,
+        person_id: "a".to_string(),
+        person_name: "A".to_string(),
+    }];
+
+    let err = apply_seat_append(&project, &assignments, "ghost", 1).unwrap_err();
+
+    assert!(
+        err.errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::UnknownPersonInSeating(id) if id == "ghost"))
+    );
+}
+
+/// [`LayoutTable::empty_seats`] must never let markers overlap: an 11-seat
+/// gap (12-capacity table, 1 guest) at the default `RenderOptions` fits at
+/// most 8 per row (see `empty_seat_row_capacity`), so it wraps into 2 rows —
+/// every marker stays at least `2 * seat_radius` from every other, and
+/// inside the (grown) card.
+#[test]
+fn empty_seat_markers_wrap_into_multiple_rows_without_overlapping() {
+    let table_types = build_table_type_map(vec![(
+        "round_12".to_string(),
+        TableTypeConfig {
+            shape: TableShape::Round,
+            people_per_side: None,
+            max_people: 12,
+            recommended_people: None,
+            min_people: None,
+            number_of_tables: Some(1),
+        },
+    )])
+    .unwrap();
+    let project = ProjectInput {
+        people: vec![Person {
+            id: "p1".to_string(),
+            name: "Alice".to_string(),
+            table_type: None,
+            groups: vec![],
+            locked_table: None,
+            locked_seat: None,
+        }],
+        closeness_rules: vec![],
+        table_types,
+        table_order: Vec::new(),
+    };
+    let assignments = vec![SeatingAssignment {
+        table_number: 1,
+        table_type: "round_12".to_string(),
+        seat_index: 0,
+        person_id: "p1".to_string(),
+        person_name: "Alice".to_string(),
+    }];
+
+    let layout = build_editor_layout(&project, &assignments, false).unwrap();
+    let table = &layout.tables[0];
+    let options = RenderOptions::default();
+
+    assert_eq!(table.empty_seats.len(), 11);
+    let min_distance = 2.0 * options.seat_radius;
+    for i in 0..table.empty_seats.len() {
+        for j in (i + 1)..table.empty_seats.len() {
+            let a = &table.empty_seats[i];
+            let b = &table.empty_seats[j];
+            let distance = ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
+            assert!(
+                distance >= min_distance - 1e-3,
+                "markers {} and {} are too close: {distance}",
+                a.seat_index,
+                b.seat_index
+            );
+        }
+    }
+    // Every marker sits inside the (grown) card, below the plain table area.
+    for seat in &table.empty_seats {
+        assert!(seat.y > table.y + options.table_height);
+        assert!(seat.y < table.y + table.height);
+    }
+}
+
+/// Ranks (not raw seat indices) drive the semicircle's arc angle too: seats
+/// 1, 3, 5 of a 6-capacity semicircle table become ranks 0, 1, 2, matching
+/// `PI + PI * (rank + 0.5) / k`.
+#[test]
+fn semicircle_layout_spaces_occupied_seats_by_rank_angle() {
+    let table_types = build_table_type_map(vec![(
+        "semi_6".to_string(),
+        TableTypeConfig {
+            shape: TableShape::Semicircle,
+            people_per_side: None,
+            max_people: 6,
+            recommended_people: None,
+            min_people: None,
+            number_of_tables: Some(1),
+        },
+    )])
+    .unwrap();
+    let project = ProjectInput {
+        people: (1..=3)
+            .map(|i| Person {
+                id: format!("p{i}"),
+                name: format!("Guest {i}"),
+                table_type: Some("semi_6".to_string()),
+                groups: vec![],
+                locked_table: None,
+                locked_seat: None,
+            })
+            .collect(),
+        closeness_rules: vec![],
+        table_types,
+        table_order: Vec::new(),
+    };
+    let assignments: Vec<SeatingAssignment> = [1usize, 3, 5]
+        .into_iter()
+        .enumerate()
+        .map(|(index, seat_index)| SeatingAssignment {
+            table_number: 1,
+            table_type: "semi_6".to_string(),
+            seat_index,
+            person_id: format!("p{}", index + 1),
+            person_name: format!("Guest {}", index + 1),
+        })
+        .collect();
+
+    let layout = build_layout(&project, &assignments).unwrap();
+    let table = &layout.tables[0];
+    let TableSurface::Semicircle { cx, cy, .. } = &table.surface else {
+        panic!("expected a semicircle surface for a semicircle table");
+    };
+
+    assert_eq!(table.seats.len(), 3);
+    assert_eq!(
+        table.seats.iter().map(|s| s.seat_index).collect::<Vec<_>>(),
+        vec![1, 3, 5]
+    );
+    for (rank, seat) in table.seats.iter().enumerate() {
+        let expected_angle =
+            std::f32::consts::PI + std::f32::consts::PI * (rank as f32 + 0.5) / 3.0;
+        let actual_angle = (seat.y - cy).atan2(seat.x - cx);
+        let mut delta = actual_angle - expected_angle;
+        delta =
+            (delta + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        assert!(
+            delta.abs() < 1e-3,
+            "seat {} (rank {rank}) angle mismatch: expected {expected_angle}, got {actual_angle}",
+            seat.seat_index
+        );
+    }
 }
 
 #[test]
