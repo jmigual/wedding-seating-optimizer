@@ -2132,10 +2132,10 @@ fn optimizer_splits_a_table_across_smaller_tables_when_that_scores_better() {
     // it fills already-used tables before opening a new one); two min-6
     // tables seat each group separately with no cross-group penalty.
     // `big`'s `recommended_people` is set to its full capacity (12): under
-    // rank-based seat distance, a group of 6 sitting on any 6 contiguous
-    // seats of the 12-seat big table scores identically to sitting on a
-    // dedicated 6-seat table (distance only depends on how many seats are
-    // occupied, not the table's capacity), so without this penalty "G stays
+    // rank-based seat distance, a group of 6 sitting on any 6 seats of the
+    // 12-seat big table scores identically to sitting on a dedicated 6-seat
+    // table (distance only depends on how many seats are occupied, not the
+    // table's capacity or which seats), so without this penalty "G stays
     // on the big table, only H moves off" ties the fully-split solution.
     // Recommending `big` at full capacity makes leaving it half-empty cost
     // `|occupancy - 12| * optimal_table_size_weight`, while leaving it
@@ -2199,11 +2199,10 @@ fn optimizer_splits_a_table_across_smaller_tables_when_that_scores_better() {
         "big table 1 not empty: {counts:?}"
     );
 
-    // The fix that makes rank-based distance ignore empty seats also made
-    // "leave G on the (under-filled) big table, only move H off" tie the
-    // fully-split solution in score (both scored 120 before `recommended_people`
-    // was added to `big`, above) — guard against that tie coming back by
-    // asserting the intended split strictly beats that tied alternative.
+    // Guard against the tie described above coming back: assert the
+    // intended split strictly outscores "leave G on the big table, only
+    // move H off" — not just that the optimizer happens to prefer the
+    // split for this seed.
     let expected_score = score_solution(&project, assignments, &config).unwrap();
     let tied_alternative: Vec<SeatingAssignment> = (1..=6)
         .map(|index| SeatingAssignment {
