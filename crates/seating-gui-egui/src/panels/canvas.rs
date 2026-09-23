@@ -20,6 +20,9 @@ use std::collections::HashMap;
 const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 3.0;
 const TOAST_LIFETIME: f64 = 2.2;
+/// Floor for the name-label wrap width in screen pixels, so a table with
+/// tightly packed seats can't wrap a guest's name down to single letters.
+const NAME_WRAP_MIN: f32 = 40.0;
 
 /// UI-only state for the canvas panel: zoom/pan, an in-progress drag, and
 /// the fading score-delta toast.
@@ -278,6 +281,11 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
     for table in &layout.tables {
         draw_table(&painter, table, transform, state.zoom);
 
+        // Wrap width for names drawn below each seat: the tightest gap
+        // between two seats at this table, scaled with zoom, floored so a
+        // cramped table can't wrap down to single letters.
+        let name_wrap_width = (min_seat_spacing(&table.seats) * state.zoom).max(NAME_WRAP_MIN);
+
         let card_rect = Rect::from_two_pos(
             transform.to_screen((table.x, table.y)),
             transform.to_screen((table.x + table.width, table.y + table.height)),
@@ -324,6 +332,7 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
                 table_hint,
                 is_being_dragged,
                 state.zoom,
+                name_wrap_width,
             );
 
             let hit_rect = Rect::from_center_size(center, Vec2::splat((radius * 2.0).max(20.0)));
@@ -616,6 +625,20 @@ fn find_seat_under(
     best.map(|(t, s, _)| (t, s))
 }
 
+/// Smallest center-to-center distance between any two seats at a table, in
+/// layout units. `f32::INFINITY` for tables with fewer than two seats, so
+/// callers fall back to their own minimum.
+fn min_seat_spacing(seats: &[LayoutSeat]) -> f32 {
+    let mut min_dist = f32::INFINITY;
+    for (i, a) in seats.iter().enumerate() {
+        for b in &seats[i + 1..] {
+            let dist = ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
+            min_dist = min_dist.min(dist);
+        }
+    }
+    min_dist
+}
+
 fn draw_table(painter: &egui::Painter, table: &LayoutTable, transform: Transform, zoom: f32) {
     let card_rect = Rect::from_two_pos(
         transform.to_screen((table.x, table.y)),
@@ -700,6 +723,7 @@ fn draw_seat(
     table_hint: bool,
     dimmed: bool,
     zoom: f32,
+    name_wrap_width: f32,
 ) {
     if let Some(ok) = drop_highlight {
         let highlight = if ok {
@@ -729,9 +753,9 @@ fn draw_seat(
         painter.circle_stroke(center, radius, Stroke::new(1.3_f32, rgb(COLOR_STROKE)));
     }
 
-    // Shrink (and, as a last resort, re-wrap/truncate) the label so it stays
-    // inside the seat circle: the previous fixed 10*zoom font routinely
-    // overflowed the 26px-diameter circle for 2-3 word names.
+    // The circle only ever holds the seat index now — it stays small and
+    // never overflows. The guest's full name is drawn wrapped below the
+    // seat instead of being squeezed (and truncated) inside it.
     let box_side = radius * 1.5;
     let base_font = 10.0 * zoom;
     let min_font = 5.0 * zoom;
@@ -740,27 +764,38 @@ fn draw_seat(
     } else {
         rgb(COLOR_MUTED)
     };
-    let (label, font_size) = match seat.person_name.as_deref() {
-        Some(name) => fit_seat_label(painter, name, radius, box_side, base_font, min_font),
-        None => {
-            let text = seat.seat_index.to_string();
-            let size = painter
-                .layout_no_wrap(
-                    text.clone(),
-                    FontId::proportional(base_font),
-                    Color32::PLACEHOLDER,
-                )
-                .size();
-            (text, (base_font * fit_scale(size, box_side)).max(min_font))
-        }
-    };
+    let index_text = seat.seat_index.to_string();
+    let index_size = painter
+        .layout_no_wrap(
+            index_text.clone(),
+            FontId::proportional(base_font),
+            Color32::PLACEHOLDER,
+        )
+        .size();
+    let index_font = (base_font * fit_scale(index_size, box_side)).max(min_font);
     painter.text(
         center,
         Align2::CENTER_CENTER,
-        label,
-        FontId::proportional(font_size),
+        index_text,
+        FontId::proportional(index_font),
         text_color,
     );
+
+    if let Some(name) = seat.person_name.as_deref() {
+        let name_font = (11.0 * zoom).max(7.0);
+        let name_color = faded(rgb(COLOR_SEAT_FILL), seat_alpha);
+        let galley = painter.layout(
+            name.to_string(),
+            FontId::proportional(name_font),
+            name_color,
+            name_wrap_width,
+        );
+        let name_pos = Pos2::new(
+            center.x - galley.size().x / 2.0,
+            center.y + radius + 2.0 * zoom,
+        );
+        painter.galley(name_pos, galley, name_color);
+    }
 
     if locked {
         let lock_pos = center + Vec2::new(radius * 0.75, -radius * 0.75);
@@ -775,7 +810,14 @@ fn draw_seat(
 }
 
 fn draw_ghost(painter: &egui::Painter, pointer: Pos2, person_name: &str) {
-    let rect = Rect::from_min_size(pointer + Vec2::new(14.0, 14.0), Vec2::new(96.0, 24.0));
+    let font = FontId::proportional(12.0);
+    let text_size = painter
+        .layout_no_wrap(person_name.to_string(), font.clone(), Color32::PLACEHOLDER)
+        .size();
+    let rect = Rect::from_min_size(
+        pointer + Vec2::new(14.0, 14.0),
+        text_size + Vec2::new(16.0, 12.0),
+    );
     let (r, g, b) = COLOR_CARD;
     painter.rect_filled(rect, 6.0, Color32::from_rgba_unmultiplied(r, g, b, 235));
     painter.rect_stroke(
@@ -787,8 +829,8 @@ fn draw_ghost(painter: &egui::Painter, pointer: Pos2, person_name: &str) {
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,
-        short_label(person_name),
-        FontId::proportional(12.0),
+        person_name,
+        font,
         rgb(COLOR_SEAT_FILL),
     );
 }
@@ -828,150 +870,10 @@ fn faded(color: Color32, alpha: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(r, g, b, (alpha.clamp(0.0, 1.0) * 255.0) as u8)
 }
 
-/// First name, truncated so it fits a seat label.
-fn short_label(name: &str) -> String {
-    let first = name.split_whitespace().next().unwrap_or(name);
-    if first.chars().count() > 10 {
-        format!("{}…", first.chars().take(9).collect::<String>())
-    } else {
-        first.to_string()
-    }
-}
-
 /// Font scale that shrinks `size` (a laid-out label's width/height) to fit
 /// inside a `box_side` x `box_side` square, without ever growing it.
 fn fit_scale(size: Vec2, box_side: f32) -> f32 {
     (box_side / size.x).min(box_side / size.y).min(1.0)
-}
-
-/// Fit a person's seat label inside the seat circle: wrap at `base_font`,
-/// shrink toward `min_font`, and if it still overflows at that floor,
-/// re-wrap with one fewer line (down to a single, ellipsis-truncated line).
-fn fit_seat_label(
-    painter: &egui::Painter,
-    name: &str,
-    radius: f32,
-    box_side: f32,
-    base_font: f32,
-    min_font: f32,
-) -> (String, f32) {
-    let floor_ratio = min_font / base_font;
-    let mut max_lines = 3;
-    loop {
-        let label = seat_label(name, radius, max_lines);
-        let size = painter
-            .layout_no_wrap(
-                label.clone(),
-                FontId::proportional(base_font),
-                Color32::PLACEHOLDER,
-            )
-            .size();
-        let scale = fit_scale(size, box_side);
-        if scale >= floor_ratio || max_lines == 1 {
-            return (label, (base_font * scale).max(min_font));
-        }
-        max_lines -= 1;
-    }
-}
-
-fn seat_label(name: &str, radius: f32, max_lines: usize) -> String {
-    let compact = name.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.is_empty() {
-        return String::new();
-    }
-
-    let max_chars_per_line = if radius >= 28.0 {
-        9
-    } else if radius >= 22.0 {
-        7
-    } else {
-        6
-    };
-
-    wrap_label_lines(&compact, max_chars_per_line, max_lines).join("\n")
-}
-
-fn wrap_label_lines(text: &str, max_chars_per_line: usize, max_lines: usize) -> Vec<String> {
-    let words: Vec<&str> = text.split_whitespace().collect();
-    if words.is_empty() {
-        return vec![String::new()];
-    }
-
-    // The wrapping loop below assumes at least two lines are available (it
-    // breaks once `max_lines - 1` lines are filled); a single line has no
-    // room to wrap into, so truncate it directly instead.
-    if max_lines <= 1 {
-        let joined = words.join(" ");
-        if joined.chars().count() > max_chars_per_line {
-            let mut truncated: String = joined
-                .chars()
-                .take(max_chars_per_line.saturating_sub(1))
-                .collect();
-            truncated.push('…');
-            return vec![truncated];
-        }
-        return vec![joined];
-    }
-
-    let mut lines = Vec::new();
-    let mut current = String::new();
-
-    for word in &words {
-        let candidate_len = if current.is_empty() {
-            word.chars().count()
-        } else {
-            current.chars().count() + 1 + word.chars().count()
-        };
-        if !current.is_empty() && candidate_len > max_chars_per_line {
-            lines.push(current);
-            current = String::new();
-            if lines.len() == max_lines - 1 {
-                break;
-            }
-        }
-        if current.is_empty() {
-            current.push_str(word);
-        } else {
-            current.push(' ');
-            current.push_str(word);
-        }
-    }
-
-    let used_words = lines
-        .iter()
-        .flat_map(|line| line.split_whitespace())
-        .count()
-        + current.split_whitespace().count();
-    if !current.is_empty() {
-        lines.push(current);
-    }
-
-    if used_words < words.len() {
-        let remaining = words[used_words..].join(" ");
-        if let Some(last) = lines.last_mut() {
-            if !last.is_empty() {
-                last.push(' ');
-            }
-            last.push_str(&remaining);
-        }
-    }
-
-    if lines.len() > max_lines {
-        lines.truncate(max_lines);
-    }
-
-    if let Some(last) = lines.last_mut()
-        && last.chars().count() > max_chars_per_line
-    {
-        let mut truncated: String = last
-            .chars()
-            .take(max_chars_per_line.saturating_sub(1))
-            .collect();
-        truncated.push('…');
-        *last = truncated;
-    }
-
-    lines
 }
 
 fn person_tooltip(ui: &mut egui::Ui, person: &Person, shared: &SharedState) {
@@ -1072,5 +974,31 @@ fn export_png(shared: &mut SharedState) {
             format!("Exported PNG to {}", path.display()),
         ),
         Err(error) => shared.set_message(MessageKind::Error, format!("PNG export failed: {error}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seat(seat_index: usize, x: f32, y: f32) -> LayoutSeat {
+        LayoutSeat {
+            seat_index,
+            x,
+            y,
+            person_name: None,
+        }
+    }
+
+    #[test]
+    fn min_seat_spacing_finds_the_closest_pair() {
+        let seats = vec![seat(0, 0.0, 0.0), seat(1, 10.0, 0.0), seat(2, 10.0, 3.0)];
+        assert_eq!(min_seat_spacing(&seats), 3.0);
+    }
+
+    #[test]
+    fn min_seat_spacing_is_infinite_below_two_seats() {
+        assert_eq!(min_seat_spacing(&[seat(0, 0.0, 0.0)]), f32::INFINITY);
+        assert_eq!(min_seat_spacing(&[]), f32::INFINITY);
     }
 }
