@@ -259,17 +259,19 @@ fn build_layout_impl(
 }
 
 /// Render a layout as standalone SVG markup.
+///
+/// The document's height grows past `layout.height` when a wrapped guest
+/// label's lowest line would otherwise be clipped by the image bottom (e.g.
+/// a long name at a seat in the last row); the header/footer geometry is
+/// unaffected, only the canvas the image is drawn on.
 pub fn render_svg(layout: &SeatingLayout, options: &RenderOptions) -> String {
-    let mut svg = String::new();
-    svg.push_str(&format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{:.0}" height="{:.0}" viewBox="0 0 {:.0} {:.0}">"#,
-        layout.width, layout.height, layout.width, layout.height
-    ));
-    svg.push_str(&format!(
+    let mut body = String::new();
+    let mut max_label_bottom: f32 = 0.0;
+    body.push_str(&format!(
         "<rect width=\"100%\" height=\"100%\" fill=\"{}\"/>",
         hex(COLOR_BACKGROUND)
     ));
-    svg.push_str(&format!(
+    body.push_str(&format!(
         "<style>text {{ fill: {}; font-family: Arial, Helvetica, sans-serif; font-size: {}px; }} .muted {{ fill: {}; }} .seat-index {{ fill: {}; font-size: {}px; font-weight: bold; }} .guest {{ fill: {}; font-size: {}px; }}</style>",
         hex(COLOR_SEAT_FILL),
         options.font_size,
@@ -280,21 +282,29 @@ pub fn render_svg(layout: &SeatingLayout, options: &RenderOptions) -> String {
         options.font_size - 1.0
     ));
 
+    let label_font_size = options.font_size - 1.0;
+    let label_char_width = (label_font_size * 0.55).max(1.0);
+    // Words still wrap on word boundaries in the common case; without this
+    // floor, a tight seat spacing (e.g. rectangular-table corners) could
+    // shrink the budget to a couple of characters per line.
+    let min_label_budget = 10.0 * label_char_width;
+    let label_line_height = label_font_size * 1.2;
+
     for table in &layout.tables {
         let label_x = table.x + table.width / 2.0;
         let (title_y, subtitle_y) = header_positions(table.y, options);
-        svg.push_str(&format!(
+        body.push_str(&format!(
             "<g><rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"18\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1.5\"/>",
             table.x, table.y, table.width, table.height, hex(COLOR_CARD), hex(COLOR_STROKE)
         ));
-        svg.push_str(&format!(
+        body.push_str(&format!(
             "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">Table {} — {}</text>",
             label_x,
             title_y,
             table.table_number,
             escape_xml(&table.table_type)
         ));
-        svg.push_str(&format!(
+        body.push_str(&format!(
             "<text class=\"muted\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">Shape: {}</text>",
             label_x,
             subtitle_y,
@@ -303,7 +313,7 @@ pub fn render_svg(layout: &SeatingLayout, options: &RenderOptions) -> String {
 
         match &table.surface {
             TableSurface::Round { cx, cy, radius } => {
-                svg.push_str(&format!(
+                body.push_str(&format!(
                     "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"{}\" stroke=\"{}\" stroke-width=\"2\"/>",
                     cx, cy, radius, hex(COLOR_TABLE_FILL), hex(COLOR_TABLE_STROKE)
                 ));
@@ -313,11 +323,11 @@ pub fn render_svg(layout: &SeatingLayout, options: &RenderOptions) -> String {
                 y,
                 width,
                 height,
-            } => svg.push_str(&format!(
+            } => body.push_str(&format!(
                 "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"12\" fill=\"{}\" stroke=\"{}\" stroke-width=\"2\"/>",
                 x, y, width, height, hex(COLOR_TABLE_FILL), hex(COLOR_TABLE_STROKE)
             )),
-            TableSurface::Semicircle { cx, cy, radius } => svg.push_str(&format!(
+            TableSurface::Semicircle { cx, cy, radius } => body.push_str(&format!(
                 "<path d=\"M{:.1},{:.1} A{:.1},{:.1} 0 0 1 {:.1},{:.1} Z\" fill=\"{}\" stroke=\"{}\" stroke-width=\"2\"/>",
                 cx - radius,
                 cy,
@@ -330,38 +340,57 @@ pub fn render_svg(layout: &SeatingLayout, options: &RenderOptions) -> String {
             )),
         }
 
-        let label_budget = min_seat_spacing(&table.seats).unwrap_or(table.width - 40.0);
+        let label_budget = min_seat_spacing(&table.seats)
+            .unwrap_or(table.width - 40.0)
+            .max(min_label_budget);
 
         for seat in &table.seats {
-            svg.push_str("<g>");
+            body.push_str("<g>");
             if let Some(name) = seat.person_name.as_deref() {
-                svg.push_str(&format!("<title>{}</title>", escape_xml(name)));
+                body.push_str(&format!("<title>{}</title>", escape_xml(name)));
             }
             if let Some(person_name) = seat.person_name.as_deref() {
-                svg.push_str(&format!(
+                body.push_str(&format!(
                     "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1.5\"/>",
                     seat.x, seat.y, options.seat_radius, hex(COLOR_SEAT_FILL), hex(COLOR_SEAT_STROKE)
                 ));
-                svg.push_str(&format!(
+                body.push_str(&format!(
                     "<text class=\"seat-index\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" dominant-baseline=\"middle\">{}</text>",
                     seat.x,
                     seat.y + 0.5,
                     seat.seat_index
                 ));
-                let label = fit_label(person_name, label_budget, options.font_size - 1.0);
-                svg.push_str(&format!(
-                    "<text class=\"guest\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text>",
-                    seat.x,
-                    seat.y + options.seat_radius + 16.0,
-                    escape_xml(&label)
+                let lines = wrap_label(person_name, label_budget, label_font_size);
+                let label_y = seat.y + options.seat_radius + 16.0;
+                body.push_str(&format!(
+                    "<text class=\"guest\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">",
+                    seat.x, label_y
                 ));
+                for (line_index, line) in lines.iter().enumerate() {
+                    let dy = if line_index == 0 {
+                        0.0
+                    } else {
+                        label_line_height
+                    };
+                    body.push_str(&format!(
+                        "<tspan x=\"{:.1}\" dy=\"{:.1}\">{}</tspan>",
+                        seat.x,
+                        dy,
+                        escape_xml(line)
+                    ));
+                }
+                body.push_str("</text>");
+                let label_bottom = label_y
+                    + (lines.len().saturating_sub(1)) as f32 * label_line_height
+                    + label_font_size;
+                max_label_bottom = max_label_bottom.max(label_bottom);
             } else {
                 // Unoccupied capacity slot: hollow, dimmed marker.
-                svg.push_str(&format!(
+                body.push_str(&format!(
                     "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"none\" stroke=\"{}\" stroke-width=\"1.5\" stroke-dasharray=\"3,3\" opacity=\"0.6\"/>",
                     seat.x, seat.y, options.seat_radius, hex(COLOR_STROKE)
                 ));
-                svg.push_str(&format!(
+                body.push_str(&format!(
                     "<text class=\"muted\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" dominant-baseline=\"middle\" font-size=\"{:.1}\">{}</text>",
                     seat.x,
                     seat.y + 0.5,
@@ -369,11 +398,21 @@ pub fn render_svg(layout: &SeatingLayout, options: &RenderOptions) -> String {
                     seat.seat_index
                 ));
             }
-            svg.push_str("</g>");
+            body.push_str("</g>");
         }
-        svg.push_str("</g>");
+        body.push_str("</g>");
     }
 
+    // Grow the canvas past `layout.height` when a wrapped label's lowest
+    // line would otherwise be clipped by the image bottom.
+    let height = layout.height.max(max_label_bottom + 8.0);
+
+    let mut svg = String::new();
+    svg.push_str(&format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{:.0}" height="{:.0}" viewBox="0 0 {:.0} {:.0}">"#,
+        layout.width, height, layout.width, height
+    ));
+    svg.push_str(&body);
     svg.push_str("</svg>");
     svg
 }
@@ -717,21 +756,46 @@ pub fn min_seat_spacing(seats: &[LayoutSeat]) -> Option<f32> {
     min_dist.is_finite().then_some(min_dist)
 }
 
-/// Truncate `name` with an ellipsis so it fits within `budget_px`,
-/// approximating Arial glyph width as `0.55 * font_size` per character. The
-/// full name is preserved separately in a `<title>` element for hover text.
-fn fit_label(name: &str, budget_px: f32, font_size: f32) -> String {
+/// Greedily word-wraps `name` into lines that each fit within `budget_px`,
+/// approximating Arial glyph width as `0.55 * font_size` per character.
+/// Words longer than one line are split across lines by character. Never
+/// truncates or adds an ellipsis; the full name is always recoverable by
+/// rejoining the returned lines, and is also preserved separately in a
+/// `<title>` element for hover text.
+fn wrap_label(name: &str, budget_px: f32, font_size: f32) -> Vec<String> {
     let char_width = (font_size * 0.55).max(1.0);
     let max_chars = (budget_px / char_width).floor().max(1.0) as usize;
-    let char_count = name.chars().count();
-    if char_count <= max_chars {
-        name.to_string()
-    } else if max_chars <= 1 {
-        "…".to_string()
-    } else {
-        let truncated: String = name.chars().take(max_chars - 1).collect();
-        format!("{truncated}…")
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in name.split_whitespace() {
+        for chunk in split_into_chunks(word, max_chars) {
+            if current.is_empty() {
+                current = chunk;
+            } else if current.chars().count() + 1 + chunk.chars().count() <= max_chars {
+                current.push(' ');
+                current.push_str(&chunk);
+            } else {
+                lines.push(std::mem::take(&mut current));
+                current = chunk;
+            }
+        }
     }
+    lines.push(current);
+    lines
+}
+
+/// Splits `word` into chunks of at most `max_chars` characters, so a single
+/// word longer than the label budget still wraps instead of overflowing.
+fn split_into_chunks(word: &str, max_chars: usize) -> Vec<String> {
+    let chars: Vec<char> = word.chars().collect();
+    if chars.len() <= max_chars {
+        return vec![word.to_string()];
+    }
+    chars
+        .chunks(max_chars)
+        .map(|chunk| chunk.iter().collect())
+        .collect()
 }
 
 fn escape_xml(text: &str) -> String {
@@ -748,5 +812,67 @@ fn shape_label(shape: &TableShape) -> &'static str {
         TableShape::Rectangular => "rectangular",
         TableShape::Square => "square",
         TableShape::Semicircle => "semicircle",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_label;
+
+    /// Every line `wrap_label` returns must fit the same width estimate the
+    /// budget was computed with, and rejoining the lines (ignoring the
+    /// whitespace introduced/removed at wrap points) must reproduce the
+    /// original name — i.e. no characters are dropped or replaced with an
+    /// ellipsis.
+    #[test]
+    fn wrap_label_fits_budget_and_preserves_all_characters() {
+        let name = "Alexandria Montgomery-Featherstonehaugh";
+        let font_size: f32 = 13.0;
+        let budget_px: f32 = 90.0;
+        let char_width = (font_size * 0.55).max(1.0);
+        let max_chars = (budget_px / char_width).floor().max(1.0) as usize;
+
+        let lines = wrap_label(name, budget_px, font_size);
+        assert!(lines.len() >= 2);
+        for line in &lines {
+            assert!(
+                line.chars().count() <= max_chars,
+                "line {line:?} exceeds max_chars {max_chars}"
+            );
+        }
+
+        let rejoined: String = lines
+            .concat()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let original: String = name.chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(rejoined, original);
+    }
+
+    /// A budget that fits any single word but not two adjacent ones wraps
+    /// one word per line.
+    #[test]
+    fn wrap_label_breaks_on_word_boundaries() {
+        let lines = wrap_label("Ana Maria Lopez", 45.0, 13.0);
+        assert_eq!(lines, vec!["Ana", "Maria", "Lopez"]);
+    }
+
+    /// Multi-byte (accented) characters count as one character each, same
+    /// as the width estimate assumes; combining-accent edge cases are out of
+    /// scope. The budget here (max_chars = 8) sits strictly between
+    /// "Ångström"'s char length (8, fits) and its UTF-8 byte length (10,
+    /// wouldn't fit) — a regression to byte-counting would wrongly split
+    /// this word.
+    #[test]
+    fn wrap_label_handles_multi_byte_names() {
+        let lines = wrap_label("Núñez Ångström", 60.0, 13.0);
+        assert_eq!(lines, vec!["Núñez", "Ångström"]);
+    }
+
+    #[test]
+    fn wrap_label_of_empty_name_returns_one_empty_line() {
+        let lines = wrap_label("", 90.0, 13.0);
+        assert_eq!(lines, vec![String::new()]);
     }
 }

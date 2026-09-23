@@ -922,7 +922,7 @@ fn round_table_layout_uses_capacity_not_occupant_count_for_seat_angles() {
 }
 
 #[test]
-fn svg_truncates_long_guest_labels_and_keeps_full_name_in_title() {
+fn svg_wraps_long_guest_labels_without_ellipsis() {
     let project = round_project();
     let mut assignments = round_assignments();
     assignments[0].person_name = "Alexandria Montgomery-Featherstonehaugh".to_string();
@@ -930,15 +930,180 @@ fn svg_truncates_long_guest_labels_and_keeps_full_name_in_title() {
     let layout = build_layout(&project, &assignments).unwrap();
     let svg = render_svg(&layout, &RenderOptions::default());
 
-    assert!(svg.contains("<title>Alexandria Montgomery-Featherstonehaugh</title>"));
-    // The full name must appear only once (inside <title>) — the visible
-    // guest label is truncated with an ellipsis, not the raw string.
-    assert_eq!(
-        svg.matches("Alexandria Montgomery-Featherstonehaugh")
-            .count(),
-        1
+    let title = "<title>Alexandria Montgomery-Featherstonehaugh</title>";
+    assert!(svg.contains(title));
+    // The guest label must never be truncated with an ellipsis.
+    assert!(!svg.contains('…'));
+
+    // Isolate the <text class="guest"> element for this specific guest (the
+    // one immediately following their <title>), rather than counting
+    // <tspan>s across the whole SVG — every seat emits at least one <tspan>,
+    // so that alone wouldn't prove this particular long name wrapped.
+    let after_title = &svg[svg.find(title).unwrap() + title.len()..];
+    let guest_text_start = after_title.find("<text class=\"guest\"").unwrap();
+    let guest_text = &after_title[guest_text_start..];
+    let guest_text_end = guest_text.find("</text>").unwrap() + "</text>".len();
+    let guest_text = &guest_text[..guest_text_end];
+
+    assert!(
+        guest_text.matches("<tspan").count() >= 2,
+        "expected the long name to wrap onto multiple <tspan> lines, got: {guest_text}"
     );
-    assert!(svg.contains('…'));
+
+    // Every <tspan>'s content, concatenated, must reproduce the full name
+    // (ignoring the whitespace introduced/removed at wrap points).
+    let mut joined = String::new();
+    let mut rest = guest_text;
+    while let Some(open) = rest.find("<tspan") {
+        let after_open = &rest[open..];
+        let content_start = after_open.find('>').unwrap() + 1;
+        let content_and_rest = &after_open[content_start..];
+        let close = content_and_rest.find("</tspan>").unwrap();
+        joined.push_str(&content_and_rest[..close]);
+        rest = &content_and_rest[close + "</tspan>".len()..];
+    }
+    let joined: String = joined.chars().filter(|c| !c.is_whitespace()).collect();
+    let expected: String = "Alexandria Montgomery-Featherstonehaugh"
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert_eq!(joined, expected);
+}
+
+#[test]
+fn svg_respects_label_budget_floor_on_tightly_spaced_seats() {
+    // 20 seats evenly spaced around the default round-table ring put
+    // adjacent seats ~19px apart (2 * 61px radius * sin(pi/20)) — well
+    // below the ~71px floor `render_svg` guarantees the label budget, so
+    // the wrap must use the floor instead of the raw (tiny) spacing.
+    let table_types = build_table_type_map(vec![(
+        "round_20".to_string(),
+        TableTypeConfig {
+            shape: TableShape::Round,
+            people_per_side: None,
+            max_people: 20,
+            recommended_people: Some(20),
+            min_people: Some(1),
+            number_of_tables: Some(1),
+        },
+    )])
+    .unwrap();
+
+    let mut people = Vec::new();
+    let mut assignments = Vec::new();
+    for seat_index in 0..20 {
+        let id = format!("p{seat_index}");
+        let name = if seat_index == 0 {
+            "Alexandria Montgomery-Featherstonehaugh".to_string()
+        } else {
+            format!("Guest{seat_index}")
+        };
+        people.push(Person {
+            id: id.clone(),
+            name: name.clone(),
+            table_type: Some("round_20".to_string()),
+            groups: vec![],
+            locked_table: None,
+            locked_seat: None,
+        });
+        assignments.push(SeatingAssignment {
+            table_number: 1,
+            table_type: "round_20".to_string(),
+            seat_index,
+            person_id: id,
+            person_name: name,
+        });
+    }
+    let project = ProjectInput {
+        people,
+        closeness_rules: vec![],
+        table_types,
+        table_order: Vec::new(),
+    };
+
+    let layout = build_layout(&project, &assignments).unwrap();
+    let svg = render_svg(&layout, &RenderOptions::default());
+
+    let title = "<title>Alexandria Montgomery-Featherstonehaugh</title>";
+    assert!(svg.contains(title));
+    let after_title = &svg[svg.find(title).unwrap() + title.len()..];
+    let guest_text_start = after_title.find("<text class=\"guest\"").unwrap();
+    let guest_text = &after_title[guest_text_start..];
+    let guest_text_end = guest_text.find("</text>").unwrap() + "</text>".len();
+    let guest_text = &guest_text[..guest_text_end];
+
+    let first_tspan_start = guest_text.find("<tspan").unwrap();
+    let first_tspan = &guest_text[first_tspan_start..];
+    let content_start = first_tspan.find('>').unwrap() + 1;
+    let content_end = first_tspan.find("</tspan>").unwrap();
+    let first_line = &first_tspan[content_start..content_end];
+
+    // On 8041d8a (no budget floor), the raw ~19px spacing would only fit
+    // 2 characters ("Al"); with the floor this whole first word fits.
+    assert_eq!(
+        first_line, "Alexandria",
+        "expected the floored label budget to fit the whole first word, got {first_line:?} in {guest_text}"
+    );
+}
+
+#[test]
+fn svg_height_grows_to_fit_wrapped_labels_without_clipping() {
+    let project = round_project();
+    let mut assignments = round_assignments();
+    // Seat index 2 sits at the bottom of the ring, closest to the image
+    // edge — its wrapped label lines are the ones a fixed layout.height
+    // would clip.
+    assignments[2].person_name = "Alexandria Montgomery-Featherstonehaugh".to_string();
+
+    let layout = build_layout(&project, &assignments).unwrap();
+    let svg = render_svg(&layout, &RenderOptions::default());
+
+    let height_attr: f32 = svg
+        .split("height=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .and_then(|value| value.parse().ok())
+        .unwrap();
+
+    assert!(
+        height_attr > layout.height,
+        "expected the SVG canvas ({height_attr}) to grow past the base layout height \
+         ({}) to fit the wrapped label instead of clipping it",
+        layout.height
+    );
+
+    // The canvas must reach all the way down to the wrapped label's lowest
+    // baseline, not just be taller than layout.height by some margin.
+    let title = "<title>Alexandria Montgomery-Featherstonehaugh</title>";
+    let after_title = &svg[svg.find(title).unwrap() + title.len()..];
+    let guest_text_start = after_title.find("<text class=\"guest\"").unwrap();
+    let guest_text = &after_title[guest_text_start..];
+    let guest_text_end = guest_text.find("</text>").unwrap() + "</text>".len();
+    let guest_text = &guest_text[..guest_text_end];
+
+    let text_y_start = guest_text.find("y=\"").unwrap() + "y=\"".len();
+    let text_y_rest = &guest_text[text_y_start..];
+    let base_y: f32 = text_y_rest[..text_y_rest.find('"').unwrap()]
+        .parse()
+        .unwrap();
+
+    let mut last_baseline = base_y;
+    let mut rest = guest_text;
+    while let Some(open) = rest.find("<tspan") {
+        let after_open = &rest[open..];
+        let dy_start = after_open.find("dy=\"").unwrap() + "dy=\"".len();
+        let dy_rest = &after_open[dy_start..];
+        let dy: f32 = dy_rest[..dy_rest.find('"').unwrap()].parse().unwrap();
+        last_baseline += dy;
+        let close = after_open.find("</tspan>").unwrap();
+        rest = &after_open[close + "</tspan>".len()..];
+    }
+
+    assert!(
+        height_attr >= last_baseline,
+        "expected the SVG canvas ({height_attr}) to reach the wrapped label's last \
+         baseline ({last_baseline})"
+    );
 }
 
 #[test]
