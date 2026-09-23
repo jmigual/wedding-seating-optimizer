@@ -430,6 +430,113 @@ pub fn apply_seat_drop(
     Ok((updated, outcome))
 }
 
+// ── Seat append (drop to end) ─────────────────────────────────────────────────
+
+/// Place `person_id` at `table_number`, right after that table's current
+/// last occupant — used when a guest is dropped outside any specific seat
+/// (e.g. onto the table itself rather than one of its seats).
+///
+/// `person_id` may currently be unassigned, seated elsewhere, or already
+/// seated at `table_number` (moving within their own table); either way they
+/// are excluded from "the table's current occupants" for this call.
+///
+/// The target seat is the smallest free index above the current highest
+/// occupied seat. If there is no room above (the highest occupied seat is
+/// already the table's last capacity slot), the table's *other* occupants
+/// are renumbered to `0..k-1`, preserving their relative order, and the
+/// mover takes seat `k` — this changes no one's score, since
+/// [`crate::scoring::seat_distance`] is rank-based, not raw-seat-index-based.
+/// If any of those other occupants has a `locked_seat`, renumbering would
+/// break their lock, so this falls back to the lowest free seat index
+/// instead, leaving every other occupant's seat untouched.
+///
+/// A lock on `person_id` themselves is enforced the same way
+/// [`apply_seat_drop`] enforces it: by [`validate_partial_seating_solution`]
+/// against the candidate placement, reported as
+/// [`ValidationError::SeatingViolatesLockedTable`] or
+/// [`ValidationError::SeatingViolatesLockedSeat`].
+pub fn apply_seat_append(
+    project: &ProjectInput,
+    assignments: &[SeatingAssignment],
+    person_id: &str,
+    table_number: usize,
+) -> Result<Vec<SeatingAssignment>, ValidationReport> {
+    let instances = generate_table_instances(project);
+    let target_table = instances
+        .iter()
+        .find(|instance| instance.number == table_number);
+    let target_table_type = target_table.map(|instance| instance.table_type.clone());
+    let capacity = target_table.map(|instance| instance.max_people);
+
+    let mover_index = assignments.iter().position(|a| a.person_id == person_id);
+
+    let mut others: Vec<usize> = (0..assignments.len())
+        .filter(|&i| assignments[i].table_number == table_number && Some(i) != mover_index)
+        .collect();
+    others.sort_by_key(|&i| assignments[i].seat_index);
+
+    let occupied: HashSet<usize> = others.iter().map(|&i| assignments[i].seat_index).collect();
+    let last_seat = others.last().map(|&i| assignments[i].seat_index);
+
+    let mut updated = assignments.to_vec();
+    let mut renumber = false;
+    let target_seat = match last_seat {
+        None => 0,
+        Some(last) => {
+            let candidate = last + 1;
+            if capacity.is_some_and(|capacity| candidate < capacity) {
+                candidate
+            } else {
+                let locked_blocker = others.iter().any(|&i| {
+                    project
+                        .people
+                        .iter()
+                        .any(|p| p.id == assignments[i].person_id && p.locked_seat.is_some())
+                });
+                if locked_blocker {
+                    capacity
+                        .and_then(|capacity| (0..capacity).find(|seat| !occupied.contains(seat)))
+                        .unwrap_or(candidate)
+                } else {
+                    renumber = true;
+                    others.len()
+                }
+            }
+        }
+    };
+
+    if renumber {
+        for (rank, &i) in others.iter().enumerate() {
+            updated[i].seat_index = rank;
+        }
+    }
+
+    if let Some(mover_index) = mover_index {
+        updated[mover_index].table_number = table_number;
+        updated[mover_index].seat_index = target_seat;
+        updated[mover_index].table_type =
+            target_table_type.unwrap_or_else(|| updated[mover_index].table_type.clone());
+    } else {
+        let Some(person) = project.people.iter().find(|p| p.id == person_id) else {
+            return Err(ValidationReport {
+                errors: vec![ValidationError::UnknownPersonInSeating(
+                    person_id.to_string(),
+                )],
+            });
+        };
+        updated.push(SeatingAssignment {
+            table_number,
+            table_type: target_table_type.unwrap_or_default(),
+            seat_index: target_seat,
+            person_id: person.id.clone(),
+            person_name: person.name.clone(),
+        });
+    }
+
+    validate_partial_seating_solution(project, &updated)?;
+    Ok(updated)
+}
+
 // ── Unassigned guests ─────────────────────────────────────────────────────────
 
 /// Guests in `people` with no entry in `assignments`, in `people`'s order.

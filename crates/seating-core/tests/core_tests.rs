@@ -757,9 +757,9 @@ fn layout_and_svg_skip_unused_tables_but_render_all_capacity_seats() {
 
     let layout = build_layout(&project, &assignments).unwrap();
     assert_eq!(layout.tables.len(), 1);
-    // round_4 has capacity 4: all four seat slots are rendered, not just the
-    // two occupied ones (empty seats no longer vanish from the layout).
-    assert_eq!(layout.tables[0].seats.len(), 4);
+    // round_4 has capacity 4, but only the two occupied seats are rendered —
+    // empty capacity slots no longer appear in `seats` at all.
+    assert_eq!(layout.tables[0].seats.len(), 2);
     let occupied = layout.tables[0]
         .seats
         .iter()
@@ -872,7 +872,7 @@ fn editor_layout_shows_one_empty_table_per_type() {
 }
 
 #[test]
-fn round_table_layout_uses_capacity_not_occupant_count_for_seat_angles() {
+fn round_table_layout_spaces_occupied_seats_evenly_by_rank() {
     let table_types = build_table_type_map(vec![(
         "round_6".to_string(),
         TableTypeConfig {
@@ -944,33 +944,83 @@ fn round_table_layout_uses_capacity_not_occupant_count_for_seat_angles() {
 
     let layout = build_layout(&project, &assignments).unwrap();
     let table = &layout.tables[0];
-    assert_eq!(table.seats.len(), 6);
-    let occupied = table
-        .seats
-        .iter()
-        .filter(|seat| seat.person_name.is_some())
-        .count();
-    assert_eq!(occupied, 3);
+    // Only the 3 occupied seats are rendered — the 3 empty capacity slots
+    // (0, 2, 4) no longer appear in `seats` at all.
+    assert_eq!(table.seats.len(), 3);
+    assert!(table.seats.iter().all(|seat| seat.person_name.is_some()));
+    assert_eq!(
+        table.seats.iter().map(|s| s.seat_index).collect::<Vec<_>>(),
+        vec![1, 3, 5]
+    );
 
-    // Six seats evenly spaced around a circle have a centroid equal to the
-    // circle's true center, regardless of occupancy — so this doesn't need
-    // to know render.rs's internal radius/offset constants.
+    // Three seats evenly spaced around a circle have a centroid equal to the
+    // circle's true center, regardless of their raw seat indices — so this
+    // doesn't need to know render.rs's internal radius/offset constants.
     let center_x = table.seats.iter().map(|seat| seat.x).sum::<f32>() / table.seats.len() as f32;
     let center_y = table.seats.iter().map(|seat| seat.y).sum::<f32>() / table.seats.len() as f32;
 
-    for seat in &table.seats {
+    // Angles are spaced by RANK among the 3 occupants (0, 1, 2), not by raw
+    // seat index (1, 3, 5) — an empty seat must never skew the geometry.
+    for (rank, seat) in table.seats.iter().enumerate() {
         let expected_angle =
-            std::f32::consts::TAU * seat.seat_index as f32 / 6.0 - std::f32::consts::FRAC_PI_2;
+            std::f32::consts::TAU * rank as f32 / 3.0 - std::f32::consts::FRAC_PI_2;
         let actual_angle = (seat.y - center_y).atan2(seat.x - center_x);
         let mut delta = actual_angle - expected_angle;
         delta =
             (delta + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
         assert!(
             delta.abs() < 1e-3,
-            "seat {} angle mismatch: expected {expected_angle}, got {actual_angle}",
+            "seat {} (rank {rank}) angle mismatch: expected {expected_angle}, got {actual_angle}",
             seat.seat_index
         );
     }
+
+    // The editor layout also exposes the 3 free seats (0, 2, 4) as
+    // `empty_seats`, laid out below the table area.
+    let editor_layout = build_editor_layout(&project, &assignments, false).unwrap();
+    let editor_table = &editor_layout.tables[0];
+    assert_eq!(
+        editor_table
+            .empty_seats
+            .iter()
+            .map(|s| s.seat_index)
+            .collect::<Vec<_>>(),
+        vec![0, 2, 4]
+    );
+    assert!(
+        editor_table
+            .empty_seats
+            .iter()
+            .all(|seat| seat.person_name.is_none())
+    );
+}
+
+/// [`LayoutTable::empty_seats`] is populated only by the editor layout, laid
+/// out below the (unchanged) table area inside a card that is one row
+/// taller to fit it — and the strict export layout never grows the card or
+/// populates it at all.
+#[test]
+fn empty_seats_sit_below_the_table_area() {
+    let project = round_project();
+    let mut assignments = round_assignments();
+    assignments.pop(); // leave seat 3 unassigned
+    let options = RenderOptions::default();
+
+    let layout = build_editor_layout(&project, &assignments, false).unwrap();
+    let table = &layout.tables[0];
+
+    assert_eq!(table.empty_seats.len(), 1);
+    assert_eq!(table.empty_seats[0].seat_index, 3);
+    assert!(table.empty_seats[0].person_name.is_none());
+
+    assert!(table.height > options.table_height);
+    let seat_y = table.empty_seats[0].y;
+    assert!(seat_y > table.y + options.table_height);
+    assert!(seat_y < table.y + table.height);
+
+    let export_layout = build_layout(&project, &round_assignments()).unwrap();
+    assert_eq!(export_layout.tables[0].height, options.table_height);
+    assert!(export_layout.tables[0].empty_seats.is_empty());
 }
 
 #[test]
@@ -1175,6 +1225,7 @@ fn png_rendering_includes_guest_text_when_fonts_are_loaded() {
         width: 240.0,
         height: 220.0,
         seats: vec![occupied_seat],
+        empty_seats: vec![],
         surface: TableSurface::Round {
             cx: 144.0,
             cy: 134.0,
@@ -3008,6 +3059,301 @@ fn apply_seat_drop_places_an_unassigned_guest() {
     let p1 = updated.iter().find(|a| a.person_id == "p1").unwrap();
     assert_eq!((p1.table_number, p1.seat_index), (1, 3));
     assert_eq!(p1.table_type, "round_4");
+}
+
+// ── apply_seat_append ────────────────────────────────────────────────────
+
+#[test]
+fn apply_seat_append_places_guest_after_last_occupant() {
+    let project = make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\no1,O1,,,,\no2,O2,,,,\nmover,Mover,,,,\n",
+        "left_id,right_id,score\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_6,round,6,,,2,\n",
+    )
+    .unwrap();
+    // o1 at seat 0, o2 at seat 2 (seat 1 is a gap); mover starts at table 2.
+    let assignments = vec![
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 0,
+            person_id: "o1".to_string(),
+            person_name: "O1".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 2,
+            person_id: "o2".to_string(),
+            person_name: "O2".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 2,
+            table_type: "round_6".to_string(),
+            seat_index: 0,
+            person_id: "mover".to_string(),
+            person_name: "Mover".to_string(),
+        },
+    ];
+
+    let updated = apply_seat_append(&project, &assignments, "mover", 1).unwrap();
+
+    let mover = updated.iter().find(|a| a.person_id == "mover").unwrap();
+    // Appended right after the last occupant (seat 2) — the earlier gap at
+    // seat 1 is never filled.
+    assert_eq!((mover.table_number, mover.seat_index), (1, 3));
+    assert_eq!(
+        updated
+            .iter()
+            .find(|a| a.person_id == "o1")
+            .unwrap()
+            .seat_index,
+        0
+    );
+    assert_eq!(
+        updated
+            .iter()
+            .find(|a| a.person_id == "o2")
+            .unwrap()
+            .seat_index,
+        2
+    );
+}
+
+/// When the table's last occupied seat is already its last capacity slot,
+/// the other occupants are renumbered to close every gap (preserving their
+/// relative order) and the mover takes the next seat. Renumbering must not
+/// change the other occupants' mutual score: their ranks (and thus every
+/// pairwise seat distance among them) are identical before and after.
+#[test]
+fn apply_seat_append_reindexes_when_no_higher_seat_is_free() {
+    let project = make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\na,A,,,,\nb,B,,,,\nc,C,,,,\nd,D,,,,\nmover,Mover,,,,\n",
+        "left_id,right_id,score\na,d,10\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_6,round,6,,,2,\n",
+    )
+    .unwrap();
+    // a, b, c, d occupy 0, 2, 4, 5 of round_6 (gaps at 1, 3); mover starts at
+    // table 2.
+    let assignments = vec![
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 0,
+            person_id: "a".to_string(),
+            person_name: "A".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 2,
+            person_id: "b".to_string(),
+            person_name: "B".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 4,
+            person_id: "c".to_string(),
+            person_name: "C".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 5,
+            person_id: "d".to_string(),
+            person_name: "D".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 2,
+            table_type: "round_6".to_string(),
+            seat_index: 0,
+            person_id: "mover".to_string(),
+            person_name: "Mover".to_string(),
+        },
+    ];
+
+    let updated = apply_seat_append(&project, &assignments, "mover", 1).unwrap();
+
+    let mover = updated.iter().find(|a| a.person_id == "mover").unwrap();
+    assert_eq!((mover.table_number, mover.seat_index), (1, 4));
+    for (id, expected_seat) in [("a", 0), ("b", 1), ("c", 2), ("d", 3)] {
+        let seat = updated
+            .iter()
+            .find(|x| x.person_id == id)
+            .unwrap()
+            .seat_index;
+        assert_eq!(
+            seat, expected_seat,
+            "{id} should be renumbered to {expected_seat}"
+        );
+    }
+
+    // Score invariant: a/b/c/d's mutual proximity score (computed against
+    // the same round_6 table, ignoring the 5th guest) is unchanged whether
+    // they occupy the original gapped seats or the renumbered ones — their
+    // ranks (0, 1, 2, 3 in the same order) never moved.
+    let four_person_project = make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\na,A,,,,\nb,B,,,,\nc,C,,,,\nd,D,,,,\n",
+        "left_id,right_id,score\na,d,10\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_6,round,6,,,1,\n",
+    )
+    .unwrap();
+    let before = vec![
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 0,
+            person_id: "a".to_string(),
+            person_name: "A".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 2,
+            person_id: "b".to_string(),
+            person_name: "B".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 4,
+            person_id: "c".to_string(),
+            person_name: "C".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 5,
+            person_id: "d".to_string(),
+            person_name: "D".to_string(),
+        },
+    ];
+    let after = vec![
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 0,
+            person_id: "a".to_string(),
+            person_name: "A".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 1,
+            person_id: "b".to_string(),
+            person_name: "B".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 2,
+            person_id: "c".to_string(),
+            person_name: "C".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 3,
+            person_id: "d".to_string(),
+            person_name: "D".to_string(),
+        },
+    ];
+    let config = OptimizationConfig::default();
+    let before_score = score_solution(&four_person_project, &before, &config).unwrap();
+    let after_score = score_solution(&four_person_project, &after, &config).unwrap();
+    assert_eq!(before_score, after_score);
+}
+
+/// A locked-seat guest among the table's other occupants blocks the
+/// renumbering step entirely (moving them would violate their lock); the
+/// mover falls back to the lowest free seat index and nobody else moves.
+#[test]
+fn apply_seat_append_falls_back_when_a_locked_seat_blocks_reindexing() {
+    let project = make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\na,A,,,,\nb,B,,,,\nc,C,,,1,4\nd,D,,,,\nmover,Mover,,,,\n",
+        "left_id,right_id,score\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_6,round,6,,,2,\n",
+    )
+    .unwrap();
+    let assignments = vec![
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 0,
+            person_id: "a".to_string(),
+            person_name: "A".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 2,
+            person_id: "b".to_string(),
+            person_name: "B".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 4,
+            person_id: "c".to_string(),
+            person_name: "C".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_6".to_string(),
+            seat_index: 5,
+            person_id: "d".to_string(),
+            person_name: "D".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 2,
+            table_type: "round_6".to_string(),
+            seat_index: 0,
+            person_id: "mover".to_string(),
+            person_name: "Mover".to_string(),
+        },
+    ];
+
+    let updated = apply_seat_append(&project, &assignments, "mover", 1).unwrap();
+
+    let mover = updated.iter().find(|a| a.person_id == "mover").unwrap();
+    // Lowest free seat among {0, 2, 4, 5} within capacity 6 is seat 1.
+    assert_eq!((mover.table_number, mover.seat_index), (1, 1));
+    for (id, expected_seat) in [("a", 0), ("b", 2), ("c", 4), ("d", 5)] {
+        let seat = updated
+            .iter()
+            .find(|x| x.person_id == id)
+            .unwrap()
+            .seat_index;
+        assert_eq!(
+            seat, expected_seat,
+            "{id} should stay at their original seat"
+        );
+    }
+}
+
+#[test]
+fn apply_seat_append_seats_an_unassigned_guest() {
+    let project = make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\no1,O1,,,,\nmover,Mover,,,,\n",
+        "left_id,right_id,score\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_6,round,6,,,1,\n",
+    )
+    .unwrap();
+    let assignments = vec![SeatingAssignment {
+        table_number: 1,
+        table_type: "round_6".to_string(),
+        seat_index: 0,
+        person_id: "o1".to_string(),
+        person_name: "O1".to_string(),
+    }];
+
+    let updated = apply_seat_append(&project, &assignments, "mover", 1).unwrap();
+
+    let mover = updated.iter().find(|a| a.person_id == "mover").unwrap();
+    assert_eq!((mover.table_number, mover.seat_index), (1, 1));
+    assert_eq!(mover.table_type, "round_6");
+    assert_eq!(mover.person_name, "Mover");
 }
 
 #[test]
