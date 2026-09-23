@@ -348,13 +348,27 @@ pub fn render_svg(layout: &SeatingLayout, options: &RenderOptions) -> String {
                     seat.y + 0.5,
                     seat.seat_index
                 ));
-                let label = fit_label(person_name, label_budget, options.font_size - 1.0);
+                let label_font_size = options.font_size - 1.0;
+                let lines = wrap_label(person_name, label_budget, label_font_size);
                 svg.push_str(&format!(
-                    "<text class=\"guest\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text>",
+                    "<text class=\"guest\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">",
                     seat.x,
-                    seat.y + options.seat_radius + 16.0,
-                    escape_xml(&label)
+                    seat.y + options.seat_radius + 16.0
                 ));
+                for (line_index, line) in lines.iter().enumerate() {
+                    let dy = if line_index == 0 {
+                        0.0
+                    } else {
+                        label_font_size
+                    };
+                    svg.push_str(&format!(
+                        "<tspan x=\"{:.1}\" dy=\"{:.1}\">{}</tspan>",
+                        seat.x,
+                        dy,
+                        escape_xml(line)
+                    ));
+                }
+                svg.push_str("</text>");
             } else {
                 // Unoccupied capacity slot: hollow, dimmed marker.
                 svg.push_str(&format!(
@@ -717,21 +731,46 @@ fn min_seat_spacing(seats: &[LayoutSeat]) -> Option<f32> {
     min_dist.is_finite().then_some(min_dist)
 }
 
-/// Truncate `name` with an ellipsis so it fits within `budget_px`,
-/// approximating Arial glyph width as `0.55 * font_size` per character. The
-/// full name is preserved separately in a `<title>` element for hover text.
-fn fit_label(name: &str, budget_px: f32, font_size: f32) -> String {
+/// Greedily word-wraps `name` into lines that each fit within `budget_px`,
+/// approximating Arial glyph width as `0.55 * font_size` per character.
+/// Words longer than one line are split across lines by character. Never
+/// truncates or adds an ellipsis; the full name is always recoverable by
+/// rejoining the returned lines, and is also preserved separately in a
+/// `<title>` element for hover text.
+fn wrap_label(name: &str, budget_px: f32, font_size: f32) -> Vec<String> {
     let char_width = (font_size * 0.55).max(1.0);
     let max_chars = (budget_px / char_width).floor().max(1.0) as usize;
-    let char_count = name.chars().count();
-    if char_count <= max_chars {
-        name.to_string()
-    } else if max_chars <= 1 {
-        "…".to_string()
-    } else {
-        let truncated: String = name.chars().take(max_chars - 1).collect();
-        format!("{truncated}…")
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in name.split_whitespace() {
+        for chunk in split_into_chunks(word, max_chars) {
+            if current.is_empty() {
+                current = chunk;
+            } else if current.chars().count() + 1 + chunk.chars().count() <= max_chars {
+                current.push(' ');
+                current.push_str(&chunk);
+            } else {
+                lines.push(std::mem::take(&mut current));
+                current = chunk;
+            }
+        }
     }
+    lines.push(current);
+    lines
+}
+
+/// Splits `word` into chunks of at most `max_chars` characters, so a single
+/// word longer than the label budget still wraps instead of overflowing.
+fn split_into_chunks(word: &str, max_chars: usize) -> Vec<String> {
+    let chars: Vec<char> = word.chars().collect();
+    if chars.len() <= max_chars {
+        return vec![word.to_string()];
+    }
+    chars
+        .chunks(max_chars)
+        .map(|chunk| chunk.iter().collect())
+        .collect()
 }
 
 fn escape_xml(text: &str) -> String {
@@ -748,5 +787,41 @@ fn shape_label(shape: &TableShape) -> &'static str {
         TableShape::Rectangular => "rectangular",
         TableShape::Square => "square",
         TableShape::Semicircle => "semicircle",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_label;
+
+    /// Every line `wrap_label` returns must fit the same width estimate the
+    /// budget was computed with, and rejoining the lines (ignoring the
+    /// whitespace introduced/removed at wrap points) must reproduce the
+    /// original name — i.e. no characters are dropped or replaced with an
+    /// ellipsis.
+    #[test]
+    fn wrap_label_fits_budget_and_preserves_all_characters() {
+        let name = "Alexandria Montgomery-Featherstonehaugh";
+        let font_size: f32 = 13.0;
+        let budget_px: f32 = 90.0;
+        let char_width = (font_size * 0.55).max(1.0);
+        let max_chars = (budget_px / char_width).floor().max(1.0) as usize;
+
+        let lines = wrap_label(name, budget_px, font_size);
+        assert!(lines.len() >= 2);
+        for line in &lines {
+            assert!(
+                line.chars().count() <= max_chars,
+                "line {line:?} exceeds max_chars {max_chars}"
+            );
+        }
+
+        let rejoined: String = lines
+            .concat()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let original: String = name.chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(rejoined, original);
     }
 }

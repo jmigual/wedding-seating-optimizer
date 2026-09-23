@@ -886,7 +886,7 @@ fn round_table_layout_uses_capacity_not_occupant_count_for_seat_angles() {
 }
 
 #[test]
-fn svg_truncates_long_guest_labels_and_keeps_full_name_in_title() {
+fn svg_wraps_long_guest_labels_without_ellipsis() {
     let project = round_project();
     let mut assignments = round_assignments();
     assignments[0].person_name = "Alexandria Montgomery-Featherstonehaugh".to_string();
@@ -895,14 +895,11 @@ fn svg_truncates_long_guest_labels_and_keeps_full_name_in_title() {
     let svg = render_svg(&layout, &RenderOptions::default());
 
     assert!(svg.contains("<title>Alexandria Montgomery-Featherstonehaugh</title>"));
-    // The full name must appear only once (inside <title>) — the visible
-    // guest label is truncated with an ellipsis, not the raw string.
-    assert_eq!(
-        svg.matches("Alexandria Montgomery-Featherstonehaugh")
-            .count(),
-        1
-    );
-    assert!(svg.contains('…'));
+    // The guest label must never be truncated with an ellipsis.
+    assert!(!svg.contains('…'));
+    // The long name must wrap onto multiple lines (multiple <tspan>s) rather
+    // than overflowing or being cut down to one line.
+    assert!(svg.matches("<tspan").count() >= 2);
 }
 
 #[test]
