@@ -894,12 +894,71 @@ fn svg_wraps_long_guest_labels_without_ellipsis() {
     let layout = build_layout(&project, &assignments).unwrap();
     let svg = render_svg(&layout, &RenderOptions::default());
 
-    assert!(svg.contains("<title>Alexandria Montgomery-Featherstonehaugh</title>"));
+    let title = "<title>Alexandria Montgomery-Featherstonehaugh</title>";
+    assert!(svg.contains(title));
     // The guest label must never be truncated with an ellipsis.
     assert!(!svg.contains('…'));
-    // The long name must wrap onto multiple lines (multiple <tspan>s) rather
-    // than overflowing or being cut down to one line.
-    assert!(svg.matches("<tspan").count() >= 2);
+
+    // Isolate the <text class="guest"> element for this specific guest (the
+    // one immediately following their <title>), rather than counting
+    // <tspan>s across the whole SVG — every seat emits at least one <tspan>,
+    // so that alone wouldn't prove this particular long name wrapped.
+    let after_title = &svg[svg.find(title).unwrap() + title.len()..];
+    let guest_text_start = after_title.find("<text class=\"guest\"").unwrap();
+    let guest_text = &after_title[guest_text_start..];
+    let guest_text_end = guest_text.find("</text>").unwrap() + "</text>".len();
+    let guest_text = &guest_text[..guest_text_end];
+
+    assert!(
+        guest_text.matches("<tspan").count() >= 2,
+        "expected the long name to wrap onto multiple <tspan> lines, got: {guest_text}"
+    );
+
+    // Every <tspan>'s content, concatenated, must reproduce the full name
+    // (ignoring the whitespace introduced/removed at wrap points).
+    let mut joined = String::new();
+    let mut rest = guest_text;
+    while let Some(open) = rest.find("<tspan") {
+        let after_open = &rest[open..];
+        let content_start = after_open.find('>').unwrap() + 1;
+        let content_and_rest = &after_open[content_start..];
+        let close = content_and_rest.find("</tspan>").unwrap();
+        joined.push_str(&content_and_rest[..close]);
+        rest = &content_and_rest[close + "</tspan>".len()..];
+    }
+    let joined: String = joined.chars().filter(|c| !c.is_whitespace()).collect();
+    let expected: String = "Alexandria Montgomery-Featherstonehaugh"
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert_eq!(joined, expected);
+}
+
+#[test]
+fn svg_height_grows_to_fit_wrapped_labels_without_clipping() {
+    let project = round_project();
+    let mut assignments = round_assignments();
+    // Seat index 2 sits at the bottom of the ring, closest to the image
+    // edge — its wrapped label lines are the ones a fixed layout.height
+    // would clip.
+    assignments[2].person_name = "Alexandria Montgomery-Featherstonehaugh".to_string();
+
+    let layout = build_layout(&project, &assignments).unwrap();
+    let svg = render_svg(&layout, &RenderOptions::default());
+
+    let height_attr: f32 = svg
+        .split("height=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .and_then(|value| value.parse().ok())
+        .unwrap();
+
+    assert!(
+        height_attr > layout.height,
+        "expected the SVG canvas ({height_attr}) to grow past the base layout height \
+         ({}) to fit the wrapped label instead of clipping it",
+        layout.height
+    );
 }
 
 #[test]
