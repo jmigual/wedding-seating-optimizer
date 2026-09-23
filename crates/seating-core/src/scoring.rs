@@ -62,11 +62,38 @@ pub fn linear_distance(a: usize, b: usize) -> usize {
 /// distance function. Shared by [`score_solution_breakdown`] and the
 /// optimizer's `ScoringContext::score_positions` so both agree on the
 /// per-shape distance rule.
+///
+/// `a` and `b` are **ranks** (a guest's position among a table's occupied
+/// seats, `0..k`), not raw seat indices, and `k` is the number of occupied
+/// seats at the table, not its total capacity — so an empty seat between two
+/// guests never counts toward their distance. This is exact (guests are
+/// always adjacent-in-rank when adjacent-in-occupancy), not a heuristic
+/// approximation.
 pub fn seat_distance(shape: &TableShape, a: usize, b: usize, seats: usize) -> usize {
     match shape {
         TableShape::Round => circular_distance(a, b, seats),
         TableShape::Rectangular | TableShape::Square => perimeter_distance(a, b, seats),
         TableShape::Semicircle => linear_distance(a, b),
+    }
+}
+
+/// Ranks (position among a table's occupied seats) for every seated guest,
+/// written into `out` in the same order as the table's occupants — `out[i]`
+/// is the rank of the `i`-th occupant, `seat_index_of(i)` its raw seat
+/// index. Ranks are dense in `0..count`, so a gap left by an empty seat
+/// never affects the distance between two occupied seats on either side of
+/// it.
+///
+/// Computed once per table in O(count²) (each guest's rank costs one O(count)
+/// scan), rather than once per *pair* — an O(count²) pair loop that each
+/// recomputed both ranks would cost O(count³) overall. `out` is cleared and
+/// resized here; callers reuse it across tables/calls to avoid reallocating.
+fn compute_ranks(out: &mut Vec<usize>, count: usize, seat_index_of: impl Fn(usize) -> usize) {
+    out.clear();
+    out.resize(count, 0);
+    for (i, rank) in out.iter_mut().enumerate() {
+        let seat_i = seat_index_of(i);
+        *rank = (0..count).filter(|&j| seat_index_of(j) < seat_i).count();
     }
 }
 
@@ -190,6 +217,12 @@ pub struct ScoreBreakdown {
 /// effective_pair_score × proximity_weight(seat_distance) × config.proximity_weight
 /// ```
 ///
+/// `seat_distance` is computed from each guest's **rank** among the table's
+/// occupied seats (see [`seat_distance`]), not their raw seat index, so an
+/// empty seat between two guests never inflates their distance. This is
+/// exact, not a heuristic — it's the same rank-based rule every table shape
+/// uses.
+///
 /// Pairs at **different** tables contribute 0 regardless of their closeness.
 ///
 /// Additional global penalties are applied for every used table and for each
@@ -234,17 +267,19 @@ pub fn score_solution_breakdown(
     let mut proximity = 0.0;
 
     // Pairwise same-table score.
+    let mut ranks: Vec<usize> = Vec::new();
     for seated in by_table.values() {
-        for i in 0..seated.len() {
-            for j in (i + 1)..seated.len() {
+        let k = seated.len();
+        compute_ranks(&mut ranks, k, |i| seated[i].seat_index);
+        for i in 0..k {
+            for j in (i + 1)..k {
                 let a = seated[i];
                 let b = seated[j];
                 let pa = person_map[a.person_id.as_str()];
                 let pb = person_map[b.person_id.as_str()];
                 let pair_score = pair_score_with_lookup(&closeness, pa, pb);
                 let table = table_by_number[&a.table_number];
-                let distance =
-                    seat_distance(&table.shape, a.seat_index, b.seat_index, table.max_people);
+                let distance = seat_distance(&table.shape, ranks[i], ranks[j], k);
                 let contribution =
                     pair_score * default_proximity_weight(distance) * config.proximity_weight;
                 total += contribution;
@@ -316,10 +351,12 @@ fn canonical_pair_ref<'a>(a: &'a str, b: &'a str) -> (&'a str, &'a str) {
 ///
 /// Building this once per attempt — rather than once per step — avoids
 /// regenerating table instances and resolving closeness rules per pair:
-/// every effective pair score is resolved once into `pair_matrix`, so a
-/// step costs one table lookup and one `f64` read per same-table pair.
-/// [`Self::score_positions`] intentionally does **not** validate: callers
-/// (`HeuristicOptimizer`) must only ever present structurally valid moves.
+/// every effective pair score is resolved once into `pair_matrix`, so a step
+/// costs one table lookup, one rank computed per occupant per table (O(k²)
+/// total, see [`compute_ranks`]), and one `f64` pair-matrix read per
+/// same-table pair. [`Self::score_positions`] intentionally does **not**
+/// validate: callers (`HeuristicOptimizer`) must only ever present
+/// structurally valid moves.
 pub(crate) struct ScoringContext<'p> {
     /// Table instances in number order; instance `number` lives at `number - 1`.
     pub(crate) instances: Vec<TableInstance>,
@@ -378,15 +415,17 @@ impl<'p> ScoringContext<'p> {
     /// [`score_solution`]'s math and summation order — tables ascending,
     /// pairs in person order — so both produce bitwise-identical totals.
     ///
-    /// `scratch` is a caller-owned, per-table occupant buffer reused across
-    /// calls (e.g. every LAHC step) to avoid reallocating one `Vec` per table
-    /// on every call; its contents on entry are irrelevant, it is cleared
-    /// and repopulated here.
+    /// `scratch` is a caller-owned, per-table occupant buffer and `ranks` a
+    /// caller-owned per-table rank buffer, both reused across calls (e.g.
+    /// every LAHC step) to avoid reallocating one `Vec` per table on every
+    /// call; their contents on entry are irrelevant, both are cleared and
+    /// repopulated here.
     pub(crate) fn score_positions(
         &self,
         positions: &[(usize, usize)],
         config: &OptimizationConfig,
         scratch: &mut Vec<Vec<usize>>,
+        ranks: &mut Vec<usize>,
     ) -> f64 {
         let n = positions.len();
         scratch.resize_with(self.instances.len(), Vec::new);
@@ -399,10 +438,13 @@ impl<'p> ScoringContext<'p> {
 
         let mut total = 0.0;
         for (table, seated) in self.instances.iter().zip(scratch.iter()) {
-            for (k, &i) in seated.iter().enumerate() {
-                for &j in &seated[k + 1..] {
-                    let (seat_i, seat_j) = (positions[i].1, positions[j].1);
-                    let distance = seat_distance(&table.shape, seat_i, seat_j, table.max_people);
+            let k = seated.len();
+            compute_ranks(ranks, k, |idx| positions[seated[idx]].1);
+            for idx in 0..k {
+                let i = seated[idx];
+                for jdx in (idx + 1)..k {
+                    let j = seated[jdx];
+                    let distance = seat_distance(&table.shape, ranks[idx], ranks[jdx], k);
                     total += self.pair_matrix[i * n + j]
                         * default_proximity_weight(distance)
                         * config.proximity_weight;
@@ -471,12 +513,175 @@ mod tests {
             .collect();
 
         let expected = score_solution(&project, &assignments, &config).unwrap();
-        let actual =
-            ScoringContext::build(&project).score_positions(&positions, &config, &mut Vec::new());
+        let actual = ScoringContext::build(&project).score_positions(
+            &positions,
+            &config,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
 
         // proximity 5 (distance 1) - used tables 2 * 2.0 - size |2-3| + |1-3|
         // = 3 - min shortfall 1 * 1000.0
         assert_eq!(expected, 5.0 - 4.0 - 3.0 - 1000.0);
+        assert_eq!(actual, expected);
+    }
+
+    /// An empty seat between two guests must not inflate their distance: a
+    /// guest's position is its rank among *occupied* seats, not its raw seat
+    /// index. Round table, seats A=0, B=1, C=3 (seat 2 empty) — B and C are
+    /// tablemates 1 and 2 (0-indexed, of 3 occupied), i.e. adjacent, not two
+    /// circular steps apart.
+    #[test]
+    fn empty_seats_do_not_count_toward_round_distance() {
+        let project = make_project(
+            "id,name,table_type,groups,locked_table,locked_seat\np1,A,,,,\np2,B,,,,\np3,C,,,,\n",
+            "left_id,right_id,score\np2,p3,10\n",
+            "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_4,round,4,,,1,\n",
+        )
+        .unwrap();
+        let assignments = vec![
+            SeatingAssignment {
+                table_number: 1,
+                table_type: "round_4".to_string(),
+                seat_index: 0,
+                person_id: "p1".to_string(),
+                person_name: "A".to_string(),
+            },
+            SeatingAssignment {
+                table_number: 1,
+                table_type: "round_4".to_string(),
+                seat_index: 1,
+                person_id: "p2".to_string(),
+                person_name: "B".to_string(),
+            },
+            SeatingAssignment {
+                table_number: 1,
+                table_type: "round_4".to_string(),
+                seat_index: 3,
+                person_id: "p3".to_string(),
+                person_name: "C".to_string(),
+            },
+        ];
+
+        let breakdown =
+            score_solution_breakdown(&project, &assignments, &OptimizationConfig::default())
+                .unwrap();
+        // Ranks: A=0, B=1, C=2 (of 3 occupied) — B/C are rank-adjacent
+        // (distance 1, weight 1.0) => 10.0. Scoring by raw seat index would
+        // treat B(1)/C(3) as two circular steps apart (weight 0.75) => 7.5.
+        assert_eq!(breakdown.proximity, 10.0);
+    }
+
+    /// Same rule as [`empty_seats_do_not_count_toward_round_distance`] for a
+    /// rectangular table: two guests two raw seats apart with the seat
+    /// between them empty are tablemates 0 and 1 (0-indexed, of 2 occupied),
+    /// i.e. adjacent, not two perimeter steps apart.
+    #[test]
+    fn empty_seats_do_not_count_toward_rectangular_distance() {
+        let project = make_project(
+            "id,name,table_type,groups,locked_table,locked_seat\np1,A,,,,\np2,C,,,,\n",
+            "left_id,right_id,score\np1,p2,1\n",
+            "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nrect_4,rectangular,4,,,1,1|1|1|1\n",
+        )
+        .unwrap();
+        let assignments = vec![
+            SeatingAssignment {
+                table_number: 1,
+                table_type: "rect_4".to_string(),
+                seat_index: 0,
+                person_id: "p1".to_string(),
+                person_name: "A".to_string(),
+            },
+            SeatingAssignment {
+                table_number: 1,
+                table_type: "rect_4".to_string(),
+                seat_index: 2,
+                person_id: "p2".to_string(),
+                person_name: "C".to_string(),
+            },
+        ];
+
+        let breakdown =
+            score_solution_breakdown(&project, &assignments, &OptimizationConfig::default())
+                .unwrap();
+        // Ranks 0 and 1 (of 2 occupied) => distance 1, weight 1.0 => 1.0.
+        // Scoring by raw seat index (0 and 2 of 4) would give distance 2,
+        // weight 0.75 => 0.75.
+        assert_eq!(breakdown.proximity, 1.0);
+    }
+
+    /// The optimizer's hot-path scorer and the public validated scorer must
+    /// agree bitwise on the rank-based distance too, including when seats
+    /// have gaps.
+    #[test]
+    fn score_positions_matches_score_solution_with_gaps() {
+        let project = make_project(
+            "id,name,table_type,groups,locked_table,locked_seat\np1,A,,,,\np2,B,,,,\np3,C,,,,\np4,D,,,,\n",
+            "left_id,right_id,score\np1,p2,5\np1,p3,2\np2,p4,3\n",
+            "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_6,round,6,,,1,\n",
+        )
+        .unwrap();
+        // Gaps at seats 1 and 3: occupied seats are 0, 2, 4, 5.
+        let positions = [(1, 0), (1, 2), (1, 4), (1, 5)];
+        let assignments: Vec<SeatingAssignment> = project
+            .people
+            .iter()
+            .zip(positions)
+            .map(|(p, (table_number, seat_index))| SeatingAssignment {
+                table_number,
+                table_type: "round_6".to_string(),
+                seat_index,
+                person_id: p.id.clone(),
+                person_name: p.name.clone(),
+            })
+            .collect();
+        let config = OptimizationConfig::default();
+
+        let expected = score_solution(&project, &assignments, &config).unwrap();
+        let actual = ScoringContext::build(&project).score_positions(
+            &positions,
+            &config,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
+
+        assert_eq!(actual, expected);
+    }
+
+    /// Same parity check as [`score_positions_matches_score_solution_with_gaps`],
+    /// for a semicircle table (linear, no-wrap distance) with gaps.
+    #[test]
+    fn score_positions_matches_score_solution_with_gaps_semicircle() {
+        let project = make_project(
+            "id,name,table_type,groups,locked_table,locked_seat\np1,A,,,,\np2,B,,,,\np3,C,,,,\n",
+            "left_id,right_id,score\np1,p2,5\np1,p3,2\np2,p3,4\n",
+            "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nsemi_6,semicircle,6,,,1,\n",
+        )
+        .unwrap();
+        // Gaps at seats 1 and 3: occupied seats are 0, 2, 4.
+        let positions = [(1, 0), (1, 2), (1, 4)];
+        let assignments: Vec<SeatingAssignment> = project
+            .people
+            .iter()
+            .zip(positions)
+            .map(|(p, (table_number, seat_index))| SeatingAssignment {
+                table_number,
+                table_type: "semi_6".to_string(),
+                seat_index,
+                person_id: p.id.clone(),
+                person_name: p.name.clone(),
+            })
+            .collect();
+        let config = OptimizationConfig::default();
+
+        let expected = score_solution(&project, &assignments, &config).unwrap();
+        let actual = ScoringContext::build(&project).score_positions(
+            &positions,
+            &config,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
+
         assert_eq!(actual, expected);
     }
 }
