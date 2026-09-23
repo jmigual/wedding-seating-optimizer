@@ -11,9 +11,9 @@ use crate::state::{
 use eframe::egui;
 use seating_core::{
     CLOSENESS_CSV_HEADER, ClosenessRule, OptimizationConfig, PEOPLE_CSV_HEADER, ReferenceIdOption,
-    TABLES_CSV_HEADER, TableShape, ValidationError, collect_group_ids, generate_table_instances,
-    move_table_number, parse_f64_value, reference_id_options, reference_label, remove_group,
-    rename_group, rules_match, table_number_remap,
+    TABLES_CSV_HEADER, TableShape, ValidationError, closeness_display_order, collect_group_ids,
+    generate_table_instances, move_table_number, parse_f64_value, reference_id_options,
+    reference_label, remove_group, rename_group, rules_match, table_number_remap,
 };
 use std::collections::HashMap;
 
@@ -594,8 +594,19 @@ fn closeness_section(shared: &mut SharedState, ui: &mut egui::Ui) {
     }
 
     let options = reference_id_options(&shared.people);
+    let groups = collect_group_ids(&shared.people);
+    // Display order only (group↔group, then group↔person, then
+    // person↔person): `shared.closeness_rules` itself is left untouched, so
+    // every row below still edits/deletes through its real underlying index.
+    let pairs: Vec<(&str, &str)> = shared
+        .closeness_rules
+        .iter()
+        .map(|row| (row.left_id.as_str(), row.right_id.as_str()))
+        .collect();
+    let order = closeness_display_order(&pairs, &groups, &options);
+
     let mut delete_index = None;
-    for index in 0..shared.closeness_rules.len() {
+    for index in order {
         ui.group(|ui| {
             let mut changed = false;
 

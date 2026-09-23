@@ -729,6 +729,40 @@ impl ValidationError {
     }
 }
 
+// ── Closeness display ordering ────────────────────────────────────────────────
+
+/// Compute a display order for closeness rules: group↔group pairs first,
+/// then group↔person (either direction), then person↔person. Within a
+/// category, rules are ordered by their displayed labels (case-insensitive),
+/// first id then second.
+///
+/// Returns indices into `pairs` in display order. This is display ordering
+/// only — it does not reorder or mutate the underlying rules, so callers
+/// must index back through the returned permutation when editing or
+/// deleting a row.
+pub fn closeness_display_order(
+    pairs: &[(&str, &str)],
+    groups: &[GroupId],
+    options: &[ReferenceIdOption],
+) -> Vec<usize> {
+    let is_group = |id: &str| groups.iter().any(|group| group.as_str() == id);
+    let mut order: Vec<usize> = (0..pairs.len()).collect();
+    order.sort_by_key(|&i| {
+        let (left, right) = pairs[i];
+        let rank = match (is_group(left), is_group(right)) {
+            (true, true) => 0,
+            (false, false) => 2,
+            _ => 1,
+        };
+        (
+            rank,
+            reference_label(left, options).to_ascii_lowercase(),
+            reference_label(right, options).to_ascii_lowercase(),
+        )
+    });
+    order
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -968,5 +1002,34 @@ mod tests {
         let closeness_error =
             ValidationError::DuplicateClosenessRule("a".to_string(), "b".to_string());
         assert_eq!(closeness_error.closeness_pair(), Some(("a", "b")));
+    }
+
+    #[test]
+    fn closeness_display_order_sorts_group_group_then_group_person_then_person_person() {
+        let groups = vec!["family".to_string(), "friends".to_string()];
+        let options = vec![
+            ReferenceIdOption {
+                id: "family".to_string(),
+                label: "family — group".to_string(),
+            },
+            ReferenceIdOption {
+                id: "friends".to_string(),
+                label: "friends — group".to_string(),
+            },
+            ReferenceIdOption {
+                id: "p1".to_string(),
+                label: "Zoe".to_string(),
+            },
+            ReferenceIdOption {
+                id: "p2".to_string(),
+                label: "Alice".to_string(),
+            },
+        ];
+        // person-person, group-group, group-person, in stored order.
+        let pairs = [("p1", "p2"), ("friends", "family"), ("family", "p1")];
+
+        let order = closeness_display_order(&pairs, &groups, &options);
+
+        assert_eq!(order, vec![1, 2, 0]);
     }
 }

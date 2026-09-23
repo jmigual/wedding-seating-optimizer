@@ -51,11 +51,12 @@ pub mod validation;
 // ── Public re-exports ─────────────────────────────────────────────────────────
 
 pub use editing::{
-    ReferenceIdOption, SeatDropOutcome, apply_seat_drop, build_table_type_map, collect_group_ids,
-    compact_table_numbers, merge_closeness_rules, merge_people, merge_table_types,
-    move_table_number, parse_f64_value, parse_optional_usize_value, parse_people_per_side,
-    parse_required_usize_value, reference_id_options, reference_label, reference_matches,
-    remove_group, rename_group, rules_match, swap_table_numbers, table_number_remap,
+    ReferenceIdOption, SeatDropOutcome, apply_seat_drop, build_table_type_map,
+    closeness_display_order, collect_group_ids, compact_table_numbers, merge_closeness_rules,
+    merge_people, merge_table_types, move_table_number, parse_f64_value,
+    parse_optional_usize_value, parse_people_per_side, parse_required_usize_value,
+    reference_id_options, reference_label, reference_matches, remove_group, rename_group,
+    rules_match, swap_table_numbers, table_number_remap,
 };
 pub use io::{
     CLOSENESS_CSV_HEADER, PEOPLE_CSV_HEADER, SEATING_CSV_HEADER, TABLES_CSV_HEADER, make_project,
