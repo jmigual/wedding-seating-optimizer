@@ -272,8 +272,17 @@ fn people_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
                 egui::ComboBox::from_id_salt(("person_group_picker", index))
                     .selected_text("+ existing group")
                     .show_ui(ui, |ui| {
+                        let filter = search_filter_field(
+                            ui,
+                            egui::Id::new(("person_group_picker_filter", index)),
+                            100.0,
+                        );
+                        let query = filter.trim().to_ascii_lowercase();
                         for group in &all_groups {
                             if shared.people[index].groups.contains(group) {
+                                continue;
+                            }
+                            if !query.is_empty() && !group.to_ascii_lowercase().contains(&query) {
                                 continue;
                             }
                             if ui.selectable_label(false, group).clicked() {
@@ -720,7 +729,12 @@ fn left_field(
         .selected_text(selected)
         .width(REFERENCE_COMBO_W)
         .show_ui(ui, |ui| {
-            for option in options {
+            let filter = search_filter_field(
+                ui,
+                egui::Id::new(("closeness_left_filter", index)),
+                REFERENCE_COMBO_W,
+            );
+            for option in filter_options(options, &filter) {
                 let is_selected = current == option.id;
                 if ui.selectable_label(is_selected, &option.label).clicked() {
                     shared.closeness_rules[index].left_id = option.id.clone();
@@ -749,7 +763,12 @@ fn right_field(
         .selected_text(selected)
         .width(REFERENCE_COMBO_W)
         .show_ui(ui, |ui| {
-            for option in options {
+            let filter = search_filter_field(
+                ui,
+                egui::Id::new(("closeness_right_filter", index)),
+                REFERENCE_COMBO_W,
+            );
+            for option in filter_options(options, &filter) {
                 let is_selected = current == option.id;
                 if ui.selectable_label(is_selected, &option.label).clicked() {
                     shared.closeness_rules[index].right_id = option.id.clone();
@@ -1302,4 +1321,37 @@ fn truncate_label(text: &str, max_chars: usize) -> String {
     } else {
         text.to_string()
     }
+}
+
+/// Draw a search-filter `TextEdit` and return its current text. The text is
+/// read from and written back to egui's own `Id`-keyed temporary memory —
+/// transient UI state, not `EditorsState`/`SharedState`, so it is never
+/// persisted with the project — which lets every picker keep its own
+/// independent filter without index-aligned scratch vectors.
+fn search_filter_field(ui: &mut egui::Ui, id: egui::Id, width: f32) -> String {
+    let mut filter = ui
+        .ctx()
+        .data(|data| data.get_temp::<String>(id).unwrap_or_default());
+    ui.add(
+        egui::TextEdit::singleline(&mut filter)
+            .hint_text("search…")
+            .desired_width(width),
+    );
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(id, filter.clone()));
+    filter
+}
+
+/// Filter `options` to those whose label or id case-insensitively contains
+/// `query`; a blank query matches everything.
+fn filter_options<'a>(
+    options: &'a [ReferenceIdOption],
+    query: &str,
+) -> impl Iterator<Item = &'a ReferenceIdOption> {
+    let normalized = query.trim().to_ascii_lowercase();
+    options.iter().filter(move |option| {
+        normalized.is_empty()
+            || option.label.to_ascii_lowercase().contains(&normalized)
+            || option.id.to_ascii_lowercase().contains(&normalized)
+    })
 }
