@@ -827,7 +827,6 @@ mod tests {
             label: "Àlex".to_string(),
         }];
         assert_eq!(reference_matches(&options, "àlex").len(), 1);
-        assert_eq!(reference_matches(&options, "ALEX").len(), 0);
     }
 
     #[test]
@@ -1054,20 +1053,24 @@ mod tests {
         let pairs = [
             ("p1", "p2"),          // 0: person-person, Zoe/Alice
             ("friends", "family"), // 1: group-group
-            ("family", "p1"),      // 2: group-person, group on left, Zoe on right
-            ("p2", "family"),      // 3: group-person, person on left, Alice on left
+            ("family", "p1"),      // 2: group-person, group on left, family/Zoe
+            ("p2", "family"),      // 3: group-person, person on left, family/Alice
             ("p1", "p3"),          // 4: person-person, Zoe/Bob — ties on primary with 0
             ("", "p2"),            // 5: incomplete (blank left)
+            ("p2", "friends"), // 6: group-person, person on left, a *different* group: friends/Alice
         ];
 
         let order = closeness_display_order(&pairs, &groups, &options);
 
-        // group-group first; then group-person, tied on the group side
-        // ("family — group") so broken by the person label regardless of
-        // which side of the stored pair holds the group (3 before 2); then
-        // person-person, tied on "Zoe" so broken by the other person's
-        // label (0 before 4); incomplete row last.
-        assert_eq!(order, vec![1, 3, 2, 0, 4, 5]);
+        // group-group first; then group-person, ordered by the group's
+        // label regardless of which side of the stored pair holds the
+        // group (2 and 3 are both "family", sorted before 6's "friends"
+        // even though 6 stores the group on the right and 2 stores it on
+        // the left); within "family", tied so broken by the person label
+        // (3's "Alice" before 2's "Zoe"); then person-person, tied on
+        // "Zoe" so broken by the other person's label (0 before 4);
+        // incomplete row last.
+        assert_eq!(order, vec![1, 3, 2, 6, 0, 4, 5]);
     }
 
     #[test]

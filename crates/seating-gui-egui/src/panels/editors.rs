@@ -271,7 +271,7 @@ fn people_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
                 }
                 let mut add_existing_group = None;
                 let group_picker_filter_id = egui::Id::new(("person_group_picker_filter", index));
-                egui::ComboBox::from_id_salt(("person_group_picker", index))
+                let group_picker = egui::ComboBox::from_id_salt(("person_group_picker", index))
                     .selected_text("+ existing group")
                     .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                     .show_ui(ui, |ui| {
@@ -287,11 +287,13 @@ fn people_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
                         for option in reference_matches(&pickable, &filter) {
                             if ui.selectable_label(false, &option.label).clicked() {
                                 add_existing_group = Some(option.id);
-                                clear_search_filter(ui, group_picker_filter_id);
                                 ui.close();
                             }
                         }
                     });
+                if group_picker.inner.is_none() {
+                    clear_search_filter(ui, group_picker_filter_id);
+                }
                 if let Some(group) = add_existing_group {
                     shared.people[index].groups.push(group);
                     changed = true;
@@ -728,7 +730,7 @@ fn left_field(
         truncate_label(&reference_label(&current, options), REFERENCE_MAX_CHARS)
     };
     let filter_id = egui::Id::new(("closeness_left_filter", index));
-    egui::ComboBox::from_id_salt(("closeness_left", index))
+    let combo = egui::ComboBox::from_id_salt(("closeness_left", index))
         .selected_text(selected)
         .width(REFERENCE_COMBO_W)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
@@ -739,11 +741,13 @@ fn left_field(
                 if ui.selectable_label(is_selected, &option.label).clicked() {
                     shared.closeness_rules[index].left_id = option.id;
                     changed = true;
-                    clear_search_filter(ui, filter_id);
                     ui.close();
                 }
             }
         });
+    if combo.inner.is_none() {
+        clear_search_filter(ui, filter_id);
+    }
     changed
 }
 
@@ -762,7 +766,7 @@ fn right_field(
         truncate_label(&reference_label(&current, options), REFERENCE_MAX_CHARS)
     };
     let filter_id = egui::Id::new(("closeness_right_filter", index));
-    egui::ComboBox::from_id_salt(("closeness_right", index))
+    let combo = egui::ComboBox::from_id_salt(("closeness_right", index))
         .selected_text(selected)
         .width(REFERENCE_COMBO_W)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
@@ -773,11 +777,13 @@ fn right_field(
                 if ui.selectable_label(is_selected, &option.label).clicked() {
                     shared.closeness_rules[index].right_id = option.id;
                     changed = true;
-                    clear_search_filter(ui, filter_id);
                     ui.close();
                 }
             }
         });
+    if combo.inner.is_none() {
+        clear_search_filter(ui, filter_id);
+    }
     changed
 }
 
@@ -1331,11 +1337,14 @@ fn truncate_label(text: &str, max_chars: usize) -> String {
 /// persisted with the project — which lets every picker keep its own
 /// independent filter without index-aligned scratch vectors.
 ///
-/// The absence of a stored entry marks the popup's first frame open (a
-/// selection clears the entry via [`clear_search_filter`], so the next open
-/// is "first" again): on that frame the field requests keyboard focus so
-/// typing can start immediately, without the click that opened the
-/// `ComboBox` having to also focus this text edit.
+/// The absence of a stored entry marks the popup's first frame open: on
+/// that frame the field requests keyboard focus so typing can start
+/// immediately, without the click that opened the `ComboBox` having to also
+/// focus this text edit. Callers must clear the entry via
+/// [`clear_search_filter`] whenever the `ComboBox`'s `show_ui` reports no
+/// inner value (i.e. the popup isn't shown this frame), so every close path
+/// — a pick, Escape, or a click outside — leaves the next open as "first"
+/// again.
 fn search_filter_field(ui: &mut egui::Ui, id: egui::Id, width: f32) -> String {
     let existing = ui.ctx().data(|data| data.get_temp::<String>(id));
     let just_opened = existing.is_none();
@@ -1353,9 +1362,13 @@ fn search_filter_field(ui: &mut egui::Ui, id: egui::Id, width: f32) -> String {
     filter
 }
 
-/// Drop a picker's stored search filter (see [`search_filter_field`]) after
-/// a selection, so it doesn't linger and get shown against a different row
-/// once display order or indices shift (e.g. after a delete).
+/// Drop a picker's stored search filter (see [`search_filter_field`]).
+/// Callers check the `ComboBox`'s `show_ui` `InnerResponse::inner` and call
+/// this whenever it is `None` (the popup isn't shown this frame), so the
+/// filter doesn't linger — regardless of whether the popup closed via a
+/// pick, Escape, or a click outside — and doesn't get shown against a
+/// different row once display order or indices shift (e.g. after a
+/// delete).
 fn clear_search_filter(ui: &egui::Ui, id: egui::Id) {
     ui.ctx().data_mut(|data| data.remove::<String>(id));
 }
