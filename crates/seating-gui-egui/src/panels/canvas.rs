@@ -13,8 +13,9 @@ use seating_core::{
     COLOR_BACKGROUND, COLOR_CARD, COLOR_GUEST_TEXT, COLOR_MUTED, COLOR_SEAT_FILL,
     COLOR_SEAT_STROKE, COLOR_STROKE, COLOR_TABLE_FILL, COLOR_TABLE_STROKE, LayoutSeat, LayoutTable,
     Person, ProjectInput, RenderOptions, SeatDropOutcome, SeatingAssignment, SeatingLayout,
-    TableSurface, apply_seat_drop, build_layout, compact_table_numbers, min_seat_spacing,
-    render_png, render_svg, swap_table_numbers, unassign_person, unassigned_people,
+    TableSurface, apply_seat_append, apply_seat_drop, build_layout, compact_table_numbers,
+    min_seat_spacing, render_png, render_svg, swap_table_numbers, unassign_person,
+    unassigned_people,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,6 +39,10 @@ const UNASSIGNED_BAND_MIN_HEIGHT: f32 = 36.0;
 /// Font size for name chips in the unassigned band, in screen pixels
 /// (unaffected by zoom, unlike seat labels).
 const CHIP_FONT: f32 = 13.0;
+/// Radius of an empty-row seat marker, as a fraction of an occupied seat's
+/// radius — smaller so the free-seat row below a table reads as visually
+/// distinct from its occupied seats.
+const EMPTY_SEAT_SCALE: f32 = 0.6;
 
 /// UI-only state for the canvas panel: zoom/pan, an in-progress drag, and
 /// the fading score-delta toast.
@@ -321,19 +326,28 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
     let hit_radius = (seat_radius_base + 10.0) * state.zoom;
     let drop_preview = state.drag.as_ref().and_then(|drag| {
         let pointer = canvas_pointer?;
-        let (table_number, seat_index) = find_seat_under(&layout, transform, pointer, hit_radius)?;
-        let ok = apply_seat_drop(
-            &drag.project,
-            &shared.assignments,
-            &drag.person_id,
-            table_number,
-            seat_index,
-        )
-        .is_ok();
-        Some((table_number, seat_index, ok))
+        let target = find_seat_under(&layout, transform, pointer, hit_radius)?;
+        let ok = match target {
+            DropTarget::Append(table_number) => apply_seat_append(
+                &drag.project,
+                &shared.assignments,
+                &drag.person_id,
+                table_number,
+            )
+            .is_ok(),
+            DropTarget::Seat(table_number, seat_index) => apply_seat_drop(
+                &drag.project,
+                &shared.assignments,
+                &drag.person_id,
+                table_number,
+                seat_index,
+            )
+            .is_ok(),
+        };
+        Some((target, ok))
     });
 
-    let mut pending_drop: Option<(usize, usize)> = None;
+    let mut pending_target: Option<DropTarget> = None;
     let mut drag_cancelled = false;
     let mut pending_unassign = false;
     let mut pending_lock: Option<(String, Option<usize>, Option<usize>)> = None;
@@ -360,6 +374,15 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
         let spacing = min_seat_spacing(&table.seats).unwrap_or(NAME_WRAP_MIN_LAYOUT);
         let name_wrap_width = spacing.max(NAME_WRAP_MIN_LAYOUT) * name_font_scale;
         let surface_center = surface_center_screen(&table.surface, transform);
+        // Pre-highlight the locked-table guest's only legal table while
+        // dragging — shared by this table's occupied seats and its
+        // empty-row markers (an unassigned locked guest's table may have no
+        // occupants at all, only markers).
+        let table_hint = state
+            .drag
+            .as_ref()
+            .and_then(|drag| drag.allowed_table)
+            .is_some_and(|allowed| allowed == table.table_number);
 
         let card_rect = Rect::from_two_pos(
             transform.to_screen((table.x, table.y)),
@@ -393,15 +416,10 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
                     .is_some_and(|a| a.person_id == drag.person_id)
             });
             let drop_highlight = drop_preview
-                .filter(|(t, s, _)| *t == table.table_number && *s == seat.seat_index)
-                .map(|(_, _, ok)| ok);
-            // Pre-highlight the locked-table guest's only legal table while dragging.
-            let table_hint = state
-                .drag
-                .as_ref()
-                .and_then(|drag| drag.allowed_table)
-                .is_some_and(|allowed| allowed == table.table_number)
-                && !is_being_dragged;
+                .filter(|(target, _)| {
+                    *target == DropTarget::Seat(table.table_number, seat.seat_index)
+                })
+                .map(|(_, ok)| ok);
 
             draw_seat(
                 &painter,
@@ -410,7 +428,7 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
                 radius,
                 locked,
                 drop_highlight,
-                table_hint,
+                table_hint && !is_being_dragged,
                 is_being_dragged,
                 state.zoom,
             );
@@ -471,14 +489,16 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
                         });
                     }
                     if seat_response.drag_stopped() {
-                        if let Some(target) = canvas_pointer.and_then(|pointer| {
+                        match canvas_pointer.and_then(|pointer| {
                             find_seat_under(&layout, transform, pointer, hit_radius)
                         }) {
-                            pending_drop = Some(target);
-                        } else if pointer_pos.is_some_and(|pointer| band_rect.contains(pointer)) {
-                            pending_unassign = true;
-                        } else {
-                            drag_cancelled = true;
+                            Some(target) => pending_target = Some(target),
+                            None if pointer_pos
+                                .is_some_and(|pointer| band_rect.contains(pointer)) =>
+                            {
+                                pending_unassign = true;
+                            }
+                            None => drag_cancelled = true,
                         }
                     }
                 } else if let Some(person) = person {
@@ -498,6 +518,27 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
                     }
                 }
             }
+        }
+
+        // Free seats sit in a row below the table (see
+        // `LayoutTable::empty_seats`) until someone is dropped onto one, at
+        // which point `apply_seat_append` seats them and the marker is
+        // replaced by a real seat inside the table next frame. They carry no
+        // name label and no context menu — there's no guest to lock.
+        for seat in &table.empty_seats {
+            let center = transform.to_screen((seat.x, seat.y));
+            let radius = seat_radius_base * state.zoom * EMPTY_SEAT_SCALE;
+            let drop_highlight = drop_preview
+                .filter(|(target, _)| *target == DropTarget::Append(table.table_number))
+                .map(|(_, ok)| ok);
+            draw_empty_seat(
+                &painter,
+                center,
+                radius,
+                drop_highlight,
+                table_hint,
+                state.zoom,
+            );
         }
     }
 
@@ -522,7 +563,7 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
 
     draw_toast(&painter, rect, state, ui.ctx());
 
-    let (chip_drop, chip_cancelled) = draw_unassigned_band(
+    let (chip_target, chip_cancelled) = draw_unassigned_band(
         ui,
         band_rect,
         shared,
@@ -534,7 +575,7 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
         hit_radius,
         &unassigned,
     );
-    pending_drop = pending_drop.or(chip_drop);
+    pending_target = pending_target.or(chip_target);
     drag_cancelled = drag_cancelled || chip_cancelled;
 
     // Drawn last, on an unclipped top layer: the ghost must stay visible
@@ -549,8 +590,15 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
 
     // Every borrow of `shared` taken above (person_by_id, assignment_by_seat,
     // unassigned) is dead by now, so mutating it here is safe.
-    if let Some((table_number, seat_index)) = pending_drop {
-        finish_drop(shared, state, table_number, seat_index, ui.ctx());
+    if let Some(target) = pending_target {
+        match target {
+            DropTarget::Seat(table_number, seat_index) => {
+                finish_drop(shared, state, table_number, seat_index, ui.ctx());
+            }
+            DropTarget::Append(table_number) => {
+                finish_append(shared, state, table_number, ui.ctx());
+            }
+        }
     } else if pending_unassign {
         finish_unassign(shared, state, ui.ctx());
     } else if drag_cancelled {
@@ -723,6 +771,61 @@ fn finish_drop(
     }
 }
 
+/// Applies dropping a guest onto an empty-row marker (see
+/// [`LayoutTable::empty_seats`]) via [`apply_seat_append`], which seats them
+/// right after the table's current last occupant — the marker then becomes
+/// a real seat inside the table on the next frame's layout.
+fn finish_append(
+    shared: &mut SharedState,
+    state: &mut CanvasState,
+    table_number: usize,
+    ctx: &egui::Context,
+) {
+    let Some(drag) = state.drag.take() else {
+        return;
+    };
+    let score_before = shared.score;
+    match apply_seat_append(
+        &drag.project,
+        &shared.assignments,
+        &drag.person_id,
+        table_number,
+    ) {
+        Ok(updated) => {
+            // `apply_seat_append` picks the seat itself (after the table's
+            // last occupant, or a renumbered slot) — look it up in the
+            // result rather than assuming one, for the success message.
+            let seat_index = updated
+                .iter()
+                .find(|a| a.person_id == drag.person_id)
+                .map(|a| a.seat_index);
+            shared.assignments = updated;
+            shared.refresh();
+            if let (Some(before), Some(after)) = (score_before, shared.score) {
+                state.toast = Some(ScoreToast {
+                    delta: after - before,
+                    spawned_at: ctx.input(|i| i.time),
+                });
+                state.suppress_diff_toast = true;
+            }
+            let message = match seat_index {
+                Some(seat_index) => format!(
+                    "Seated {} at table {table_number}, seat {seat_index}.",
+                    drag.person_name
+                ),
+                None => format!("Seated {} at table {table_number}.", drag.person_name),
+            };
+            shared.set_message(MessageKind::Success, message);
+        }
+        Err(report) => {
+            shared.set_message(
+                MessageKind::Error,
+                format!("Move failed: {}", SharedState::report_summary(&report)),
+            );
+        }
+    }
+}
+
 /// Applies dropping a seated guest onto the "Unassigned" band: sends them
 /// back to unassigned via [`unassign_person`] (which refuses a locked
 /// guest), then re-validates and re-scores like [`finish_drop`].
@@ -789,25 +892,51 @@ fn fit_layout(state: &mut CanvasState, layout: &SeatingLayout, rect: Rect) {
     );
 }
 
-/// Nearest seat (any capacity slot, occupied or not) to `pointer`, within
-/// `hit_radius` screen pixels.
+/// What a drag's release point resolved to: an occupied seat (move/swap via
+/// [`apply_seat_drop`]), or a table's free-seat row marker (append via
+/// [`apply_seat_append`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DropTarget {
+    Seat(usize, usize),
+    Append(usize),
+}
+
+/// Nearest seat (occupied or a free empty-row marker) to `pointer`, within
+/// `hit_radius` screen pixels. An empty-row marker deliberately shares the
+/// same `hit_radius` as an occupied seat, even though it's drawn smaller
+/// (see `EMPTY_SEAT_SCALE`) — a bigger-than-drawn target is easier to drop
+/// onto precisely because there's no name label pulling the pointer's eye to
+/// the exact center. On an exact tie (equal distance to both an occupied
+/// seat and a marker), the occupied seat wins: `table.seats` is chained
+/// before `table.empty_seats` below, and the strict `<` comparison only
+/// replaces `best` on a *closer* candidate.
 fn find_seat_under(
     layout: &SeatingLayout,
     transform: Transform,
     pointer: Pos2,
     hit_radius: f32,
-) -> Option<(usize, usize)> {
-    let mut best: Option<(usize, usize, f32)> = None;
+) -> Option<DropTarget> {
+    let mut best: Option<(DropTarget, f32)> = None;
     for table in &layout.tables {
-        for seat in &table.seats {
+        for (seat, is_empty) in table
+            .seats
+            .iter()
+            .map(|seat| (seat, false))
+            .chain(table.empty_seats.iter().map(|seat| (seat, true)))
+        {
             let center = transform.to_screen((seat.x, seat.y));
             let dist = (center - pointer).length();
-            if dist <= hit_radius && best.is_none_or(|(_, _, best_dist)| dist < best_dist) {
-                best = Some((table.table_number, seat.seat_index, dist));
+            if dist <= hit_radius && best.is_none_or(|(_, best_dist)| dist < best_dist) {
+                let target = if is_empty {
+                    DropTarget::Append(table.table_number)
+                } else {
+                    DropTarget::Seat(table.table_number, seat.seat_index)
+                };
+                best = Some((target, dist));
             }
         }
     }
-    best.map(|(t, s, _)| (t, s))
+    best.map(|(target, _)| target)
 }
 
 /// Screen-space center of a table's surface, for every [`TableSurface`]
@@ -935,16 +1064,17 @@ fn draw_table(painter: &egui::Painter, table: &LayoutTable, transform: Transform
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_seat(
+/// Drop-highlight (green/red, when a drag is over this seat) or
+/// locked-table hint ring (dimmer green, while dragging a guest whose
+/// `locked_table` is this seat's table) drawn behind a seat marker — shared
+/// by [`draw_seat`] and [`draw_empty_seat`] so an occupied seat and an
+/// empty-row marker render the exact same ring.
+fn draw_drop_ring(
     painter: &egui::Painter,
-    seat: &LayoutSeat,
     center: Pos2,
     radius: f32,
-    locked: bool,
     drop_highlight: Option<bool>,
     table_hint: bool,
-    dimmed: bool,
     zoom: f32,
 ) {
     if let Some(ok) = drop_highlight {
@@ -961,19 +1091,32 @@ fn draw_seat(
             Stroke::new(1.5_f32, faded(Color32::from_rgb(90, 200, 120), 0.55)),
         );
     }
+}
 
-    let occupied = seat.person_name.is_some();
+#[allow(clippy::too_many_arguments)]
+fn draw_seat(
+    painter: &egui::Painter,
+    seat: &LayoutSeat,
+    center: Pos2,
+    radius: f32,
+    locked: bool,
+    drop_highlight: Option<bool>,
+    table_hint: bool,
+    dimmed: bool,
+    zoom: f32,
+) {
+    draw_drop_ring(painter, center, radius, drop_highlight, table_hint, zoom);
+
+    // `table.seats` holds only occupied seats (see `LayoutTable::seats`),
+    // so this circle is always filled — an empty capacity slot is drawn by
+    // `draw_empty_seat` instead, in the free-seat row below the table.
     let alpha = seat_alpha(dimmed);
-    if occupied {
-        painter.circle_filled(center, radius, faded(rgb(COLOR_SEAT_FILL), alpha));
-        painter.circle_stroke(
-            center,
-            radius,
-            Stroke::new(1.3_f32, faded(rgb(COLOR_SEAT_STROKE), alpha)),
-        );
-    } else {
-        painter.circle_stroke(center, radius, Stroke::new(1.3_f32, rgb(COLOR_STROKE)));
-    }
+    painter.circle_filled(center, radius, faded(rgb(COLOR_SEAT_FILL), alpha));
+    painter.circle_stroke(
+        center,
+        radius,
+        Stroke::new(1.3_f32, faded(rgb(COLOR_SEAT_STROKE), alpha)),
+    );
 
     // The circle only ever holds the seat index now — it stays small and
     // never overflows. The guest's full name is drawn wrapped outward from
@@ -983,11 +1126,7 @@ fn draw_seat(
     let box_side = radius * 1.5;
     let base_font = 10.0 * zoom;
     let min_font = 5.0 * zoom;
-    let text_color = if occupied {
-        faded(rgb(COLOR_BACKGROUND), alpha)
-    } else {
-        rgb(COLOR_MUTED)
-    };
+    let text_color = faded(rgb(COLOR_BACKGROUND), alpha);
     let index_text = seat.seat_index.to_string();
     let index_size = painter
         .layout_no_wrap(
@@ -1017,6 +1156,23 @@ fn draw_seat(
     }
 }
 
+/// Draws one free-seat marker in the row below a table (see
+/// [`LayoutTable::empty_seats`]) — a small hollow circle with no seat-index
+/// text and no name label, so it reads as visually distinct from an
+/// occupied seat until a guest is dropped onto it and it becomes a real seat
+/// inside the table.
+fn draw_empty_seat(
+    painter: &egui::Painter,
+    center: Pos2,
+    radius: f32,
+    drop_highlight: Option<bool>,
+    table_hint: bool,
+    zoom: f32,
+) {
+    draw_drop_ring(painter, center, radius, drop_highlight, table_hint, zoom);
+    painter.circle_stroke(center, radius, Stroke::new(1.0_f32, rgb(COLOR_STROKE)));
+}
+
 /// Draws the fixed "Unassigned (n)" band and each unassigned guest's name
 /// chip, and handles starting/ending a drag from a chip. Chips reuse the
 /// canvas's own `DragState`/ghost/drop-preview machinery — `apply_seat_drop`
@@ -1024,11 +1180,11 @@ fn draw_seat(
 /// dropped onto a seat needs no separate code path here; only *starting* a
 /// drag from a chip (rather than a seat) is band-specific.
 ///
-/// Returns the seat a released chip landed on (if any) and whether a chip
-/// drag ended outside both a seat and the band (a cancel, same as a seat
-/// drag released outside every seat). A chip released back over the band
-/// itself is neither: it's a silent no-op (the guest was already
-/// unassigned).
+/// Returns the seat or table a released chip landed on (if any), and
+/// whether a chip drag ended outside both a seat and the band (a cancel,
+/// same as a seat drag released outside every seat). A chip released back
+/// over the band itself is neither: it's a silent no-op (the guest was
+/// already unassigned).
 #[allow(clippy::too_many_arguments)]
 fn draw_unassigned_band(
     ui: &mut egui::Ui,
@@ -1041,7 +1197,7 @@ fn draw_unassigned_band(
     canvas_pointer: Option<Pos2>,
     hit_radius: f32,
     unassigned: &[&Person],
-) -> (Option<(usize, usize)>, bool) {
+) -> (Option<DropTarget>, bool) {
     let painter = ui.painter_at(band_rect);
     painter.rect_filled(band_rect, 8.0, rgb(COLOR_CARD));
     painter.rect_stroke(
@@ -1078,7 +1234,7 @@ fn draw_unassigned_band(
         band_rect.max - Vec2::new(8.0, 8.0),
     );
 
-    let mut pending_drop = None;
+    let mut pending_target = None;
     let mut drag_cancelled = false;
 
     ui.scope_builder(UiBuilder::new().max_rect(chips_rect), |ui| {
@@ -1131,18 +1287,19 @@ fn draw_unassigned_band(
                             });
                         }
                         if response.drag_stopped() {
-                            if let Some(target) = canvas_pointer.and_then(|pointer| {
+                            match canvas_pointer.and_then(|pointer| {
                                 find_seat_under(layout, transform, pointer, hit_radius)
                             }) {
-                                pending_drop = Some(target);
-                            } else if pointer_pos.is_some_and(|pointer| band_rect.contains(pointer))
-                            {
-                                // Released back over the band: the guest
-                                // was already unassigned, so this is a
-                                // silent no-op, not a cancel.
-                                state.drag = None;
-                            } else {
-                                drag_cancelled = true;
+                                Some(target) => pending_target = Some(target),
+                                None if pointer_pos
+                                    .is_some_and(|pointer| band_rect.contains(pointer)) =>
+                                {
+                                    // Released back over the band: the guest
+                                    // was already unassigned, so this is a
+                                    // silent no-op, not a cancel.
+                                    state.drag = None;
+                                }
+                                None => drag_cancelled = true,
                             }
                         }
                         if state.drag.is_none() {
@@ -1153,7 +1310,7 @@ fn draw_unassigned_band(
             });
     });
 
-    (pending_drop, drag_cancelled)
+    (pending_target, drag_cancelled)
 }
 
 fn draw_ghost(painter: &egui::Painter, pointer: Pos2, person_name: &str) {
@@ -1316,5 +1473,106 @@ fn export_png(shared: &mut SharedState) {
             format!("Exported PNG to {}", path.display()),
         ),
         Err(error) => shared.set_message(MessageKind::Error, format!("PNG export failed: {error}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use seating_core::{TableShape, TableTypeConfig, build_editor_layout, build_table_type_map};
+
+    /// One guest at table 1 (a round table seating up to 4), leaving 3 free
+    /// seats laid out as `LayoutTable::empty_seats`.
+    fn project_with_one_free_seat() -> ProjectInput {
+        ProjectInput {
+            people: vec![Person {
+                id: "p1".to_string(),
+                name: "Alice".to_string(),
+                table_type: Some("round_4".to_string()),
+                groups: vec![],
+                locked_table: None,
+                locked_seat: None,
+            }],
+            closeness_rules: vec![],
+            table_types: build_table_type_map(vec![(
+                "round_4".to_string(),
+                TableTypeConfig {
+                    shape: TableShape::Round,
+                    people_per_side: None,
+                    max_people: 4,
+                    recommended_people: Some(4),
+                    min_people: Some(1),
+                    number_of_tables: Some(1),
+                },
+            )])
+            .unwrap(),
+            table_order: Vec::new(),
+        }
+    }
+
+    fn identity_transform() -> Transform {
+        Transform {
+            origin: Pos2::new(0.0, 0.0),
+            pan: Vec2::ZERO,
+            zoom: 1.0,
+        }
+    }
+
+    /// A pointer over a free-row marker resolves to `Append`, not `Seat`.
+    #[test]
+    fn find_seat_under_hits_an_empty_row_marker() {
+        let project = project_with_one_free_seat();
+        let assignments = vec![SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 0,
+            person_id: "p1".to_string(),
+            person_name: "Alice".to_string(),
+        }];
+        let layout = build_editor_layout(&project, &assignments, false).unwrap();
+        let table = &layout.tables[0];
+        assert_eq!(table.empty_seats.len(), 3);
+
+        let transform = identity_transform();
+        let marker = &table.empty_seats[0];
+        let pointer = transform.to_screen((marker.x, marker.y));
+
+        assert_eq!(
+            find_seat_under(&layout, transform, pointer, 50.0),
+            Some(DropTarget::Append(table.table_number))
+        );
+    }
+
+    /// On an exact distance tie between an occupied seat and an empty-row
+    /// marker, the occupied seat wins — see `find_seat_under`'s own doc
+    /// comment for why (occupied seats are chained first, and the update is
+    /// a strict `<`).
+    #[test]
+    fn find_seat_under_prefers_an_occupied_seat_on_a_tie() {
+        let project = project_with_one_free_seat();
+        let assignments = vec![SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 0,
+            person_id: "p1".to_string(),
+            person_name: "Alice".to_string(),
+        }];
+        let mut layout = build_editor_layout(&project, &assignments, false).unwrap();
+        let occupied = layout.tables[0].seats[0].clone();
+        // Force the tie: move the first empty marker onto the occupied
+        // seat's exact position.
+        layout.tables[0].empty_seats[0].x = occupied.x;
+        layout.tables[0].empty_seats[0].y = occupied.y;
+
+        let transform = identity_transform();
+        let pointer = transform.to_screen((occupied.x, occupied.y));
+
+        assert_eq!(
+            find_seat_under(&layout, transform, pointer, 50.0),
+            Some(DropTarget::Seat(
+                layout.tables[0].table_number,
+                occupied.seat_index
+            ))
+        );
     }
 }
