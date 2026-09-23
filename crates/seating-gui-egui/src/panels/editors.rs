@@ -521,13 +521,20 @@ fn groups_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
     let mut rename_action = None;
     let mut delete_action = None;
     for group in &groups {
-        let member_count = shared
+        let members: Vec<&str> = shared
             .people
             .iter()
             .filter(|person| person.groups.iter().any(|g| g == group))
-            .count();
+            .map(|person| {
+                if person.name.trim().is_empty() {
+                    person.id.as_str()
+                } else {
+                    person.name.as_str()
+                }
+            })
+            .collect();
         ui.horizontal(|ui| {
-            ui.label(format!("{group} ({member_count})"));
+            ui.label(format!("{group} ({})", members.len()));
             let buffer = state
                 .group_rename_inputs
                 .entry(group.clone())
@@ -545,6 +552,7 @@ fn groups_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
                 delete_action = Some(group.clone());
             }
         });
+        ui.label(egui::RichText::new(members.join(", ")).weak());
     }
 
     if let Some((old, new)) = rename_action {
