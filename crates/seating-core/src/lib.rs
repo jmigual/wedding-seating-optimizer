@@ -78,4 +78,7 @@ pub use scoring::{
     ScoreBreakdown, circular_distance, default_proximity_weight, effective_person_pair_score,
     linear_distance, perimeter_distance, score_solution, score_solution_breakdown, seat_distance,
 };
-pub use validation::{generate_table_instances, validate_project, validate_seating_solution};
+pub use validation::{
+    generate_table_instances, validate_partial_seating_solution, validate_project,
+    validate_seating_solution,
+};

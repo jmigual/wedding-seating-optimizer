@@ -2644,6 +2644,27 @@ fn apply_seat_drop_allows_dropping_onto_an_empty_table_below_min() {
 }
 
 #[test]
+fn partial_validation_accepts_missing_people_but_rejects_duplicates() {
+    let project = drop_project();
+    let assignments: Vec<SeatingAssignment> = drop_assignments()
+        .into_iter()
+        .filter(|a| a.person_id != "p1")
+        .collect();
+
+    // p1 is missing entirely: fine under the partial check.
+    validate_partial_seating_solution(&project, &assignments).unwrap();
+
+    // A duplicated assignment for an already-seated person is still an error.
+    let mut duplicated = assignments.clone();
+    let dup_id = duplicated[0].person_id.clone();
+    duplicated.push(duplicated[0].clone());
+    let err = validate_partial_seating_solution(&project, &duplicated).unwrap_err();
+    assert!(err.errors.iter().any(
+        |e| matches!(e, ValidationError::MissingOrDuplicatePerson(id) if id.as_str() == dup_id)
+    ));
+}
+
+#[test]
 fn seating_csv_round_trip_is_sorted() {
     let shuffled = vec![
         SeatingAssignment {

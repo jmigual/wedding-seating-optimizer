@@ -184,6 +184,35 @@ pub fn validate_seating_solution(
     project: &ProjectInput,
     assignments: &[SeatingAssignment],
 ) -> Result<(), ValidationReport> {
+    validate_seating_solution_impl(project, assignments, true)
+}
+
+/// Validate a *partial* seating solution: like [`validate_seating_solution`],
+/// but people absent from `assignments` are treated as not-yet-seated rather
+/// than a [`ValidationError::MissingOrDuplicatePerson`] error. Duplicate
+/// assignments for the same person, table/seat existence, capacity, and
+/// locked-table/locked-seat constraints are all still enforced for whichever
+/// people *are* assigned. `min_people` remains a soft constraint enforced by
+/// scoring, exactly as in the strict check.
+///
+/// Intended for editor-facing flows (the GUI canvas) that must keep working
+/// while some guests haven't been placed yet.
+pub fn validate_partial_seating_solution(
+    project: &ProjectInput,
+    assignments: &[SeatingAssignment],
+) -> Result<(), ValidationReport> {
+    validate_seating_solution_impl(project, assignments, false)
+}
+
+/// Shared implementation for [`validate_seating_solution`] and
+/// [`validate_partial_seating_solution`]; `require_all_people` selects
+/// whether a person absent from `assignments` is reported as
+/// [`ValidationError::MissingOrDuplicatePerson`].
+fn validate_seating_solution_impl(
+    project: &ProjectInput,
+    assignments: &[SeatingAssignment],
+    require_all_people: bool,
+) -> Result<(), ValidationReport> {
     let mut errors = validate_project(project)
         .err()
         .map(|r| r.errors)
@@ -273,9 +302,11 @@ pub fn validate_seating_solution(
         *occupancy.entry(a.table_number).or_insert(0) += 1;
     }
 
-    for p in &project.people {
-        if !seen_people.contains(&p.id) {
-            errors.push(ValidationError::MissingOrDuplicatePerson(p.id.clone()));
+    if require_all_people {
+        for p in &project.people {
+            if !seen_people.contains(&p.id) {
+                errors.push(ValidationError::MissingOrDuplicatePerson(p.id.clone()));
+            }
         }
     }
 
