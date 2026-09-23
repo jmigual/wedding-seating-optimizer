@@ -446,9 +446,10 @@ pub fn apply_seat_drop(
 /// are renumbered to `0..k-1`, preserving their relative order, and the
 /// mover takes seat `k` — this changes no one's score, since
 /// [`crate::scoring::seat_distance`] is rank-based, not raw-seat-index-based.
-/// If any of those other occupants has a `locked_seat`, renumbering would
-/// break their lock, so this falls back to the lowest free seat index
-/// instead, leaving every other occupant's seat untouched.
+/// If renumbering would actually move a `locked_seat` occupant off their
+/// current seat, that would break their lock, so this falls back to the
+/// lowest free seat index instead, leaving every other occupant's seat
+/// untouched.
 ///
 /// A lock on `person_id` themselves is enforced the same way
 /// [`apply_seat_drop`] enforces it: by [`validate_partial_seating_solution`]
@@ -487,11 +488,16 @@ pub fn apply_seat_append(
             if capacity.is_some_and(|capacity| candidate < capacity) {
                 candidate
             } else {
-                let locked_blocker = others.iter().any(|&i| {
-                    project
-                        .people
-                        .iter()
-                        .any(|p| p.id == assignments[i].person_id && p.locked_seat.is_some())
+                // Only an occupant whose seat would actually *move* under a
+                // full renumber can block it — a locked guest already
+                // sitting at their would-be rank is untouched by renumbering
+                // regardless of the lock.
+                let locked_blocker = others.iter().enumerate().any(|(rank, &i)| {
+                    assignments[i].seat_index != rank
+                        && project
+                            .people
+                            .iter()
+                            .any(|p| p.id == assignments[i].person_id && p.locked_seat.is_some())
                 });
                 if locked_blocker {
                     capacity

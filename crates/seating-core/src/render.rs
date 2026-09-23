@@ -10,9 +10,10 @@ use crate::validation::{
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-/// Height added to a table card in [`build_editor_layout`] to fit the
-/// [`LayoutTable::empty_seats`] row below the table area. The strict
-/// [`build_layout`] never adds this since it never populates `empty_seats`.
+/// Height of one row of [`LayoutTable::empty_seats`] markers, added below
+/// the table area for each row needed in [`build_editor_layout`] (a table
+/// with many free seats wraps into several). The strict [`build_layout`]
+/// never adds this since it never populates `empty_seats`.
 const EMPTY_SEAT_ROW_HEIGHT: f32 = 40.0;
 
 /// Geometry and spacing options for layout/rendering.
@@ -111,9 +112,9 @@ pub struct LayoutTable {
     /// the correct seat.
     pub seats: Vec<LayoutSeat>,
     /// Markers for the table's free (unoccupied) seats, populated only by
-    /// [`build_editor_layout`] and laid out in a row below the table area
-    /// (the card is one row taller to fit it); always empty for the strict
-    /// [`build_layout`] used by exports.
+    /// [`build_editor_layout`] and laid out in one or more rows below the
+    /// table area (the card is grown to fit them); always empty for the
+    /// strict [`build_layout`] used by exports.
     pub empty_seats: Vec<LayoutSeat>,
     /// Geometry of the table surface itself, computed from the same center
     /// used to place `seats` so renderers never re-derive divergent geometry.
@@ -247,13 +248,39 @@ fn build_layout_impl(
         })
         .collect::<Vec<_>>();
     let columns = columns_for(used_instances.len());
-    // Editor tables reserve one extra row of height for `empty_seats`, which
+
+    // Editor tables reserve extra rows of height for `empty_seats`, which
     // only the editor layout ever populates; the strict export layout keeps
-    // the plain card height.
+    // the plain card height. Every card in the grid shares one uniform
+    // height, sized to whichever table needs the most empty-seat rows (at
+    // least one, even for a fully-occupied table) so free-seat markers never
+    // overlap regardless of how many seats are free.
+    let max_per_row = empty_seat_row_capacity(&options);
+    let empty_seats_by_table: Vec<Vec<usize>> = if require_all_people {
+        Vec::new()
+    } else {
+        used_instances
+            .iter()
+            .map(|table| {
+                let occupied: HashSet<usize> = assignments_by_table
+                    .get(&table.number)
+                    .map(|assignments| assignments.iter().map(|a| a.seat_index).collect())
+                    .unwrap_or_default();
+                (0..table.max_people)
+                    .filter(|seat| !occupied.contains(seat))
+                    .collect()
+            })
+            .collect()
+    };
+    let extra_rows = empty_seats_by_table
+        .iter()
+        .map(|free| free.len().div_ceil(max_per_row).max(1))
+        .max()
+        .unwrap_or(0);
     let card_height = if require_all_people {
         options.table_height
     } else {
-        options.table_height + EMPTY_SEAT_ROW_HEIGHT
+        options.table_height + extra_rows as f32 * EMPTY_SEAT_ROW_HEIGHT
     };
     let mut tables = Vec::new();
 
@@ -276,18 +303,10 @@ fn build_layout_impl(
             &options,
             table_assignments,
         );
-        let empty_seats = if require_all_people {
-            Vec::new()
-        } else {
-            let occupied: HashSet<usize> = table_assignments
-                .iter()
-                .map(|assignment| assignment.seat_index)
-                .collect();
-            let free_seats: Vec<usize> = (0..table.max_people)
-                .filter(|seat| !occupied.contains(seat))
-                .collect();
-            build_empty_seat_row(&free_seats, x, y, &options)
-        };
+        let empty_seats = empty_seats_by_table
+            .get(index)
+            .map(|free_seats| build_empty_seat_row(free_seats, x, y, &options, max_per_row))
+            .unwrap_or_default();
         let surface = build_surface(&table.shape, x, y, &options);
         tables.push(LayoutTable {
             table_number: table.number,
@@ -801,25 +820,44 @@ fn apportion(weights: &[usize], total: usize) -> Vec<usize> {
     counts
 }
 
-/// Lays out `free_seat_indices` as one evenly-spaced row of markers below the
-/// table area, inside the card's reserved [`EMPTY_SEAT_ROW_HEIGHT`] strip.
+/// The most free-seat markers [`build_empty_seat_row`] can fit in one row
+/// without any two adjacent centers landing closer than `2 * seat_radius`
+/// (the diameter, i.e. touching) apart, given the row's usable width (the
+/// same left/right inset [`build_empty_seat_row`] places markers within).
+fn empty_seat_row_capacity(options: &RenderOptions) -> usize {
+    let usable_width = (options.table_width - 48.0).max(0.0);
+    let diameter = (options.seat_radius * 2.0).max(1.0);
+    ((usable_width / diameter).floor() as usize + 1).max(1)
+}
+
+/// Lays out `free_seat_indices` as evenly-spaced rows of markers below the
+/// table area, inside the card's reserved [`EMPTY_SEAT_ROW_HEIGHT`]-tall
+/// strips — wrapping into additional rows, at most `max_per_row` markers
+/// each (see [`empty_seat_row_capacity`]), so markers never overlap
+/// regardless of how many seats are free.
 fn build_empty_seat_row(
     free_seat_indices: &[usize],
     x: f32,
     y: f32,
     options: &RenderOptions,
+    max_per_row: usize,
 ) -> Vec<LayoutSeat> {
-    let row_y = y + options.table_height + EMPTY_SEAT_ROW_HEIGHT / 2.0;
     let left = x + 24.0;
     let right = x + options.table_width - 24.0;
-    line_points(free_seat_indices.len(), left, right, row_y, row_y)
-        .into_iter()
-        .zip(free_seat_indices.iter())
-        .map(|((seat_x, seat_y), &seat_index)| LayoutSeat {
-            seat_index,
-            x: seat_x,
-            y: seat_y,
-            person_name: None,
+    free_seat_indices
+        .chunks(max_per_row.max(1))
+        .enumerate()
+        .flat_map(|(row_index, chunk)| {
+            let row_y = y + options.table_height + EMPTY_SEAT_ROW_HEIGHT * (row_index as f32 + 0.5);
+            line_points(chunk.len(), left, right, row_y, row_y)
+                .into_iter()
+                .zip(chunk.iter())
+                .map(|((seat_x, seat_y), &seat_index)| LayoutSeat {
+                    seat_index,
+                    x: seat_x,
+                    y: seat_y,
+                    person_name: None,
+                })
         })
         .collect()
 }
@@ -932,7 +970,7 @@ fn shape_label(shape: &TableShape) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{apportion, wrap_label};
+    use super::{RenderOptions, SeatingAssignment, apportion, build_rectangular_seats, wrap_label};
 
     /// `apportion` is the largest-remainder method: each side gets its exact
     /// proportional share (5|5|0|0 scaled to 6 total is exactly 3|3|0|0 with
@@ -940,6 +978,56 @@ mod tests {
     #[test]
     fn rectangular_layout_apportions_occupied_seats_by_side() {
         assert_eq!(apportion(&[5, 5, 0, 0], 6), vec![3, 3, 0, 0]);
+    }
+
+    /// When the proportional shares don't divide evenly, the leftover units
+    /// go to the buckets with the largest fractional remainder, and ties
+    /// break to the lower index: `[3,3,2,2]` scaled to 5 gives exact shares
+    /// `1.5, 1.5, 1, 1` — both `1.5`s round down to `1` with a tied 0.5
+    /// remainder, so the single leftover unit goes to index 0.
+    #[test]
+    fn apportion_breaks_tied_remainders_by_lower_index() {
+        assert_eq!(apportion(&[3, 3, 2, 2], 5), vec![2, 1, 1, 1]);
+    }
+
+    /// A `people_per_side` that is missing (empty slice, matching
+    /// `people_per_side.unwrap_or(&[])` in [`super::build_seat_positions`])
+    /// or otherwise malformed falls back to an even spread across the 4
+    /// sides, which [`apportion`] then shrinks to the number actually
+    /// occupied — 8 capacity, 5 occupied, even spread `[2,2,2,2]` apportions
+    /// to `[2,1,1,1]` (see [`apportion_breaks_tied_remainders_by_lower_index`]
+    /// for the tie-break), so the top side keeps 2 seats and the other 3
+    /// sides get 1 each, walked top → right → bottom → left.
+    #[test]
+    fn rectangular_seats_fall_back_to_even_spread_when_people_per_side_is_missing() {
+        let options = RenderOptions::default();
+        let assignments: Vec<SeatingAssignment> = (0..5)
+            .map(|seat_index| SeatingAssignment {
+                table_number: 1,
+                table_type: "rect_8".to_string(),
+                seat_index,
+                person_id: format!("p{seat_index}"),
+                person_name: format!("Guest {seat_index}"),
+            })
+            .collect();
+        let refs: Vec<&SeatingAssignment> = assignments.iter().collect();
+
+        let seats = build_rectangular_seats(8, &[], &refs, 0.0, 0.0, &options);
+
+        assert_eq!(seats.len(), 5);
+        // Top side (2 seats): same y, left-to-right.
+        assert_eq!(seats[0].y, seats[1].y);
+        assert!(seats[0].x < seats[1].x);
+        // Right side (1 seat): further right and further down than the top row.
+        assert!(seats[2].x > seats[1].x);
+        assert!(seats[2].y > seats[0].y);
+        // Bottom side (1 seat): further down than the right side, and left of it.
+        assert!(seats[3].y > seats[2].y);
+        assert!(seats[3].x < seats[2].x);
+        // Left side (1 seat): further left than the top row, at the same
+        // mid-height as the right side (both single midpoints).
+        assert!(seats[4].x < seats[0].x);
+        assert_eq!(seats[4].y, seats[2].y);
     }
 
     /// Every line `wrap_label` returns must fit the same width estimate the
