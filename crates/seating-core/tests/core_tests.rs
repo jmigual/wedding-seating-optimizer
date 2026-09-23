@@ -763,7 +763,7 @@ fn layout_with_empty_tables_includes_every_instance() {
     ];
 
     let instances = generate_table_instances(&project);
-    let full_layout = build_layout_with_empty_tables(&project, &assignments).unwrap();
+    let full_layout = build_editor_layout(&project, &assignments, true).unwrap();
     let used_layout = build_layout(&project, &assignments).unwrap();
 
     assert_eq!(full_layout.tables.len(), instances.len());
@@ -2695,6 +2695,32 @@ fn apply_seat_drop_from_unassigned_onto_occupied_seat_unassigns_the_occupant() {
     let p1 = updated.iter().find(|a| a.person_id == "p1").unwrap();
     assert_eq!((p1.table_number, p1.seat_index), (2, 0));
     assert!(!updated.iter().any(|a| a.person_id == "p2"));
+}
+
+#[test]
+fn editor_layout_accepts_partial_seating() {
+    let project = drop_project();
+    let assignments: Vec<SeatingAssignment> = drop_assignments()
+        .into_iter()
+        .filter(|a| a.person_id != "p1")
+        .collect();
+
+    let strict_err = build_layout(&project, &assignments).unwrap_err();
+    assert!(
+        strict_err
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::MissingOrDuplicatePerson(id) if id == "p1"))
+    );
+
+    let layout = build_editor_layout(&project, &assignments, false).unwrap();
+    assert!(
+        !layout
+            .tables
+            .iter()
+            .flat_map(|table| &table.seats)
+            .any(|seat| seat.person_name.as_deref() == Some("Alice"))
+    );
 }
 
 #[test]

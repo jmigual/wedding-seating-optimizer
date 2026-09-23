@@ -4,7 +4,9 @@
 //! into a layout description and exportable SVG/PNG outputs.
 
 use crate::models::{ProjectInput, SeatingAssignment, TableShape, ValidationReport};
-use crate::validation::{generate_table_instances, validate_seating_solution};
+use crate::validation::{
+    generate_table_instances, validate_partial_seating_solution, validate_seating_solution,
+};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -152,31 +154,40 @@ pub enum RenderingError {
 
 /// Build a reusable layout from a validated project and seating assignment.
 ///
-/// Tables with no occupants are omitted; see
-/// [`build_layout_with_empty_tables`] to include them.
+/// Every person must be seated exactly once (see [`validate_seating_solution`]);
+/// use [`build_editor_layout`] for a GUI editor where guests may still be
+/// unassigned. Tables with no occupants are omitted.
 pub fn build_layout(
     project: &ProjectInput,
     assignments: &[SeatingAssignment],
 ) -> Result<SeatingLayout, ValidationReport> {
-    build_layout_impl(project, assignments, false)
+    build_layout_impl(project, assignments, false, true)
 }
 
-/// Build a reusable layout like [`build_layout`], but including tables with
-/// no occupants (e.g. a table just added via the GUI), so the canvas can
-/// still render and hit-test drops onto them.
-pub fn build_layout_with_empty_tables(
+/// Build a reusable layout like [`build_layout`], but tolerating a *partial*
+/// seating (some guests not yet assigned — see
+/// [`validate_partial_seating_solution`]), and optionally including tables
+/// with no occupants (e.g. a table just added via the GUI), so the canvas
+/// can still render and hit-test drops onto them.
+pub fn build_editor_layout(
     project: &ProjectInput,
     assignments: &[SeatingAssignment],
+    include_empty_tables: bool,
 ) -> Result<SeatingLayout, ValidationReport> {
-    build_layout_impl(project, assignments, true)
+    build_layout_impl(project, assignments, include_empty_tables, false)
 }
 
 fn build_layout_impl(
     project: &ProjectInput,
     assignments: &[SeatingAssignment],
     include_empty_tables: bool,
+    require_all_people: bool,
 ) -> Result<SeatingLayout, ValidationReport> {
-    validate_seating_solution(project, assignments)?;
+    if require_all_people {
+        validate_seating_solution(project, assignments)?;
+    } else {
+        validate_partial_seating_solution(project, assignments)?;
+    }
 
     let options = RenderOptions::default();
     let instances = generate_table_instances(project);
