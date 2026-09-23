@@ -559,81 +559,95 @@ pub fn move_table_number(
     Some((order, table_number_map(&numbers)))
 }
 
+// ── Table growth ──────────────────────────────────────────────────────────────
+
+/// If any table type has no unoccupied instance left and can still grow,
+/// append one more occurrence of it to the current table order and return
+/// the result; `None` if every type already has a spare (or is a *limited*
+/// type already at its `number_of_tables` cap — see
+/// [`generate_table_instances`]).
+///
+/// Only *unlimited* types (`number_of_tables: None`) can be grown this way:
+/// appending an occurrence to [`ProjectInput::table_order`] raises the type's
+/// instance count by one (see [`generate_table_instances`]). A *limited*
+/// type's instance count is always exactly `number_of_tables`, so it already
+/// has every table it will ever have from the start — there is nothing to
+/// append, and once all of them are occupied, no more appear, matching a
+/// hard capacity limit.
+///
+/// Appending never renumbers an existing table: the returned order
+/// reproduces the current instance order verbatim and only adds a name at
+/// the end, so re-running [`generate_table_instances`] against it keeps
+/// every existing table's number and only appends the new spare.
+pub fn ensure_spare_tables(
+    project: &ProjectInput,
+    assignments: &[SeatingAssignment],
+) -> Option<Vec<TableTypeId>> {
+    let instances = generate_table_instances(project);
+    let used_numbers: HashSet<usize> = assignments.iter().map(|a| a.table_number).collect();
+
+    let mut has_spare: HashMap<&TableTypeId, bool> = HashMap::new();
+    for instance in &instances {
+        let spare = !used_numbers.contains(&instance.number);
+        let entry = has_spare.entry(&instance.table_type).or_insert(false);
+        *entry = *entry || spare;
+    }
+
+    let mut order = current_table_order(project);
+    let mut grew = false;
+    for (table_type_id, cfg) in &project.table_types {
+        let is_full = !has_spare.get(table_type_id).copied().unwrap_or(false);
+        let can_grow = cfg.number_of_tables.is_none();
+        if is_full && can_grow {
+            order.push(table_type_id.clone());
+            grew = true;
+        }
+    }
+
+    grew.then_some(order)
+}
+
 // ── Table compaction ──────────────────────────────────────────────────────────
 
-/// Repack each table type's used instances onto that type's lowest-numbered
-/// instances, so used tables sort before empty ones (e.g. table 3 moves to
-/// table 2 when table 2 of the same type is empty). Preserves each guest's
-/// seat index and the relative order of used tables within their type.
+/// Renumber tables so every occupied table sorts before every empty one,
+/// across *all* types (not per type), returning the new explicit
+/// [`ProjectInput::table_order`] and an old→new table-number map covering
+/// every table — same shape and semantics as [`swap_table_numbers`]/
+/// [`move_table_number`]: the whole table (its type, shape, and guests)
+/// moves with its number, so the caller applies the map to every
+/// [`SeatingAssignment::table_number`] and [`Person::locked_table`] (a
+/// locked guest's table moves with the map like any other, it is not
+/// pinned in place) and stores the returned order.
 ///
-/// A table holding any guest with [`locked_table`](Person::locked_table)
-/// set is pinned: it keeps its number, and the other used tables of that
-/// type fill the remaining lowest, non-pinned numbers in order.
-///
-/// Score-preserving up to f64 summation order and validity-preserving:
-/// instances of the same table type are identical for scoring (same
-/// shape/capacity/min/recommended), so this only relabels which
-/// interchangeable instance a guest's occupant set sits at — it does not
-/// change which pairs of guests share a table, and moving a whole occupant
-/// set between same-type tables cannot violate capacity, seat, or lock
-/// invariants.
-///
-/// For the same reason it leaves [`ProjectInput::table_order`] valid: each
-/// table number keeps its type, so the order needs no update.
+/// Used tables keep their current relative (number) order; so do empty
+/// tables. Score-preserving up to f64 summation order and
+/// validity-preserving for the same reason [`swap_table_numbers`] is: each
+/// table keeps its own occupants and its own type, only the numbers change.
 pub fn compact_table_numbers(
     project: &ProjectInput,
     assignments: &[SeatingAssignment],
-) -> Vec<SeatingAssignment> {
+) -> (Vec<TableTypeId>, BTreeMap<usize, usize>) {
     let instances = generate_table_instances(project);
-    let mut numbers_by_type: BTreeMap<&TableTypeId, Vec<usize>> = BTreeMap::new();
-    for instance in &instances {
-        numbers_by_type
-            .entry(&instance.table_type)
-            .or_default()
-            .push(instance.number);
-    }
+    let used_numbers: HashSet<usize> = assignments.iter().map(|a| a.table_number).collect();
 
-    let locked_person_ids: HashSet<&str> = project
-        .people
+    let mut numbers: Vec<usize> = instances
         .iter()
-        .filter(|person| person.locked_table.is_some())
-        .map(|person| person.id.as_str())
+        .filter(|instance| used_numbers.contains(&instance.number))
+        .map(|instance| instance.number)
+        .collect();
+    numbers.extend(
+        instances
+            .iter()
+            .filter(|instance| !used_numbers.contains(&instance.number))
+            .map(|instance| instance.number),
+    );
+
+    let order = numbers
+        .iter()
+        .map(|&old_number| instances[old_number - 1].table_type.clone())
         .collect();
 
-    let mut used_numbers: BTreeSet<usize> = BTreeSet::new();
-    let mut pinned_numbers: BTreeSet<usize> = BTreeSet::new();
-    for assignment in assignments {
-        used_numbers.insert(assignment.table_number);
-        if locked_person_ids.contains(assignment.person_id.as_str()) {
-            pinned_numbers.insert(assignment.table_number);
-        }
-    }
-
-    let mut number_map: HashMap<usize, usize> = HashMap::new();
-    for numbers in numbers_by_type.values() {
-        let free_numbers = numbers
-            .iter()
-            .copied()
-            .filter(|n| !pinned_numbers.contains(n));
-        let unpinned_used = numbers
-            .iter()
-            .copied()
-            .filter(|n| used_numbers.contains(n) && !pinned_numbers.contains(n));
-        for (old, new) in unpinned_used.zip(free_numbers) {
-            number_map.insert(old, new);
-        }
-    }
-
-    assignments
-        .iter()
-        .map(|assignment| SeatingAssignment {
-            table_number: number_map
-                .get(&assignment.table_number)
-                .copied()
-                .unwrap_or(assignment.table_number),
-            ..assignment.clone()
-        })
-        .collect()
+    (order, table_number_map(&numbers))
 }
 
 // ── ValidationError association helpers ───────────────────────────────────────

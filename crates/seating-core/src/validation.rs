@@ -21,8 +21,17 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 /// Expand the table type configurations into concrete numbered [`TableInstance`]s.
 ///
 /// For each type:
-/// - If `number_of_tables` is specified, exactly that many instances are created.
-/// - Otherwise, the count defaults to `ceil(person_count / max_people)`.
+/// - If `number_of_tables` is specified, exactly that many instances are
+///   created — this is a hard cap; nothing in this function or in
+///   [`ensure_spare_tables`](crate::editing::ensure_spare_tables) can grow it
+///   further.
+/// - Otherwise (unlimited), the count is `ceil(person_count / max_people)`,
+///   raised to the number of times the type appears in
+///   [`ProjectInput::table_order`] if that's larger — this is what lets
+///   [`ensure_spare_tables`](crate::editing::ensure_spare_tables) grow an
+///   unlimited type on demand: appending one more occurrence of its id to
+///   `table_order` grows its instance count by one, with no other type
+///   affected.
 ///
 /// After sizing every type, if the combined instance count would still fall
 /// short of the highest locked-table number, the shortfall is added to the
@@ -44,10 +53,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 /// names. The order is **self-healing**, so a list that drifted from the
 /// current configuration never produces an error or an incomplete set of
 /// instances:
-/// - an entry naming a type with no instances left (its count shrank) or a
-///   type that no longer exists is skipped;
+/// - an entry naming a *limited* type with no instances left (its
+///   `number_of_tables` shrank) or a type that no longer exists is skipped —
+///   an unlimited type's count already grows to cover every occurrence, so
+///   this only happens for limited types or dangling names;
 /// - every instance not claimed by the list is appended afterwards in derived
-///   order (so a type whose count grew gets its extra tables at the end).
+///   order (so a type whose count grew — including an unlimited type grown
+///   only by its *derived* count, not by `table_order` — gets its extra
+///   tables at the end).
 pub fn generate_table_instances(project: &ProjectInput) -> Vec<TableInstance> {
     let max_locked = project
         .people
@@ -57,13 +70,26 @@ pub fn generate_table_instances(project: &ProjectInput) -> Vec<TableInstance> {
         .unwrap_or(0);
     let person_count = project.people.len().max(1);
 
+    let mut order_occurrences: HashMap<&str, usize> = HashMap::new();
+    for wanted in &project.table_order {
+        *order_occurrences.entry(wanted.as_str()).or_insert(0) += 1;
+    }
+
     let mut counts: Vec<(&TableTypeId, &TableTypeConfig, usize)> = project
         .table_types
         .iter()
         .map(|(table_type_id, cfg)| {
-            let count = cfg
-                .number_of_tables
-                .unwrap_or_else(|| person_count.div_ceil(cfg.max_people));
+            let count = match cfg.number_of_tables {
+                Some(n) => n,
+                None => {
+                    let derived = person_count.div_ceil(cfg.max_people);
+                    let ordered = order_occurrences
+                        .get(table_type_id.as_str())
+                        .copied()
+                        .unwrap_or(0);
+                    derived.max(ordered)
+                }
+            };
             (table_type_id, cfg, count)
         })
         .collect();
