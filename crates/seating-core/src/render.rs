@@ -860,10 +860,13 @@ mod tests {
 
     /// Multi-byte (accented) characters count as one character each, same
     /// as the width estimate assumes; combining-accent edge cases are out of
-    /// scope.
+    /// scope. The budget here (max_chars = 8) sits strictly between
+    /// "Ångström"'s char length (8, fits) and its UTF-8 byte length (10,
+    /// wouldn't fit) — a regression to byte-counting would wrongly split
+    /// this word.
     #[test]
     fn wrap_label_handles_multi_byte_names() {
-        let lines = wrap_label("Núñez Ångström", 75.0, 13.0);
+        let lines = wrap_label("Núñez Ångström", 60.0, 13.0);
         assert_eq!(lines, vec!["Núñez", "Ångström"]);
     }
 
