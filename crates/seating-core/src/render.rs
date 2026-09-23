@@ -169,6 +169,13 @@ pub fn build_layout(
 /// [`validate_partial_seating_solution`]), and optionally including tables
 /// with no occupants (e.g. a table just added via the GUI), so the canvas
 /// can still render and hit-test drops onto them.
+///
+/// With `include_empty_tables: true`, at most one empty table per type is
+/// shown (the lowest-numbered one), regardless of how many that type
+/// actually has sitting empty — a *limited* type materializes every one of
+/// its `number_of_tables` instances up front (see
+/// [`generate_table_instances`]), so without this cap they would all show
+/// up as guests are moved out of them.
 pub fn build_editor_layout(
     project: &ProjectInput,
     assignments: &[SeatingAssignment],
@@ -202,9 +209,27 @@ fn build_layout_impl(
         table_assignments.sort_by_key(|assignment| assignment.seat_index);
     }
 
+    // When showing empty tables, cap them at one per type: `ensure_spare_tables`
+    // already keeps an *unlimited* type down to one spare, but a *limited*
+    // type always has every one of its `number_of_tables` instances
+    // materialized from the start (see `generate_table_instances`), so
+    // without this it would show every one of them as they empty out.
+    let mut lowest_empty_by_type: HashMap<&str, usize> = HashMap::new();
+    for table in &instances {
+        if !assignments_by_table.contains_key(&table.number) {
+            lowest_empty_by_type
+                .entry(table.table_type.as_str())
+                .and_modify(|lowest| *lowest = (*lowest).min(table.number))
+                .or_insert(table.number);
+        }
+    }
     let used_instances = instances
         .iter()
-        .filter(|table| include_empty_tables || assignments_by_table.contains_key(&table.number))
+        .filter(|table| {
+            assignments_by_table.contains_key(&table.number)
+                || (include_empty_tables
+                    && lowest_empty_by_type.get(table.table_type.as_str()) == Some(&table.number))
+        })
         .collect::<Vec<_>>();
     let columns = columns_for(used_instances.len());
     let mut tables = Vec::new();

@@ -164,7 +164,11 @@ fn toolbar(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui::Ui)
             shared.set_message(MessageKind::Success, "Compacted table numbers");
         }
         ui.separator();
-        ui.add_enabled_ui(shared.layout.is_some(), |ui| {
+        // Export uses the strict `build_layout`, which needs every guest
+        // seated — gate on `score_breakdown` (only `Some` for a strictly
+        // valid, fully-seated solution), not just `layout` (which also
+        // exists for a partial seating).
+        ui.add_enabled_ui(shared.score_breakdown.is_some(), |ui| {
             if ui.button("Export SVG").clicked() {
                 export_svg(shared);
             }

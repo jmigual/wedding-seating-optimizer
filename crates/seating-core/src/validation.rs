@@ -221,6 +221,14 @@ pub fn validate_seating_solution(
 /// people *are* assigned. `min_people` remains a soft constraint enforced by
 /// scoring, exactly as in the strict check.
 ///
+/// Because locked-table/locked-seat checks only run against `assignments`,
+/// an *unassigned* locked guest's reserved seat is not cross-checked here —
+/// someone else may freely occupy it while the locked guest sits out. That
+/// conflict only surfaces once the locked guest is placed (or once
+/// [`validate_seating_solution`] demands every person be seated), at which
+/// point it is reported as an ordinary [`ValidationError::SeatCollision`] or
+/// [`ValidationError::SeatingViolatesLockedSeat`]/[`ValidationError::SeatingViolatesLockedTable`].
+///
 /// Intended for editor-facing flows (the GUI canvas) that must keep working
 /// while some guests haven't been placed yet.
 pub fn validate_partial_seating_solution(
