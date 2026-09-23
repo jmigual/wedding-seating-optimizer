@@ -207,19 +207,17 @@ pub fn rules_match(a_left: &str, a_right: &str, b_left: &str, b_right: &str) -> 
     (a_left == b_left && a_right == b_right) || (a_left == b_right && a_right == b_left)
 }
 
-/// Filter `options` to those matching `query` (case-insensitive substring on
-/// id or label), capped to the first 5 matches. An empty query matches
-/// everything.
+/// Filter `options` to those matching `query` (Unicode case-insensitive
+/// substring on id or label). An empty query matches everything.
 pub fn reference_matches(options: &[ReferenceIdOption], query: &str) -> Vec<ReferenceIdOption> {
-    let normalized = query.trim().to_ascii_lowercase();
+    let normalized = query.trim().to_lowercase();
     options
         .iter()
         .filter(|option| {
             normalized.is_empty()
-                || option.id.to_ascii_lowercase().contains(&normalized)
-                || option.label.to_ascii_lowercase().contains(&normalized)
+                || option.id.to_lowercase().contains(&normalized)
+                || option.label.to_lowercase().contains(&normalized)
         })
-        .take(5)
         .cloned()
         .collect()
 }
@@ -732,9 +730,11 @@ impl ValidationError {
 // ── Closeness display ordering ────────────────────────────────────────────────
 
 /// Compute a display order for closeness rules: group↔group pairs first,
-/// then group↔person (either direction), then person↔person. Within a
-/// category, rules are ordered by their displayed labels (case-insensitive),
-/// first id then second.
+/// then group↔person (either direction), then person↔person, then
+/// incomplete rows (either side blank) last. Within a category, rules are
+/// ordered by their displayed labels, Unicode case-folded — for group↔person
+/// pairs, by (group label, person label) regardless of which side of the
+/// pair stores the group.
 ///
 /// Returns indices into `pairs` in display order. This is display ordering
 /// only — it does not reorder or mutate the underlying rules, so callers
@@ -747,17 +747,29 @@ pub fn closeness_display_order(
 ) -> Vec<usize> {
     let is_group = |id: &str| groups.iter().any(|group| group.as_str() == id);
     let mut order: Vec<usize> = (0..pairs.len()).collect();
-    order.sort_by_key(|&i| {
+    order.sort_by_cached_key(|&i| {
         let (left, right) = pairs[i];
-        let rank = match (is_group(left), is_group(right)) {
+        if left.is_empty() || right.is_empty() {
+            return (3, String::new(), String::new());
+        }
+        let left_is_group = is_group(left);
+        let right_is_group = is_group(right);
+        let rank = match (left_is_group, right_is_group) {
             (true, true) => 0,
             (false, false) => 2,
             _ => 1,
         };
+        // Normalize group↔person pairs to (group label, person label) so
+        // the tiebreak doesn't depend on which side stores the group.
+        let (primary, secondary) = if rank == 1 && !left_is_group {
+            (right, left)
+        } else {
+            (left, right)
+        };
         (
             rank,
-            reference_label(left, options).to_ascii_lowercase(),
-            reference_label(right, options).to_ascii_lowercase(),
+            reference_label(primary, options).to_lowercase(),
+            reference_label(secondary, options).to_lowercase(),
         )
     });
     order
@@ -796,16 +808,26 @@ mod tests {
     }
 
     #[test]
-    fn reference_matches_filters_case_insensitively_and_caps_at_five() {
+    fn reference_matches_filters_case_insensitively_without_a_cap() {
         let options: Vec<ReferenceIdOption> = (0..10)
             .map(|i| ReferenceIdOption {
                 id: format!("p{i}"),
                 label: format!("Guest {i}"),
             })
             .collect();
-        assert_eq!(reference_matches(&options, "").len(), 5);
+        assert_eq!(reference_matches(&options, "").len(), 10);
         let hits = reference_matches(&options, "GUEST 1");
         assert!(hits.iter().all(|o| o.label.contains("Guest 1")));
+    }
+
+    #[test]
+    fn reference_matches_folds_unicode_case() {
+        let options = vec![ReferenceIdOption {
+            id: "p1".to_string(),
+            label: "Àlex".to_string(),
+        }];
+        assert_eq!(reference_matches(&options, "àlex").len(), 1);
+        assert_eq!(reference_matches(&options, "ALEX").len(), 0);
     }
 
     #[test]
@@ -1024,12 +1046,60 @@ mod tests {
                 id: "p2".to_string(),
                 label: "Alice".to_string(),
             },
+            ReferenceIdOption {
+                id: "p3".to_string(),
+                label: "Bob".to_string(),
+            },
         ];
-        // person-person, group-group, group-person, in stored order.
-        let pairs = [("p1", "p2"), ("friends", "family"), ("family", "p1")];
+        let pairs = [
+            ("p1", "p2"),          // 0: person-person, Zoe/Alice
+            ("friends", "family"), // 1: group-group
+            ("family", "p1"),      // 2: group-person, group on left, Zoe on right
+            ("p2", "family"),      // 3: group-person, person on left, Alice on left
+            ("p1", "p3"),          // 4: person-person, Zoe/Bob — ties on primary with 0
+            ("", "p2"),            // 5: incomplete (blank left)
+        ];
 
         let order = closeness_display_order(&pairs, &groups, &options);
 
-        assert_eq!(order, vec![1, 2, 0]);
+        // group-group first; then group-person, tied on the group side
+        // ("family — group") so broken by the person label regardless of
+        // which side of the stored pair holds the group (3 before 2); then
+        // person-person, tied on "Zoe" so broken by the other person's
+        // label (0 before 4); incomplete row last.
+        assert_eq!(order, vec![1, 3, 2, 0, 4, 5]);
+    }
+
+    #[test]
+    fn closeness_display_order_folds_unicode_case_for_the_sort_key() {
+        let groups: Vec<String> = Vec::new();
+        let options = vec![
+            ReferenceIdOption {
+                id: "p1".to_string(),
+                label: "Álex".to_string(),
+            },
+            ReferenceIdOption {
+                id: "p2".to_string(),
+                label: "álex".to_string(),
+            },
+            ReferenceIdOption {
+                id: "p3".to_string(),
+                label: "Ana".to_string(),
+            },
+            ReferenceIdOption {
+                id: "p4".to_string(),
+                label: "Beto".to_string(),
+            },
+        ];
+        // Both pairs share the same primary name once case-folded
+        // ("Álex"/"álex" both fold to "álex"), so the tiebreak must fall
+        // through to the secondary label ("Ana" before "Beto"). Byte-wise
+        // (ASCII-only) lowercasing would instead treat "Álex" and "álex" as
+        // distinct, unequal keys and never reach that tiebreak.
+        let pairs = [("p1", "p4"), ("p2", "p3")];
+
+        let order = closeness_display_order(&pairs, &groups, &options);
+
+        assert_eq!(order, vec![1, 0]);
     }
 }

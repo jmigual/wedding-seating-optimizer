@@ -13,7 +13,8 @@ use seating_core::{
     CLOSENESS_CSV_HEADER, ClosenessRule, OptimizationConfig, PEOPLE_CSV_HEADER, ReferenceIdOption,
     TABLES_CSV_HEADER, TableShape, ValidationError, closeness_display_order, collect_group_ids,
     generate_table_instances, move_table_number, parse_f64_value, reference_id_options,
-    reference_label, remove_group, rename_group, rules_match, table_number_remap,
+    reference_label, reference_matches, remove_group, rename_group, rules_match,
+    table_number_remap,
 };
 use std::collections::HashMap;
 
@@ -269,24 +270,25 @@ fn people_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
                     changed = true;
                 }
                 let mut add_existing_group = None;
+                let group_picker_filter_id = egui::Id::new(("person_group_picker_filter", index));
                 egui::ComboBox::from_id_salt(("person_group_picker", index))
                     .selected_text("+ existing group")
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                     .show_ui(ui, |ui| {
-                        let filter = search_filter_field(
-                            ui,
-                            egui::Id::new(("person_group_picker_filter", index)),
-                            100.0,
-                        );
-                        let query = filter.trim().to_ascii_lowercase();
-                        for group in &all_groups {
-                            if shared.people[index].groups.contains(group) {
-                                continue;
-                            }
-                            if !query.is_empty() && !group.to_ascii_lowercase().contains(&query) {
-                                continue;
-                            }
-                            if ui.selectable_label(false, group).clicked() {
-                                add_existing_group = Some(group.clone());
+                        let filter = search_filter_field(ui, group_picker_filter_id, 100.0);
+                        let pickable: Vec<ReferenceIdOption> = all_groups
+                            .iter()
+                            .filter(|group| !shared.people[index].groups.contains(group))
+                            .map(|group| ReferenceIdOption {
+                                id: group.clone(),
+                                label: group.clone(),
+                            })
+                            .collect();
+                        for option in reference_matches(&pickable, &filter) {
+                            if ui.selectable_label(false, &option.label).clicked() {
+                                add_existing_group = Some(option.id);
+                                clear_search_filter(ui, group_picker_filter_id);
+                                ui.close();
                             }
                         }
                     });
@@ -725,20 +727,20 @@ fn left_field(
     } else {
         truncate_label(&reference_label(&current, options), REFERENCE_MAX_CHARS)
     };
+    let filter_id = egui::Id::new(("closeness_left_filter", index));
     egui::ComboBox::from_id_salt(("closeness_left", index))
         .selected_text(selected)
         .width(REFERENCE_COMBO_W)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show_ui(ui, |ui| {
-            let filter = search_filter_field(
-                ui,
-                egui::Id::new(("closeness_left_filter", index)),
-                REFERENCE_COMBO_W,
-            );
-            for option in filter_options(options, &filter) {
+            let filter = search_filter_field(ui, filter_id, REFERENCE_COMBO_W);
+            for option in reference_matches(options, &filter) {
                 let is_selected = current == option.id;
                 if ui.selectable_label(is_selected, &option.label).clicked() {
-                    shared.closeness_rules[index].left_id = option.id.clone();
+                    shared.closeness_rules[index].left_id = option.id;
                     changed = true;
+                    clear_search_filter(ui, filter_id);
+                    ui.close();
                 }
             }
         });
@@ -759,20 +761,20 @@ fn right_field(
     } else {
         truncate_label(&reference_label(&current, options), REFERENCE_MAX_CHARS)
     };
+    let filter_id = egui::Id::new(("closeness_right_filter", index));
     egui::ComboBox::from_id_salt(("closeness_right", index))
         .selected_text(selected)
         .width(REFERENCE_COMBO_W)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show_ui(ui, |ui| {
-            let filter = search_filter_field(
-                ui,
-                egui::Id::new(("closeness_right_filter", index)),
-                REFERENCE_COMBO_W,
-            );
-            for option in filter_options(options, &filter) {
+            let filter = search_filter_field(ui, filter_id, REFERENCE_COMBO_W);
+            for option in reference_matches(options, &filter) {
                 let is_selected = current == option.id;
                 if ui.selectable_label(is_selected, &option.label).clicked() {
-                    shared.closeness_rules[index].right_id = option.id.clone();
+                    shared.closeness_rules[index].right_id = option.id;
                     changed = true;
+                    clear_search_filter(ui, filter_id);
+                    ui.close();
                 }
             }
         });
@@ -1328,30 +1330,32 @@ fn truncate_label(text: &str, max_chars: usize) -> String {
 /// transient UI state, not `EditorsState`/`SharedState`, so it is never
 /// persisted with the project — which lets every picker keep its own
 /// independent filter without index-aligned scratch vectors.
+///
+/// The absence of a stored entry marks the popup's first frame open (a
+/// selection clears the entry via [`clear_search_filter`], so the next open
+/// is "first" again): on that frame the field requests keyboard focus so
+/// typing can start immediately, without the click that opened the
+/// `ComboBox` having to also focus this text edit.
 fn search_filter_field(ui: &mut egui::Ui, id: egui::Id, width: f32) -> String {
-    let mut filter = ui
-        .ctx()
-        .data(|data| data.get_temp::<String>(id).unwrap_or_default());
-    ui.add(
+    let existing = ui.ctx().data(|data| data.get_temp::<String>(id));
+    let just_opened = existing.is_none();
+    let mut filter = existing.unwrap_or_default();
+    let response = ui.add(
         egui::TextEdit::singleline(&mut filter)
             .hint_text("search…")
             .desired_width(width),
     );
+    if just_opened {
+        response.request_focus();
+    }
     ui.ctx()
         .data_mut(|data| data.insert_temp(id, filter.clone()));
     filter
 }
 
-/// Filter `options` to those whose label or id case-insensitively contains
-/// `query`; a blank query matches everything.
-fn filter_options<'a>(
-    options: &'a [ReferenceIdOption],
-    query: &str,
-) -> impl Iterator<Item = &'a ReferenceIdOption> {
-    let normalized = query.trim().to_ascii_lowercase();
-    options.iter().filter(move |option| {
-        normalized.is_empty()
-            || option.label.to_ascii_lowercase().contains(&normalized)
-            || option.id.to_ascii_lowercase().contains(&normalized)
-    })
+/// Drop a picker's stored search filter (see [`search_filter_field`]) after
+/// a selection, so it doesn't linger and get shown against a different row
+/// once display order or indices shift (e.g. after a delete).
+fn clear_search_filter(ui: &egui::Ui, id: egui::Id) {
+    ui.ctx().data_mut(|data| data.remove::<String>(id));
 }
