@@ -1634,25 +1634,21 @@ fn adjacent_seating_scores_higher_than_distant() {
         },
     )])
     .unwrap();
+    // Six guests fill all six seats (no empty seats), so each guest's rank
+    // among occupied seats equals its raw seat index — this fixture is about
+    // the distance rule for a fully occupied table, not the empty-seat rule.
+    let people: Vec<Person> = (1..=6)
+        .map(|i| Person {
+            id: format!("p{i}"),
+            name: format!("Guest {i}"),
+            table_type: Some("round_6".to_string()),
+            groups: vec![],
+            locked_table: None,
+            locked_seat: None,
+        })
+        .collect();
     let project = ProjectInput {
-        people: vec![
-            Person {
-                id: "p1".to_string(),
-                name: "A".to_string(),
-                table_type: Some("round_6".to_string()),
-                groups: vec![],
-                locked_table: None,
-                locked_seat: None,
-            },
-            Person {
-                id: "p2".to_string(),
-                name: "B".to_string(),
-                table_type: Some("round_6".to_string()),
-                groups: vec![],
-                locked_table: None,
-                locked_seat: None,
-            },
-        ],
+        people,
         closeness_rules: vec![ClosenessRule {
             left_id: "p1".to_string(),
             right_id: "p2".to_string(),
@@ -1663,24 +1659,23 @@ fn adjacent_seating_scores_higher_than_distant() {
     };
     let config = OptimizationConfig::default();
 
-    let adjacent = vec![
-        SeatingAssignment {
-            table_number: 1,
-            table_type: "round_6".to_string(),
-            seat_index: 0,
-            person_id: "p1".to_string(),
-            person_name: "A".to_string(),
-        },
-        SeatingAssignment {
-            table_number: 1,
-            table_type: "round_6".to_string(),
-            seat_index: 1,
-            person_id: "p2".to_string(),
-            person_name: "B".to_string(),
-        },
-    ];
-    let mut distant = adjacent.clone();
-    distant[1].seat_index = 3;
+    let seat_assignment = |seat_indices: [usize; 6]| -> Vec<SeatingAssignment> {
+        (1..=6)
+            .zip(seat_indices)
+            .map(|(i, seat_index)| SeatingAssignment {
+                table_number: 1,
+                table_type: "round_6".to_string(),
+                seat_index,
+                person_id: format!("p{i}"),
+                person_name: format!("Guest {i}"),
+            })
+            .collect()
+    };
+
+    // p1 at seat 0, p2 at seat 1: adjacent.
+    let adjacent = seat_assignment([0, 1, 2, 3, 4, 5]);
+    // p1 at seat 0, p2 at seat 3: three seats apart, still every seat filled.
+    let distant = seat_assignment([0, 3, 1, 2, 4, 5]);
 
     let adjacent_score = score_solution(&project, &adjacent, &config).unwrap();
     let distant_score = score_solution(&project, &distant, &config).unwrap();
@@ -1900,6 +1895,59 @@ fn score_solution_breakdown_reports_expected_components() {
 
 #[test]
 fn semicircle_scores_arc_ends_as_far_not_adjacent() {
+    // All four seats filled, so ranks equal raw seat indices: this fixture
+    // is about the arc's no-wrap rule for a fully occupied table, not the
+    // empty-seat rule (see the 2-guest case below for that).
+    let project = make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\np1,A,,,,\np2,B,,,,\np3,C,,,,\np4,D,,,,\n",
+        "left_id,right_id,score\np1,p2,10\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nsemi_4,semicircle,4,,,1,\n",
+    )
+    .unwrap();
+    let assignments = vec![
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "semi_4".to_string(),
+            seat_index: 0,
+            person_id: "p1".to_string(),
+            person_name: "A".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "semi_4".to_string(),
+            seat_index: 1,
+            person_id: "p3".to_string(),
+            person_name: "C".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "semi_4".to_string(),
+            seat_index: 2,
+            person_id: "p4".to_string(),
+            person_name: "D".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "semi_4".to_string(),
+            seat_index: 3,
+            person_id: "p2".to_string(),
+            person_name: "B".to_string(),
+        },
+    ];
+    let breakdown =
+        score_solution_breakdown(&project, &assignments, &OptimizationConfig::default()).unwrap();
+    // On a round table, seats 0 and 3 of 4 are adjacent (circular_distance = 1,
+    // weight 1.0, contribution 10.0); on a semicircle the arc doesn't wrap, so
+    // the two ends are the farthest apart (linear_distance = 3, weight 0.5).
+    assert_eq!(breakdown.proximity, 10.0 * default_proximity_weight(3));
+    assert_eq!(breakdown.proximity, 5.0);
+}
+
+/// Empty-seat rule for a semicircle: with only 2 of 4 seats occupied, the two
+/// guests are tablemates 0 and 1 (of 2 occupied) — adjacent, not two raw
+/// seats apart — even though the arc itself never wraps.
+#[test]
+fn semicircle_scores_two_guests_with_empty_seats_between_as_adjacent() {
     let project = make_project(
         "id,name,table_type,groups,locked_table,locked_seat\np1,A,,,,\np2,B,,,,\n",
         "left_id,right_id,score\np1,p2,10\n",
@@ -1924,11 +1972,7 @@ fn semicircle_scores_arc_ends_as_far_not_adjacent() {
     ];
     let breakdown =
         score_solution_breakdown(&project, &assignments, &OptimizationConfig::default()).unwrap();
-    // On a round table, seats 0 and 3 of 4 are adjacent (circular_distance = 1,
-    // weight 1.0, contribution 10.0); on a semicircle the arc doesn't wrap, so
-    // the two ends are the farthest apart (linear_distance = 3, weight 0.5).
-    assert_eq!(breakdown.proximity, 10.0 * default_proximity_weight(3));
-    assert_eq!(breakdown.proximity, 5.0);
+    assert_eq!(breakdown.proximity, 10.0);
 }
 
 // ── min_people through the optimizer ─────────────────────────────────────
@@ -2086,12 +2130,18 @@ fn optimizer_splits_a_table_across_smaller_tables_when_that_scores_better() {
     // 12 people in two mutually-hostile groups `G`/`H` of 6 each. One big
     // table seats all 12 (and is what random construction fills first, since
     // it fills already-used tables before opening a new one); two min-6
-    // tables of 6 seat each group separately with no cross-group penalty.
-    // Getting there from "all 12 on the big table" requires emptying it in
-    // one move: single-guest relocation pays the 5000 min-shortfall penalty
-    // for the newly opened min-6 table, and whole-table swap can't fit 12
-    // people into a 6-seat table. Only a table split (this test's subject)
-    // crosses that valley.
+    // tables seat each group separately with no cross-group penalty.
+    // `big`'s `recommended_people` is set to its full capacity (12): under
+    // rank-based seat distance, a group of 6 sitting on any 6 contiguous
+    // seats of the 12-seat big table scores identically to sitting on a
+    // dedicated 6-seat table (distance only depends on how many seats are
+    // occupied, not the table's capacity), so without this penalty "G stays
+    // on the big table, only H moves off" ties the fully-split solution.
+    // Recommending `big` at full capacity makes leaving it half-empty cost
+    // `|occupancy - 12| * optimal_table_size_weight`, while leaving it
+    // completely unused (the intended split) incurs no size penalty at all
+    // (deviation is only scored for *used* tables) — breaking the tie in
+    // favor of the split.
     let mut people_csv = "id,name,table_type,groups,locked_table,locked_seat\n".to_string();
     for index in 1..=6 {
         people_csv.push_str(&format!("g{index},G {index},,G,,\n"));
@@ -2102,7 +2152,7 @@ fn optimizer_splits_a_table_across_smaller_tables_when_that_scores_better() {
     let project = make_project(
         &people_csv,
         "left_id,right_id,score\nG,G,5\nH,H,5\nG,H,-5\n",
-        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nbig,round,12,,0,1,\nsmall,round,6,,6,2,\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nbig,round,12,12,0,1,\nsmall,round,6,,6,2,\n",
     )
     .unwrap();
     let config = OptimizationConfig {
@@ -2147,6 +2197,34 @@ fn optimizer_splits_a_table_across_smaller_tables_when_that_scores_better() {
         counts.get(&1).copied().unwrap_or(0),
         0,
         "big table 1 not empty: {counts:?}"
+    );
+
+    // The fix that makes rank-based distance ignore empty seats also made
+    // "leave G on the (under-filled) big table, only move H off" tie the
+    // fully-split solution in score (both scored 120 before `recommended_people`
+    // was added to `big`, above) — guard against that tie coming back by
+    // asserting the intended split strictly beats that tied alternative.
+    let expected_score = score_solution(&project, assignments, &config).unwrap();
+    let tied_alternative: Vec<SeatingAssignment> = (1..=6)
+        .map(|index| SeatingAssignment {
+            table_number: 1,
+            table_type: "big".to_string(),
+            seat_index: index - 1,
+            person_id: format!("g{index}"),
+            person_name: format!("G {index}"),
+        })
+        .chain((1..=6).map(|index| SeatingAssignment {
+            table_number: 2,
+            table_type: "small".to_string(),
+            seat_index: index - 1,
+            person_id: format!("h{index}"),
+            person_name: format!("H {index}"),
+        }))
+        .collect();
+    let tied_alternative_score = score_solution(&project, &tied_alternative, &config).unwrap();
+    assert!(
+        expected_score > tied_alternative_score,
+        "expected split (score {expected_score}) should strictly beat leaving G on the big table (score {tied_alternative_score})"
     );
 }
 
