@@ -3601,3 +3601,116 @@ fn project_file_round_trips_table_order() {
     );
     assert!(parse_project_file(&legacy).unwrap().table_order.is_empty());
 }
+
+// ── Cluster exchange: multi-step moves ───────────────────────────────────
+
+/// Four groups of 2 (`A`/`B`/`C`/`D`), each with a strong self-closeness (10)
+/// and a weak cross-closeness to one other group (`A`-`C` and `B`-`D`, both
+/// 3). Two round tables of exactly 4 (min = max = recommended, so table use
+/// and size penalties never vary). Warm-started from `A+B` / `C+D` (the
+/// within-table pairs already adjacent), the strictly better arrangement is
+/// `A+C` / `B+D`: it gains the two cross-group bonuses on both tables
+/// without ever giving up a same-group bonus. Reaching it from `A+B`/`C+D`
+/// requires exchanging a coherent 2-person cluster from each table in a
+/// single move — swapping `{a1,a2}` for `{d1,d2}` (or, symmetrically,
+/// `{b1,b2}` for `{c1,c2}`), never `{a1,a2}` for `{c1,c2}` directly, since
+/// `A` and `C` already sit on different tables. No sequence of single-guest
+/// swaps or joins passes through a strictly-improving intermediate state,
+/// since moving `a1` alone off table 1 breaks the `A`-`A` pair before any
+/// `A`-`C` bonus is gained.
+#[test]
+fn optimizer_exchanges_coherent_clusters_between_tables() {
+    let project = make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\n\
+         a1,A1,,A,,\na2,A2,,A,,\nb1,B1,,B,,\nb2,B2,,B,,\n\
+         c1,C1,,C,,\nc2,C2,,C,,\nd1,D1,,D,,\nd2,D2,,D,,\n",
+        "left_id,right_id,score\nA,A,10\nB,B,10\nC,C,10\nD,D,10\nA,C,3\nB,D,3\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround4,round,4,4,4,2,\n",
+    )
+    .unwrap();
+
+    let initial: Vec<SeatingAssignment> = [
+        ("a1", 1, 0),
+        ("a2", 1, 1),
+        ("b1", 1, 2),
+        ("b2", 1, 3),
+        ("c1", 2, 0),
+        ("c2", 2, 1),
+        ("d1", 2, 2),
+        ("d2", 2, 3),
+    ]
+    .into_iter()
+    .map(|(person_id, table_number, seat_index)| SeatingAssignment {
+        table_number,
+        table_type: "round4".to_string(),
+        seat_index,
+        person_id: person_id.to_string(),
+        person_name: person_id.to_string(),
+    })
+    .collect();
+
+    let config = OptimizationConfig {
+        seed: 1,
+        attempts: 1,
+        steps: 5_000,
+        time_limit_secs: 0,
+        ..OptimizationConfig::default()
+    };
+
+    let result = HeuristicOptimizer
+        .optimize_timed(&project, &config, Some(&initial))
+        .unwrap();
+    let assignments = &result.solutions[0].assignments;
+    validate_seating_solution(&project, assignments).unwrap();
+
+    let seat_of = |id: &str| assignments.iter().find(|a| a.person_id == id).unwrap();
+    let table = seat_of("a1").table_number;
+    assert_eq!(seat_of("a2").table_number, table);
+    assert_eq!(
+        seat_of("c1").table_number,
+        table,
+        "a1/a2 and c1/c2 did not end up sharing a table"
+    );
+    assert_eq!(seat_of("c2").table_number, table);
+}
+
+/// Eight guests (spare capacity: two `round6` tables, no warm start, so the
+/// random initial split varies by seed) with unequal-size groups (`P`/`S`
+/// singles, `Q`/`R` triples) and one locked guest per table sharing its
+/// group with unlocked table-mates: `lt1` is locked to table 1 (no locked
+/// seat) inside group `Q`, `ls1` is locked to table 2 seat 0 inside group
+/// `R`. Whenever `propose_cluster_exchange` forms a cluster around a `Q` or
+/// `R` member seated on the locked guest's own table, that cluster includes
+/// the locked guest, and `may_sit_at` must refuse moving it off that table;
+/// a `Q`/`R` member seated on the *other* table forms a lock-free cluster
+/// instead, exercising the free-seat branch of the move. This must hold
+/// across many seeds without ever corrupting the solution or the locks.
+#[test]
+fn optimizer_keeps_locked_guests_in_place_across_seeds_with_cluster_exchange() {
+    let project = make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\n\
+         p1,P1,,P,,\nq1,Q1,,Q,,\nq2,Q2,,Q,,\nlt1,LT1,,Q,1,\n\
+         s1,S1,,S,,\nr1,R1,,R,,\nr2,R2,,R,,\nls1,LS1,,R,2,0\n",
+        "left_id,right_id,score\nQ,Q,5\nR,R,5\nP,S,2\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround6,round,6,,,2,\n",
+    )
+    .unwrap();
+
+    for seed in 1..=5u64 {
+        let config = OptimizationConfig {
+            seed,
+            attempts: 2,
+            steps: 2_000,
+            time_limit_secs: 0,
+            ..OptimizationConfig::default()
+        };
+        let result = HeuristicOptimizer.optimize(&project, &config).unwrap();
+        let assignments = &result.solutions[0].assignments;
+        validate_seating_solution(&project, assignments).unwrap();
+
+        let seat_of = |id: &str| assignments.iter().find(|a| a.person_id == id).unwrap();
+        assert_eq!(seat_of("lt1").table_number, 1, "seed {seed}");
+        assert_eq!(seat_of("ls1").table_number, 2, "seed {seed}");
+        assert_eq!(seat_of("ls1").seat_index, 0, "seed {seed}");
+    }
+}

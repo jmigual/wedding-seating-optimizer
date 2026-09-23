@@ -52,9 +52,13 @@ pub trait SeatingOptimizer {
 ///    search cross score-neutral and mildly worse plateaus. Moves: guest
 ///    pair swap, "join" (move a guest onto the table of another guest, or
 ///    to another seat of their own table), whole-table occupant swap (the
-///    move that opens an unused, larger table for a group), and table split
+///    move that opens an unused, larger table for a group), table split
 ///    (the move that empties a table by splitting its occupants across two
-///    smaller ones, for a group that doesn't fit either alone).
+///    smaller ones, for a group that doesn't fit either alone), and cluster
+///    exchange (the move that swaps a coherent multi-guest subset between
+///    two tables at once, for a rearrangement that no sequence of
+///    single-guest moves can reach without a strictly worse intermediate
+///    state — see [`SearchState::propose_cluster_exchange`]).
 /// 3. Score the best state visited and keep the top-N solutions.
 ///
 /// **Determinism:** attempt `i` is fully determined by
@@ -74,14 +78,19 @@ const LAHC_HISTORY_LEN: usize = 200;
 ///   fine-grained exploration.
 /// - `TABLE_SWAP_MOVE_PERCENT` whole-table occupant swaps — opens an unused,
 ///   larger table for a group that fits it whole.
+/// - `CLUSTER_EXCHANGE_MOVE_PERCENT` cluster exchanges — swaps a coherent
+///   multi-guest subset between two tables in one move (see
+///   [`SearchState::propose_cluster_exchange`]).
 /// - the remainder, table splits — opens two smaller tables for a group that
 ///   doesn't fit either alone (see [`SearchState::propose_table_split`]).
 ///
-/// The last two are rarer because they only pay off for groups near a table
-/// boundary; most steps are spent on cheaper local moves.
-const SWAP_MOVE_PERCENT: u32 = 40;
+/// The last three are rarer because they only pay off for groups near a
+/// table boundary or split across tables; most steps are spent on cheaper
+/// local moves.
+const SWAP_MOVE_PERCENT: u32 = 30;
 const JOIN_MOVE_PERCENT: u32 = 40;
 const TABLE_SWAP_MOVE_PERCENT: u32 = 10;
+const CLUSTER_EXCHANGE_MOVE_PERCENT: u32 = 10;
 
 impl HeuristicOptimizer {
     /// Run the heuristic for up to `config.time_limit_secs`, optionally warm
@@ -623,10 +632,11 @@ impl HeuristicOptimizer {
     /// Late acceptance hill climbing over `positions` (person-indexed
     /// `(table_number, seat_index)`), returning the best state visited.
     ///
-    /// Each step proposes one move — pair swap, join, whole-table swap, or
-    /// table split (see [`SearchState`]) — skips it if structurally illegal, and
-    /// otherwise accepts it when the new score is at least the current one
-    /// or at least the score recorded [`LAHC_HISTORY_LEN`] steps earlier.
+    /// Each step proposes one move — pair swap, join, whole-table swap,
+    /// cluster exchange, or table split (see [`SearchState`]) — skips it if
+    /// structurally illegal, and otherwise accepts it when the new score is
+    /// at least the current one or at least the score recorded
+    /// [`LAHC_HISTORY_LEN`] steps earlier.
     /// Every candidate is legal by construction (locks, `table_type`,
     /// capacity, no double booking), so scoring skips validation.
     ///
@@ -665,6 +675,13 @@ impl HeuristicOptimizer {
                 state.propose_join(&mut rng, &mut moves)
             } else if roll < SWAP_MOVE_PERCENT + JOIN_MOVE_PERCENT + TABLE_SWAP_MOVE_PERCENT {
                 state.propose_table_swap(&mut rng, &mut moves)
+            } else if roll
+                < SWAP_MOVE_PERCENT
+                    + JOIN_MOVE_PERCENT
+                    + TABLE_SWAP_MOVE_PERCENT
+                    + CLUSTER_EXCHANGE_MOVE_PERCENT
+            {
+                state.propose_cluster_exchange(&mut rng, &mut moves)
             } else {
                 state.propose_table_split(&mut rng, &mut moves)
             };
@@ -707,6 +724,13 @@ struct SearchState<'a> {
     /// Reused shuffle buffer for [`Self::propose_table_split`], to avoid
     /// reallocating one `Vec` per proposal.
     shuffle_scratch: Vec<usize>,
+    /// Reused cluster-member buffers for [`Self::propose_cluster_exchange`]:
+    /// `cluster_a`/`cluster_b` hold the two clusters being exchanged,
+    /// `seats_a`/`seats_b` the destination seats computed for them.
+    cluster_a: Vec<usize>,
+    cluster_b: Vec<usize>,
+    seats_a: Vec<usize>,
+    seats_b: Vec<usize>,
 }
 
 /// One relocation: `(person, (table_number, seat_index))`.
@@ -731,6 +755,10 @@ impl<'a> SearchState<'a> {
             positions,
             seats,
             shuffle_scratch: Vec::new(),
+            cluster_a: Vec::new(),
+            cluster_b: Vec::new(),
+            seats_a: Vec::new(),
+            seats_b: Vec::new(),
         }
     }
 
@@ -826,6 +854,150 @@ impl<'a> SearchState<'a> {
                 };
                 moves.push((person, (dest, seat)));
             }
+        }
+        true
+    }
+
+    /// Exchange a "cluster" — one guest plus every table-mate who shares a
+    /// group with them — between two different tables in a single move.
+    ///
+    /// Unlike [`Self::propose_swap`] (one guest at a time) or
+    /// [`Self::propose_join`] (one guest to one seat), this relocates a
+    /// coherent multi-guest subset on each side at once. That is what lets
+    /// the search cross a valley no single-guest move can: e.g. splitting a
+    /// table's close-knit pair to make room for a different group scores
+    /// worse the instant the pair is broken up, before either half gains
+    /// anything, so single-guest swaps and joins never take that first step.
+    ///
+    /// `p`'s cluster is `p` plus every other occupant of `p`'s table who
+    /// shares a group with `p`; `q`'s cluster is defined symmetrically on
+    /// `q`'s (different) table. The two clusters swap tables: each first
+    /// takes the seats the other vacated, then any remaining free seats in
+    /// ascending order, if it is the larger cluster. Rejected if either
+    /// destination table lacks room, if `may_sit_at` disallows any member of
+    /// either cluster at the other's table (locks, `table_type`), or if the
+    /// exchange would be a pure relabel (both clusters are a whole,
+    /// same-type table — `propose_table_swap` already covers that case with
+    /// no scoring gain).
+    ///
+    /// Cluster membership is entirely group-based, which is both the
+    /// mechanism and its limitation: a group shared by everyone at a table
+    /// makes the "cluster" the whole table (fine — that degenerates to a
+    /// whole-table exchange), while a single locked-table or locked-seat
+    /// guest sharing a group with `p` or `q` makes `may_sit_at` reject the
+    /// whole cluster, blocking the move even though the other members could
+    /// otherwise move freely.
+    fn propose_cluster_exchange(&mut self, rng: &mut StdRng, moves: &mut Vec<Move>) -> bool {
+        let n = self.positions.len();
+        let p = rng.random_range(0..n);
+        let q = rng.random_range(0..n);
+        let table_a = self.positions[p].0;
+        let table_b = self.positions[q].0;
+        if table_a == table_b {
+            return false;
+        }
+
+        // A plain `&[Person]` local (rather than a `&self` method) so the
+        // compiler sees the filters below borrow only `people`, not all of
+        // `self` — which would otherwise conflict with the disjoint
+        // `self.cluster_a`/`self.cluster_b` mutation in the same statement.
+        let people = self.people;
+        let shares_group = |a: usize, b: usize| {
+            people[a]
+                .groups
+                .iter()
+                .any(|g| people[b].groups.contains(g))
+        };
+
+        self.cluster_a.clear();
+        self.cluster_a.extend(
+            self.seats[table_a - 1]
+                .iter()
+                .flatten()
+                .copied()
+                .filter(|&person| person == p || shares_group(p, person)),
+        );
+        self.cluster_b.clear();
+        self.cluster_b.extend(
+            self.seats[table_b - 1]
+                .iter()
+                .flatten()
+                .copied()
+                .filter(|&person| person == q || shares_group(q, person)),
+        );
+        let (k1, k2) = (self.cluster_a.len(), self.cluster_b.len());
+
+        let occ_a = self.seats[table_a - 1].iter().flatten().count();
+        let occ_b = self.seats[table_b - 1].iter().flatten().count();
+        // Same-type tables are score-identical (same shape/max/min/recommended),
+        // so exchanging their whole occupant sets is a pure relabel with no
+        // scoring gain — `propose_table_swap` already refuses this for the
+        // same reason.
+        if k1 == occ_a
+            && k2 == occ_b
+            && self.instances[table_a - 1].table_type == self.instances[table_b - 1].table_type
+        {
+            return false;
+        }
+        if occ_a - k1 + k2 > self.instances[table_a - 1].max_people
+            || occ_b - k2 + k1 > self.instances[table_b - 1].max_people
+        {
+            return false;
+        }
+        if self
+            .cluster_a
+            .iter()
+            .any(|&person| !self.may_sit_at(person, table_b))
+            || self
+                .cluster_b
+                .iter()
+                .any(|&person| !self.may_sit_at(person, table_a))
+        {
+            return false;
+        }
+
+        // Destination seats for cluster_a (at table_b): the seats cluster_b
+        // vacates there, ascending, then free seats ascending if cluster_a
+        // is larger.
+        self.seats_b.clear();
+        self.seats_b.extend(
+            self.cluster_b
+                .iter()
+                .map(|&person| self.positions[person].1),
+        );
+        if self.seats_b.len() < k1 {
+            self.seats_b.extend(
+                self.seats[table_b - 1]
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, occupant)| occupant.is_none())
+                    .map(|(seat, _)| seat),
+            );
+        }
+        self.seats_b.truncate(k1);
+
+        self.seats_a.clear();
+        self.seats_a.extend(
+            self.cluster_a
+                .iter()
+                .map(|&person| self.positions[person].1),
+        );
+        if self.seats_a.len() < k2 {
+            self.seats_a.extend(
+                self.seats[table_a - 1]
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, occupant)| occupant.is_none())
+                    .map(|(seat, _)| seat),
+            );
+        }
+        self.seats_a.truncate(k2);
+
+        for (&person, &seat) in self.cluster_a.iter().zip(self.seats_b.iter()) {
+            moves.push((person, (table_b, seat)));
+        }
+        for (&person, &seat) in self.cluster_b.iter().zip(self.seats_a.iter()) {
+            moves.push((person, (table_a, seat)));
         }
         true
     }
