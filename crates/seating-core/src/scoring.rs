@@ -14,7 +14,6 @@ use crate::models::{
 use crate::validation::{
     build_closeness_lookup, canonical_pair, generate_table_instances, validate_seating_solution,
 };
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
 // ── Distance functions ────────────────────────────────────────────────────────
@@ -365,10 +364,6 @@ pub(crate) struct ScoringContext<'p> {
     pub(crate) person_index: HashMap<&'p str, usize>,
     /// `n × n` row-major effective pair scores, symmetric.
     pair_matrix: Vec<f64>,
-    /// Per-table rank scratch buffer reused across [`Self::score_positions`]
-    /// calls (every LAHC step) to avoid reallocating one `Vec` per table per
-    /// step.
-    rank_scratch: RefCell<Vec<usize>>,
 }
 
 impl<'p> ScoringContext<'p> {
@@ -412,7 +407,6 @@ impl<'p> ScoringContext<'p> {
             instances,
             person_index,
             pair_matrix,
-            rank_scratch: RefCell::new(Vec::new()),
         }
     }
 
@@ -421,15 +415,17 @@ impl<'p> ScoringContext<'p> {
     /// [`score_solution`]'s math and summation order — tables ascending,
     /// pairs in person order — so both produce bitwise-identical totals.
     ///
-    /// `scratch` is a caller-owned, per-table occupant buffer reused across
-    /// calls (e.g. every LAHC step) to avoid reallocating one `Vec` per table
-    /// on every call; its contents on entry are irrelevant, it is cleared
-    /// and repopulated here.
+    /// `scratch` is a caller-owned, per-table occupant buffer and `ranks` a
+    /// caller-owned per-table rank buffer, both reused across calls (e.g.
+    /// every LAHC step) to avoid reallocating one `Vec` per table on every
+    /// call; their contents on entry are irrelevant, both are cleared and
+    /// repopulated here.
     pub(crate) fn score_positions(
         &self,
         positions: &[(usize, usize)],
         config: &OptimizationConfig,
         scratch: &mut Vec<Vec<usize>>,
+        ranks: &mut Vec<usize>,
     ) -> f64 {
         let n = positions.len();
         scratch.resize_with(self.instances.len(), Vec::new);
@@ -441,10 +437,9 @@ impl<'p> ScoringContext<'p> {
         }
 
         let mut total = 0.0;
-        let mut ranks = self.rank_scratch.borrow_mut();
         for (table, seated) in self.instances.iter().zip(scratch.iter()) {
             let k = seated.len();
-            compute_ranks(&mut ranks, k, |idx| positions[seated[idx]].1);
+            compute_ranks(ranks, k, |idx| positions[seated[idx]].1);
             for idx in 0..k {
                 let i = seated[idx];
                 for jdx in (idx + 1)..k {
@@ -518,8 +513,12 @@ mod tests {
             .collect();
 
         let expected = score_solution(&project, &assignments, &config).unwrap();
-        let actual =
-            ScoringContext::build(&project).score_positions(&positions, &config, &mut Vec::new());
+        let actual = ScoringContext::build(&project).score_positions(
+            &positions,
+            &config,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
 
         // proximity 5 (distance 1) - used tables 2 * 2.0 - size |2-3| + |1-3|
         // = 3 - min shortfall 1 * 1000.0
@@ -639,8 +638,12 @@ mod tests {
         let config = OptimizationConfig::default();
 
         let expected = score_solution(&project, &assignments, &config).unwrap();
-        let actual =
-            ScoringContext::build(&project).score_positions(&positions, &config, &mut Vec::new());
+        let actual = ScoringContext::build(&project).score_positions(
+            &positions,
+            &config,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
 
         assert_eq!(actual, expected);
     }
@@ -672,8 +675,12 @@ mod tests {
         let config = OptimizationConfig::default();
 
         let expected = score_solution(&project, &assignments, &config).unwrap();
-        let actual =
-            ScoringContext::build(&project).score_positions(&positions, &config, &mut Vec::new());
+        let actual = ScoringContext::build(&project).score_positions(
+            &positions,
+            &config,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
 
         assert_eq!(actual, expected);
     }

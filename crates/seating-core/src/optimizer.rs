@@ -648,7 +648,8 @@ impl HeuristicOptimizer {
         let mut rng = StdRng::seed_from_u64(seed);
         let mut state = SearchState::new(&project.people, &ctx.instances, positions);
         let mut scratch: Vec<Vec<usize>> = Vec::new();
-        let mut current = ctx.score_positions(&state.positions, config, &mut scratch);
+        let mut ranks: Vec<usize> = Vec::new();
+        let mut current = ctx.score_positions(&state.positions, config, &mut scratch, &mut ranks);
         let mut best = state.positions.clone();
         let mut best_score = current;
         let mut history = vec![current; LAHC_HISTORY_LEN];
@@ -680,7 +681,7 @@ impl HeuristicOptimizer {
                     .map(|&(person, _)| (person, state.positions[person])),
             );
             state.apply(&moves);
-            let score = ctx.score_positions(&state.positions, config, &mut scratch);
+            let score = ctx.score_positions(&state.positions, config, &mut scratch, &mut ranks);
             if score >= current || score >= history[slot] {
                 current = score;
                 if score > best_score {
