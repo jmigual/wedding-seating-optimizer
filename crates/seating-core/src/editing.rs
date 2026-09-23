@@ -646,6 +646,14 @@ pub fn ensure_spare_tables(
 /// dropped this way; every one of their `number_of_tables` instances
 /// remains, same as always.
 ///
+/// Dropping only ever shrinks an unlimited type's `table_order` occurrence
+/// count, never its *derived* floor (`ceil(person_count / max_people)`,
+/// see [`generate_table_instances`]): if that floor is above the count this
+/// leaves in the order, [`generate_table_instances`] re-adds the shortfall
+/// on top, empty, in its usual leftover/derived-order pass — which runs
+/// after every entry named in the order, so those re-added instances always
+/// land after every table this function placed, used or kept-spare alike.
+///
 /// Used tables keep their current relative (number) order; so do the
 /// surviving empty ones. Score-preserving up to f64 summation order and
 /// validity-preserving for the same reason [`swap_table_numbers`] is: each

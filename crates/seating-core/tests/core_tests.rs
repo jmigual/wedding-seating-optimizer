@@ -835,6 +835,79 @@ fn editor_layout_shows_one_empty_table_per_type() {
     assert_eq!(numbers, vec![1, 2, 3]);
 }
 
+/// An empty table some guest is locked to must always render, even though
+/// it's neither used nor the lowest-numbered spare of its type — otherwise
+/// an unseated locked guest has no valid drop target on the canvas.
+#[test]
+fn editor_layout_always_shows_a_locked_but_unseated_guests_table() {
+    let table_types = build_table_type_map(vec![(
+        "b".to_string(),
+        TableTypeConfig {
+            shape: TableShape::Round,
+            people_per_side: None,
+            max_people: 4,
+            recommended_people: None,
+            min_people: None,
+            number_of_tables: Some(3),
+        },
+    )])
+    .unwrap();
+    let people = vec![
+        Person {
+            id: "p1".to_string(),
+            name: "Alice".to_string(),
+            table_type: None,
+            groups: vec![],
+            locked_table: None,
+            locked_seat: None,
+        },
+        Person {
+            id: "p2".to_string(),
+            name: "Bob".to_string(),
+            table_type: None,
+            groups: vec![],
+            locked_table: Some(3),
+            locked_seat: None,
+        },
+    ];
+    let project = ProjectInput {
+        people,
+        closeness_rules: vec![],
+        table_types,
+        table_order: Vec::new(),
+    };
+    assert_eq!(
+        instance_types(&project),
+        vec![
+            (1, "b".to_string()),
+            (2, "b".to_string()),
+            (3, "b".to_string()),
+        ]
+    );
+
+    // p1 seated at table 1; table 2 is `b`'s lowest empty instance; p2,
+    // locked to table 3, is not seated anywhere yet.
+    let assignments = vec![SeatingAssignment {
+        table_number: 1,
+        table_type: "b".to_string(),
+        seat_index: 0,
+        person_id: "p1".to_string(),
+        person_name: "Alice".to_string(),
+    }];
+
+    let layout = build_editor_layout(&project, &assignments, true).unwrap();
+    let numbers: Vec<usize> = layout
+        .tables
+        .iter()
+        .map(|table| table.table_number)
+        .collect();
+
+    assert!(
+        numbers.contains(&3),
+        "table 3 (p2's lock) must render even though it's empty and not the lowest spare"
+    );
+}
+
 #[test]
 fn round_table_layout_uses_capacity_not_occupant_count_for_seat_angles() {
     let table_types = build_table_type_map(vec![(
@@ -3598,6 +3671,122 @@ fn compact_table_numbers_remaps_a_lock_created_by_the_shortfall_fill() {
         Some(2)
     );
     assert!(validate_seating_solution(&compacted_project, &compacted).is_ok());
+}
+
+/// Dropping an unlimited type's extra spares only ever shrinks its
+/// `table_order` occurrence count, never its *derived* floor
+/// (`ceil(person_count / max_people)`): with 9 people needing `ceil(9/4) =
+/// 3` tables of type `a`, dropping down to 2 (1 used + 1 kept spare) still
+/// leaves `generate_table_instances` re-adding the shortfall — empty, after
+/// every table this function placed — and every already-placed number
+/// keeps its type.
+#[test]
+fn compact_table_numbers_shrinks_only_to_the_derived_floor() {
+    let table_types = build_table_type_map(vec![
+        (
+            "a".to_string(),
+            TableTypeConfig {
+                shape: TableShape::Round,
+                people_per_side: None,
+                max_people: 4,
+                recommended_people: None,
+                min_people: None,
+                number_of_tables: None,
+            },
+        ),
+        (
+            "sq".to_string(),
+            TableTypeConfig {
+                shape: TableShape::Square,
+                people_per_side: Some(vec![1, 1, 1, 1]),
+                max_people: 4,
+                recommended_people: None,
+                min_people: None,
+                number_of_tables: Some(1),
+            },
+        ),
+    ])
+    .unwrap();
+    let mut people: Vec<Person> = (1..=8)
+        .map(|n| Person {
+            id: format!("p{n}"),
+            name: format!("Guest {n}"),
+            table_type: None,
+            groups: vec![],
+            locked_table: None,
+            locked_seat: None,
+        })
+        .collect();
+    people.push(Person {
+        id: "p9".to_string(),
+        name: "Guest 9".to_string(),
+        table_type: Some("sq".to_string()),
+        groups: vec![],
+        locked_table: None,
+        locked_seat: None,
+    });
+    let project = ProjectInput {
+        people,
+        closeness_rules: vec![],
+        table_types,
+        table_order: vec![
+            "a".to_string(),
+            "a".to_string(),
+            "a".to_string(),
+            "sq".to_string(),
+        ],
+    };
+    // 9 people => derived ceil(9/4) = 3 for `a`; the order holds it at 3.
+    assert_eq!(
+        instance_types(&project),
+        vec![
+            (1, "a".to_string()),
+            (2, "a".to_string()),
+            (3, "a".to_string()),
+            (4, "sq".to_string()),
+        ]
+    );
+
+    let assignments = vec![
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "a".to_string(),
+            seat_index: 0,
+            person_id: "p1".to_string(),
+            person_name: "Guest 1".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 4,
+            table_type: "sq".to_string(),
+            seat_index: 0,
+            person_id: "p9".to_string(),
+            person_name: "Guest 9".to_string(),
+        },
+    ];
+
+    let (order, map) = compact_table_numbers(&project, &assignments);
+    assert_eq!(
+        order,
+        vec!["a".to_string(), "sq".to_string(), "a".to_string()]
+    );
+    assert_eq!(map, BTreeMap::from([(1, 1), (4, 2), (2, 3)]));
+
+    let mut compacted_project = project.clone();
+    compacted_project.table_order = order;
+
+    // The derived floor (3) exceeds what the order now holds for `a` (2),
+    // so a 4th, empty `a` instance is re-added — after every table this
+    // function placed (1..=3) — and every already-placed number kept its
+    // type.
+    assert_eq!(
+        instance_types(&compacted_project),
+        vec![
+            (1, "a".to_string()),
+            (2, "sq".to_string()),
+            (3, "a".to_string()),
+            (4, "a".to_string()),
+        ]
+    );
 }
 
 // ── ensure_spare_tables ────────────────────────────────────────────────────

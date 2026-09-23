@@ -223,10 +223,16 @@ pub fn validate_seating_solution(
 ///
 /// Because locked-table/locked-seat checks only run against `assignments`,
 /// an *unassigned* locked guest's reserved seat is not cross-checked here —
-/// someone else may freely occupy it while the locked guest sits out. That
-/// conflict only surfaces once the locked guest is placed (or once
-/// [`validate_seating_solution`] demands every person be seated), at which
-/// point it is reported as an ordinary [`ValidationError::SeatCollision`] or
+/// someone else may freely occupy it while the locked guest sits out. This
+/// function itself never flags that as a problem; it only surfaces when
+/// something actually tries to resolve it. Via
+/// [`apply_seat_drop`](crate::editing::apply_seat_drop), dropping the locked
+/// guest onto that seat resolves it in the normal way, by unassigning
+/// whichever unlocked occupant was there (or is rejected outright if the
+/// occupant is *also* locked). Via any other path that places or inspects
+/// every guest — a CSV/optimizer import, or a direct call to
+/// [`validate_seating_solution`] — the still-unresolved conflict is instead
+/// reported as an ordinary [`ValidationError::SeatCollision`] or
 /// [`ValidationError::SeatingViolatesLockedSeat`]/[`ValidationError::SeatingViolatesLockedTable`].
 ///
 /// Intended for editor-facing flows (the GUI canvas) that must keep working
