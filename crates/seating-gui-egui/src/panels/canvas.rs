@@ -6,14 +6,15 @@
 
 use crate::state::{ClosenessRow, MessageKind, SharedState};
 use eframe::egui::{
-    self, Align2, Color32, FontId, Galley, Id, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2,
+    self, Align2, Color32, FontId, Galley, Id, Pos2, Rect, ScrollArea, Sense, Stroke, StrokeKind,
+    UiBuilder, Vec2,
 };
 use seating_core::{
     COLOR_BACKGROUND, COLOR_CARD, COLOR_GUEST_TEXT, COLOR_MUTED, COLOR_SEAT_FILL,
     COLOR_SEAT_STROKE, COLOR_STROKE, COLOR_TABLE_FILL, COLOR_TABLE_STROKE, LayoutSeat, LayoutTable,
     Person, ProjectInput, RenderOptions, SeatDropOutcome, SeatingAssignment, SeatingLayout,
     TableSurface, apply_seat_drop, build_layout, compact_table_numbers, min_seat_spacing,
-    render_png, render_svg, swap_table_numbers,
+    render_png, render_svg, swap_table_numbers, unassign_person, unassigned_people,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,6 +27,13 @@ const TOAST_LIFETIME: f64 = 2.2;
 /// applied), so a table with tightly packed seats can't wrap a guest's name
 /// down to single letters.
 const NAME_WRAP_MIN_LAYOUT: f32 = 40.0;
+/// Fixed height, in screen pixels, reserved for the "Unassigned" band at the
+/// bottom of the canvas when at least one guest is unassigned. Unlike the
+/// rest of the canvas, the band ignores zoom/pan.
+const UNASSIGNED_BAND_HEIGHT: f32 = 120.0;
+/// Font size for name chips in the unassigned band, in screen pixels
+/// (unaffected by zoom, unlike seat labels).
+const CHIP_FONT: f32 = 13.0;
 
 /// UI-only state for the canvas panel: zoom/pan, an in-progress drag, and
 /// the fading score-delta toast.
@@ -104,7 +112,11 @@ pub(crate) fn show(shared: &mut SharedState, state: &mut CanvasState, ui: &mut e
     toolbar(shared, state, ui);
     ui.separator();
 
-    if shared.layout.is_some() {
+    // Also gate on `generated_table_numbers`: a brand-new project with no
+    // table types yet still builds a trivial empty layout (nothing to
+    // render), and should keep showing `empty_state`'s hints rather than a
+    // blank canvas.
+    if shared.layout.is_some() && !shared.generated_table_numbers.is_empty() {
         canvas_area(shared, state, ui);
     } else {
         empty_state(shared, ui);
@@ -219,8 +231,28 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
         .expect("canvas_area only called when shared.layout is Some");
     let seat_radius_base = RenderOptions::default().seat_radius;
 
+    // Unassigned guests get a fixed band at the bottom of the canvas
+    // (screen space, unaffected by zoom/pan); its height is carved out of
+    // the canvas's own drawing area up front so tables never end up hidden
+    // underneath it, and collapses to zero once everyone is seated.
+    let unassigned = unassigned_people(&shared.people, &shared.assignments);
+    let band_height = if unassigned.is_empty() {
+        0.0
+    } else {
+        UNASSIGNED_BAND_HEIGHT
+    };
+
     let desired_size = ui.available_size();
-    let (rect, _) = ui.allocate_exact_size(desired_size, Sense::hover());
+    let canvas_size = Vec2::new(desired_size.x, (desired_size.y - band_height).max(0.0));
+    let (rect, _) = ui.allocate_exact_size(canvas_size, Sense::hover());
+    let band_rect = if band_height > 0.0 {
+        Some(
+            ui.allocate_exact_size(Vec2::new(desired_size.x, band_height), Sense::hover())
+                .0,
+        )
+    } else {
+        None
+    };
     let painter = ui.painter_at(rect);
 
     // Pan-drag sense is inset a few points from the left edge so this
@@ -284,6 +316,7 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
 
     let mut pending_drop: Option<(usize, usize)> = None;
     let mut drag_cancelled = false;
+    let mut pending_unassign = false;
     let mut pending_lock: Option<(String, Option<usize>, Option<usize>)> = None;
     let mut pending_swap: Option<(usize, usize)> = None;
 
@@ -406,11 +439,16 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
                     });
                 }
                 if seat_response.drag_stopped() {
-                    match pointer_pos.and_then(|pointer| {
+                    if let Some(target) = pointer_pos.and_then(|pointer| {
                         find_seat_under(&layout, transform, pointer, hit_radius)
                     }) {
-                        Some(target) => pending_drop = Some(target),
-                        None => drag_cancelled = true,
+                        pending_drop = Some(target);
+                    } else if pointer_pos.is_some_and(|pointer| {
+                        band_rect.is_some_and(|band_rect| band_rect.contains(pointer))
+                    }) {
+                        pending_unassign = true;
+                    } else {
+                        drag_cancelled = true;
                     }
                 }
             } else if let Some(person) = person {
@@ -443,10 +481,28 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
 
     draw_toast(&painter, rect, state, ui.ctx());
 
-    // Every borrow of `shared` taken above (person_by_id, assignment_by_seat)
-    // is dead by now, so mutating it here is safe.
+    if let Some(band_rect) = band_rect {
+        let (chip_drop, chip_cancelled) = draw_unassigned_band(
+            ui,
+            band_rect,
+            shared,
+            state,
+            &layout,
+            transform,
+            pointer_pos,
+            hit_radius,
+            &unassigned,
+        );
+        pending_drop = pending_drop.or(chip_drop);
+        drag_cancelled = drag_cancelled || chip_cancelled;
+    }
+
+    // Every borrow of `shared` taken above (person_by_id, assignment_by_seat,
+    // unassigned) is dead by now, so mutating it here is safe.
     if let Some((table_number, seat_index)) = pending_drop {
         finish_drop(shared, state, table_number, seat_index, ui.ctx());
+    } else if pending_unassign {
+        finish_unassign(shared, state, ui.ctx());
     } else if drag_cancelled {
         state.drag = None;
         shared.set_message(
@@ -606,6 +662,39 @@ fn finish_drop(
             shared.set_message(
                 MessageKind::Error,
                 format!("Move failed: {}", SharedState::report_summary(&report)),
+            );
+        }
+    }
+}
+
+/// Applies dropping a seated guest onto the "Unassigned" band: sends them
+/// back to unassigned via [`unassign_person`] (which refuses a locked
+/// guest), then re-validates and re-scores like [`finish_drop`].
+fn finish_unassign(shared: &mut SharedState, state: &mut CanvasState, ctx: &egui::Context) {
+    let Some(drag) = state.drag.take() else {
+        return;
+    };
+    let score_before = shared.score;
+    match unassign_person(&drag.project, &shared.assignments, &drag.person_id) {
+        Ok(updated) => {
+            shared.assignments = updated;
+            shared.refresh();
+            if let (Some(before), Some(after)) = (score_before, shared.score) {
+                state.toast = Some(ScoreToast {
+                    delta: after - before,
+                    spawned_at: ctx.input(|i| i.time),
+                });
+                state.suppress_diff_toast = true;
+            }
+            shared.set_message(
+                MessageKind::Success,
+                format!("Unassigned {}.", drag.person_name),
+            );
+        }
+        Err(report) => {
+            shared.set_message(
+                MessageKind::Error,
+                format!("Unassign failed: {}", SharedState::report_summary(&report)),
             );
         }
     }
@@ -870,6 +959,114 @@ fn draw_seat(
             Color32::from_rgb(255, 210, 110),
         );
     }
+}
+
+/// Draws the fixed "Unassigned (n)" band and each unassigned guest's name
+/// chip, and handles starting/ending a drag from a chip. Chips reuse the
+/// canvas's own `DragState`/ghost/drop-preview machinery — `apply_seat_drop`
+/// already treats an unassigned mover the same as a seated one, so a chip
+/// dropped onto a seat needs no separate code path here; only *starting* a
+/// drag from a chip (rather than a seat) is band-specific.
+///
+/// Returns the seat a released chip landed on (if any) and whether a chip
+/// drag ended outside both a seat and the band (a cancel, same as a seat
+/// drag released outside every seat).
+#[allow(clippy::too_many_arguments)]
+fn draw_unassigned_band(
+    ui: &mut egui::Ui,
+    band_rect: Rect,
+    shared: &SharedState,
+    state: &mut CanvasState,
+    layout: &SeatingLayout,
+    transform: Transform,
+    pointer_pos: Option<Pos2>,
+    hit_radius: f32,
+    unassigned: &[&Person],
+) -> (Option<(usize, usize)>, bool) {
+    let painter = ui.painter_at(band_rect);
+    painter.rect_filled(band_rect, 8.0, rgb(COLOR_CARD));
+    painter.rect_stroke(
+        band_rect,
+        8.0,
+        Stroke::new(1.0_f32, rgb(COLOR_STROKE)),
+        StrokeKind::Middle,
+    );
+    painter.text(
+        band_rect.min + Vec2::new(12.0, 8.0),
+        Align2::LEFT_TOP,
+        format!("Unassigned ({})", unassigned.len()),
+        FontId::proportional(CHIP_FONT),
+        rgb(COLOR_GUEST_TEXT),
+    );
+
+    let chips_rect = Rect::from_min_max(
+        band_rect.min + Vec2::new(8.0, 30.0),
+        band_rect.max - Vec2::new(8.0, 8.0),
+    );
+
+    let mut pending_drop = None;
+    let mut drag_cancelled = false;
+
+    ui.scope_builder(UiBuilder::new().max_rect(chips_rect), |ui| {
+        ScrollArea::vertical()
+            .id_salt("unassigned_band_scroll")
+            .max_height(chips_rect.height().max(0.0))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for person in unassigned {
+                        let galley = ui.painter().layout_no_wrap(
+                            person.name.clone(),
+                            FontId::proportional(CHIP_FONT),
+                            rgb(COLOR_BACKGROUND),
+                        );
+                        let chip_size = galley.size() + Vec2::new(16.0, 10.0);
+                        let (chip_rect, response) =
+                            ui.allocate_exact_size(chip_size, Sense::click_and_drag());
+
+                        let is_being_dragged = state
+                            .drag
+                            .as_ref()
+                            .is_some_and(|drag| drag.person_id == person.id);
+                        let alpha = seat_alpha(is_being_dragged);
+                        ui.painter().rect_filled(
+                            chip_rect,
+                            10.0,
+                            faded(rgb(COLOR_SEAT_FILL), alpha),
+                        );
+                        let text_pos = Align2::CENTER_CENTER
+                            .anchor_size(chip_rect.center(), galley.size())
+                            .min;
+                        ui.painter()
+                            .galley(text_pos, galley, faded(rgb(COLOR_BACKGROUND), alpha));
+
+                        if response.drag_started()
+                            && state.drag.is_none()
+                            && let Ok(project) = shared.materialize_project()
+                        {
+                            state.drag = Some(DragState {
+                                person_id: person.id.clone(),
+                                person_name: person.name.clone(),
+                                project,
+                                allowed_table: person.locked_table,
+                            });
+                        }
+                        if response.drag_stopped() {
+                            match pointer_pos.and_then(|pointer| {
+                                find_seat_under(layout, transform, pointer, hit_radius)
+                            }) {
+                                Some(target) => pending_drop = Some(target),
+                                None => drag_cancelled = true,
+                            }
+                        }
+                        if state.drag.is_none() {
+                            response.on_hover_ui(|ui| person_tooltip(ui, person, shared));
+                        }
+                    }
+                });
+            });
+    });
+
+    (pending_drop, drag_cancelled)
 }
 
 fn draw_ghost(painter: &egui::Painter, pointer: Pos2, person_name: &str) {

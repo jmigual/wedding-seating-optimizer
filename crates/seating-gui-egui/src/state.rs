@@ -506,7 +506,7 @@ impl SharedState {
             .err()
             .map(|report| report.errors)
             .unwrap_or_default();
-        if self.assignments.is_empty() || !self.validation.is_empty() {
+        if !self.validation.is_empty() {
             return;
         }
 
