@@ -3473,15 +3473,17 @@ fn optimizer_exchanges_coherent_clusters_between_tables() {
     assert_eq!(seat_of("c2").table_number, table);
 }
 
-/// Two `round6` tables (spare capacity: 4 of 6 seats used each), with
-/// unequal-size groups (`P`/`S` singles, `Q`/`R` triples) and one locked
-/// guest per table sharing its group with unlocked table-mates: `lt1` is
-/// locked to table 1 (no locked seat) inside group `Q`, `ls1` is locked to
-/// table 2 seat 0 inside group `R`. Whatever cluster `propose_cluster_exchange`
-/// forms around a `Q` or `R` member includes the locked guest, so any
-/// attempt to move that cluster off its locked guest's table must be
-/// refused by `may_sit_at` — this must hold across many seeds without ever
-/// corrupting the solution or the locks.
+/// Eight guests (spare capacity: two `round6` tables, no warm start, so the
+/// random initial split varies by seed) with unequal-size groups (`P`/`S`
+/// singles, `Q`/`R` triples) and one locked guest per table sharing its
+/// group with unlocked table-mates: `lt1` is locked to table 1 (no locked
+/// seat) inside group `Q`, `ls1` is locked to table 2 seat 0 inside group
+/// `R`. Whenever `propose_cluster_exchange` forms a cluster around a `Q` or
+/// `R` member seated on the locked guest's own table, that cluster includes
+/// the locked guest, and `may_sit_at` must refuse moving it off that table;
+/// a `Q`/`R` member seated on the *other* table forms a lock-free cluster
+/// instead, exercising the free-seat branch of the move. This must hold
+/// across many seeds without ever corrupting the solution or the locks.
 #[test]
 fn optimizer_keeps_locked_guests_in_place_across_seeds_with_cluster_exchange() {
     let project = make_project(

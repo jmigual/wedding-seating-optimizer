@@ -634,9 +634,9 @@ impl HeuristicOptimizer {
     ///
     /// Each step proposes one move — pair swap, join, whole-table swap,
     /// cluster exchange, or table split (see [`SearchState`]) — skips it if
-    /// structurally illegal, and
-    /// otherwise accepts it when the new score is at least the current one
-    /// or at least the score recorded [`LAHC_HISTORY_LEN`] steps earlier.
+    /// structurally illegal, and otherwise accepts it when the new score is
+    /// at least the current one or at least the score recorded
+    /// [`LAHC_HISTORY_LEN`] steps earlier.
     /// Every candidate is legal by construction (locks, `table_type`,
     /// capacity, no double booking), so scoring skips validation.
     ///
