@@ -9,12 +9,12 @@
 use seating_core::{
     ClosenessRule, OptimizationConfig, Person, ProjectFile, ProjectInput, ScoreBreakdown,
     SeatingAssignment, SeatingLayout, TableShape, TableTypeConfig, TableTypeId, ValidationError,
-    ValidationReport, build_layout, build_layout_with_empty_tables, build_table_type_map,
+    ValidationReport, build_editor_layout, build_table_type_map, ensure_spare_tables,
     generate_table_instances, merge_closeness_rules, merge_people, merge_table_types,
     parse_closeness_csv, parse_f64_value, parse_optional_usize_value, parse_people_csv,
     parse_people_per_side, parse_project_file, parse_required_usize_value, parse_tables_csv,
-    score_solution_breakdown, validate_project, write_closeness_csv, write_people_csv,
-    write_project_file, write_tables_csv,
+    score_solution_breakdown, validate_partial_seating_solution, validate_project,
+    write_closeness_csv, write_people_csv, write_project_file, write_tables_csv,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -510,12 +510,7 @@ impl SharedState {
             return;
         }
 
-        let build = if self.show_empty_tables {
-            build_layout_with_empty_tables
-        } else {
-            build_layout
-        };
-        match build(&project, &self.assignments) {
+        match build_editor_layout(&project, &self.assignments, self.show_empty_tables) {
             Ok(layout) => self.layout = Some(layout),
             Err(error) => self.set_message(
                 MessageKind::Error,
@@ -533,8 +528,24 @@ impl SharedState {
     }
 
     /// Recompute derived state after a user edit, marking the project dirty.
+    ///
+    /// Before recomputing, tops up the table order via
+    /// [`ensure_spare_tables`] so every growable table type keeps a spare
+    /// table that seat drops, seat/person edits, and optimizer runs can
+    /// land on — covering every path that can fill a type's last empty
+    /// table. Only runs when the current (partial) seating is still valid;
+    /// after a table-type edit `self.assignments` can briefly reference
+    /// stale table numbers, and growing the order against that stale state
+    /// would be meaningless. Note that a spare added here changes the
+    /// table set the *next* optimizer run sees, not the one just displayed.
     pub(crate) fn refresh(&mut self) {
         self.dirty = true;
+        if let Ok(project) = self.materialize_project()
+            && validate_partial_seating_solution(&project, &self.assignments).is_ok()
+            && let Some(order) = ensure_spare_tables(&project, &self.assignments)
+        {
+            self.table_order = order;
+        }
         self.recompute();
     }
 

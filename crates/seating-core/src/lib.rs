@@ -52,11 +52,11 @@ pub mod validation;
 
 pub use editing::{
     ReferenceIdOption, SeatDropOutcome, apply_seat_drop, build_table_type_map,
-    closeness_display_order, collect_group_ids, compact_table_numbers, merge_closeness_rules,
-    merge_people, merge_table_types, move_table_number, parse_f64_value,
+    closeness_display_order, collect_group_ids, compact_table_numbers, ensure_spare_tables,
+    merge_closeness_rules, merge_people, merge_table_types, move_table_number, parse_f64_value,
     parse_optional_usize_value, parse_people_per_side, parse_required_usize_value,
     reference_id_options, reference_label, reference_matches, remove_group, rename_group,
-    rules_match, swap_table_numbers, table_number_remap,
+    rules_match, swap_table_numbers, table_number_remap, unassigned_people,
 };
 pub use io::{
     CLOSENESS_CSV_HEADER, PEOPLE_CSV_HEADER, SEATING_CSV_HEADER, TABLES_CSV_HEADER, make_project,
@@ -72,11 +72,14 @@ pub use optimizer::{HeuristicOptimizer, SeatingOptimizer};
 pub use render::{
     COLOR_BACKGROUND, COLOR_CARD, COLOR_GUEST_TEXT, COLOR_MUTED, COLOR_SEAT_FILL,
     COLOR_SEAT_STROKE, COLOR_STROKE, COLOR_TABLE_FILL, COLOR_TABLE_STROKE, LayoutSeat, LayoutTable,
-    RenderOptions, RenderingError, SeatingLayout, TableSurface, build_layout,
-    build_layout_with_empty_tables, min_seat_spacing, render_png, render_svg,
+    RenderOptions, RenderingError, SeatingLayout, TableSurface, build_editor_layout, build_layout,
+    min_seat_spacing, render_png, render_svg,
 };
 pub use scoring::{
     ScoreBreakdown, circular_distance, default_proximity_weight, effective_person_pair_score,
     linear_distance, perimeter_distance, score_solution, score_solution_breakdown, seat_distance,
 };
-pub use validation::{generate_table_instances, validate_project, validate_seating_solution};
+pub use validation::{
+    generate_table_instances, validate_partial_seating_solution, validate_project,
+    validate_seating_solution,
+};

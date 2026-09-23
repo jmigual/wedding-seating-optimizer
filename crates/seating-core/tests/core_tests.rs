@@ -773,50 +773,102 @@ fn layout_and_svg_skip_unused_tables_but_render_all_capacity_seats() {
     assert!(!svg.contains("Table 2"));
 }
 
+/// `ensure_spare_tables` only prevents an *unlimited* type from running
+/// dry — it never caps a *limited* type, which materializes every one of
+/// its `number_of_tables` instances up front (see
+/// `generate_table_instances`) and so can genuinely have several empty at
+/// once as guests move out. "At most one empty table per type" in the
+/// editor is therefore `build_editor_layout`'s own display filter, not
+/// something `ensure_spare_tables` provides. Here `b` (limited to 3
+/// instances) has one occupied and two empty; only the lower-numbered
+/// empty one (table 2) should render.
 #[test]
-fn layout_with_empty_tables_includes_every_instance() {
+fn editor_layout_shows_one_empty_table_per_type() {
+    let table_types = build_table_type_map(vec![
+        (
+            "a".to_string(),
+            TableTypeConfig {
+                shape: TableShape::Round,
+                people_per_side: None,
+                max_people: 4,
+                recommended_people: None,
+                min_people: None,
+                number_of_tables: Some(1),
+            },
+        ),
+        (
+            "b".to_string(),
+            TableTypeConfig {
+                shape: TableShape::Round,
+                people_per_side: None,
+                max_people: 4,
+                recommended_people: None,
+                min_people: None,
+                number_of_tables: Some(3),
+            },
+        ),
+    ])
+    .unwrap();
     let project = ProjectInput {
-        people: sample_people(),
+        people: vec![
+            Person {
+                id: "p1".to_string(),
+                name: "Alice".to_string(),
+                table_type: None,
+                groups: vec![],
+                locked_table: None,
+                locked_seat: None,
+            },
+            Person {
+                id: "p2".to_string(),
+                name: "Bob".to_string(),
+                table_type: None,
+                groups: vec![],
+                locked_table: None,
+                locked_seat: None,
+            },
+        ],
         closeness_rules: vec![],
-        table_types: sample_table_map(),
+        table_types,
         table_order: Vec::new(),
     };
+    // a = #1 (occupied); b = #2 (occupied), #3, #4 (both empty).
+    assert_eq!(
+        instance_types(&project),
+        vec![
+            (1, "a".to_string()),
+            (2, "b".to_string()),
+            (3, "b".to_string()),
+            (4, "b".to_string()),
+        ]
+    );
     let assignments = vec![
         SeatingAssignment {
             table_number: 1,
-            table_type: "round_4".to_string(),
+            table_type: "a".to_string(),
             seat_index: 0,
             person_id: "p1".to_string(),
             person_name: "Alice".to_string(),
         },
         SeatingAssignment {
-            table_number: 1,
-            table_type: "round_4".to_string(),
-            seat_index: 3,
+            table_number: 2,
+            table_type: "b".to_string(),
+            seat_index: 0,
             person_id: "p2".to_string(),
             person_name: "Bob".to_string(),
         },
     ];
 
-    let instances = generate_table_instances(&project);
-    let full_layout = build_layout_with_empty_tables(&project, &assignments).unwrap();
-    let used_layout = build_layout(&project, &assignments).unwrap();
+    let full_layout = build_editor_layout(&project, &assignments, true).unwrap();
 
-    assert_eq!(full_layout.tables.len(), instances.len());
-    assert!(full_layout.tables.len() > used_layout.tables.len());
-
-    let empty_table = full_layout
+    // Both used tables, plus exactly one empty table (the lower-numbered
+    // of `b`'s two empty instances, table 3) — never table 4.
+    let numbers: Vec<usize> = full_layout
         .tables
         .iter()
-        .find(|table| table.table_number == 2)
-        .unwrap();
-    assert_eq!(empty_table.seats.len(), 4);
-    assert!(
-        empty_table
-            .seats
-            .iter()
-            .all(|seat| seat.person_name.is_none())
-    );
+        .map(|table| table.table_number)
+        .collect();
+    assert_eq!(numbers, vec![1, 2, 3]);
 }
 
 #[test]
@@ -2922,6 +2974,216 @@ fn apply_seat_drop_allows_dropping_onto_an_empty_table_below_min() {
 }
 
 #[test]
+fn partial_validation_accepts_missing_people_but_rejects_duplicates() {
+    let project = drop_project();
+    let assignments: Vec<SeatingAssignment> = drop_assignments()
+        .into_iter()
+        .filter(|a| a.person_id != "p1")
+        .collect();
+
+    // p1 is missing entirely: fine under the partial check.
+    validate_partial_seating_solution(&project, &assignments).unwrap();
+
+    // A duplicated assignment for an already-seated person is still an error.
+    let mut duplicated = assignments.clone();
+    let dup_id = duplicated[0].person_id.clone();
+    duplicated.push(duplicated[0].clone());
+    let err = validate_partial_seating_solution(&project, &duplicated).unwrap_err();
+    assert!(err.errors.iter().any(
+        |e| matches!(e, ValidationError::MissingOrDuplicatePerson(id) if id.as_str() == dup_id)
+    ));
+}
+
+#[test]
+fn apply_seat_drop_places_an_unassigned_guest() {
+    let project = drop_project();
+    let assignments: Vec<SeatingAssignment> = drop_assignments()
+        .into_iter()
+        .filter(|a| a.person_id != "p1")
+        .collect();
+
+    let (updated, outcome) = apply_seat_drop(&project, &assignments, "p1", 1, 3).unwrap();
+
+    assert_eq!(outcome, SeatDropOutcome::Moved);
+    let p1 = updated.iter().find(|a| a.person_id == "p1").unwrap();
+    assert_eq!((p1.table_number, p1.seat_index), (1, 3));
+    assert_eq!(p1.table_type, "round_4");
+}
+
+#[test]
+fn apply_seat_drop_from_unassigned_onto_occupied_seat_unassigns_the_occupant() {
+    let project = drop_project();
+    let assignments: Vec<SeatingAssignment> = drop_assignments()
+        .into_iter()
+        .filter(|a| a.person_id != "p1")
+        .collect();
+
+    // p1 (currently unassigned) drops onto p2's occupied seat.
+    let (updated, outcome) = apply_seat_drop(&project, &assignments, "p1", 2, 0).unwrap();
+
+    assert_eq!(outcome, SeatDropOutcome::Swapped);
+    let p1 = updated.iter().find(|a| a.person_id == "p1").unwrap();
+    assert_eq!((p1.table_number, p1.seat_index), (2, 0));
+    assert!(!updated.iter().any(|a| a.person_id == "p2"));
+}
+
+/// An unassigned mover must never bump a *locked* occupant out of their
+/// seat — p4 is locked to (table 1, seat 1).
+#[test]
+fn apply_seat_drop_refuses_to_displace_a_locked_occupant() {
+    let project = drop_project();
+    let assignments: Vec<SeatingAssignment> = drop_assignments()
+        .into_iter()
+        .filter(|a| a.person_id != "p1")
+        .collect();
+
+    let err = apply_seat_drop(&project, &assignments, "p1", 1, 1).unwrap_err();
+
+    assert!(
+        err.errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::LockedGuestDisplaced(id) if id == "p4"))
+    );
+}
+
+/// A mover that is neither in `assignments` nor in `project.people` is
+/// unknown, not merely unassigned.
+#[test]
+fn apply_seat_drop_unknown_person_not_in_people_or_assignments() {
+    let project = drop_project();
+    let assignments = drop_assignments();
+
+    let err = apply_seat_drop(&project, &assignments, "ghost", 1, 3).unwrap_err();
+
+    assert!(
+        err.errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::UnknownPersonInSeating(id) if id == "ghost"))
+    );
+}
+
+/// Dropping an unassigned but *locked* guest onto a seat other than their
+/// own still violates their lock — being unassigned doesn't waive it.
+#[test]
+fn apply_seat_drop_unassigned_locked_guest_off_their_seat_fails() {
+    let project = drop_project();
+    // p3 is locked to (table 1, seat 0); remove them so they're unassigned.
+    let assignments: Vec<SeatingAssignment> = drop_assignments()
+        .into_iter()
+        .filter(|a| a.person_id != "p3")
+        .collect();
+
+    let err = apply_seat_drop(&project, &assignments, "p3", 2, 1).unwrap_err();
+
+    assert!(err.errors.iter().any(|e| matches!(
+        e,
+        ValidationError::SeatingViolatesLockedSeat { person_id, locked_seat: 0, .. }
+            if person_id == "p3"
+    )));
+}
+
+/// `validate_partial_seating_solution` still enforces a locked guest's seat
+/// even though every other guest is missing.
+#[test]
+fn partial_validation_still_enforces_locked_seat() {
+    let project = drop_project();
+    // p3 is locked to (table 1, seat 0) but placed at seat 3; p1, p2, p4, p5
+    // are simply missing.
+    let assignments = vec![SeatingAssignment {
+        table_number: 1,
+        table_type: "round_4".to_string(),
+        seat_index: 3,
+        person_id: "p3".to_string(),
+        person_name: "Cara".to_string(),
+    }];
+
+    let err = validate_partial_seating_solution(&project, &assignments).unwrap_err();
+
+    assert!(err.errors.iter().any(|e| matches!(
+        e,
+        ValidationError::SeatingViolatesLockedSeat { person_id, locked_seat: 0, assigned_seat: 3 }
+            if person_id == "p3"
+    )));
+}
+
+/// `validate_partial_seating_solution` still enforces seat collisions even
+/// though every other guest is missing.
+#[test]
+fn partial_validation_still_enforces_seat_collision() {
+    let project = drop_project();
+    // p1 and p2 (both unlocked) both placed at (table 2, seat 0); p3, p4, p5
+    // are missing.
+    let assignments = vec![
+        SeatingAssignment {
+            table_number: 2,
+            table_type: "round_4".to_string(),
+            seat_index: 0,
+            person_id: "p1".to_string(),
+            person_name: "Alice".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 2,
+            table_type: "round_4".to_string(),
+            seat_index: 0,
+            person_id: "p2".to_string(),
+            person_name: "Bob".to_string(),
+        },
+    ];
+
+    let err = validate_partial_seating_solution(&project, &assignments).unwrap_err();
+
+    assert!(err.errors.iter().any(|e| matches!(
+        e,
+        ValidationError::SeatCollision {
+            table_number: 2,
+            seat: 0
+        }
+    )));
+}
+
+#[test]
+fn editor_layout_accepts_partial_seating() {
+    let project = drop_project();
+    let assignments: Vec<SeatingAssignment> = drop_assignments()
+        .into_iter()
+        .filter(|a| a.person_id != "p1")
+        .collect();
+
+    let strict_err = build_layout(&project, &assignments).unwrap_err();
+    assert!(
+        strict_err
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::MissingOrDuplicatePerson(id) if id == "p1"))
+    );
+
+    let layout = build_editor_layout(&project, &assignments, false).unwrap();
+    assert!(
+        !layout
+            .tables
+            .iter()
+            .flat_map(|table| &table.seats)
+            .any(|seat| seat.person_name.as_deref() == Some("Alice"))
+    );
+}
+
+#[test]
+fn unassigned_people_preserves_project_order() {
+    let people = drop_project().people;
+    let assignments: Vec<SeatingAssignment> = drop_assignments()
+        .into_iter()
+        .filter(|a| a.person_id != "p1" && a.person_id != "p4")
+        .collect();
+
+    let unassigned = unassigned_people(&people, &assignments);
+
+    assert_eq!(
+        unassigned.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+        vec!["p1", "p4"]
+    );
+}
+
+#[test]
 fn seating_csv_round_trip_is_sorted() {
     let shuffled = vec![
         SeatingAssignment {
@@ -3180,11 +3442,41 @@ fn compact_assignments() -> Vec<SeatingAssignment> {
     ]
 }
 
-/// Compaction moves each type's used tables onto its lowest-numbered
-/// instances, preserving seat indices, and is score-neutral because
-/// same-type table instances are identical for scoring.
+/// Apply a [`compact_table_numbers`] result the way a caller must: the order
+/// on the project, the number map on every assignment and every locked
+/// guest — mirrors the [`swap_table_numbers`]/[`move_table_number`] tests.
+fn apply_compaction(
+    project: &ProjectInput,
+    assignments: &[SeatingAssignment],
+    order: Vec<TableTypeId>,
+    map: &BTreeMap<usize, usize>,
+) -> (ProjectInput, Vec<SeatingAssignment>) {
+    let mut project = project.clone();
+    project.table_order = order;
+    for person in project.people.iter_mut() {
+        if let Some(number) = person.locked_table
+            && let Some(&new_number) = map.get(&number)
+        {
+            person.locked_table = Some(new_number);
+        }
+    }
+    let assignments = assignments
+        .iter()
+        .map(|a| SeatingAssignment {
+            table_number: map[&a.table_number],
+            ..a.clone()
+        })
+        .collect();
+    (project, assignments)
+}
+
+/// Compaction sorts *all* used tables before *all* empty ones, across every
+/// type — not per type, so table 5 (type `b`, occupied) lands before table 2
+/// (type `a`, empty) even though it's a different, later-numbered type.
+/// Preserves seat indices and is score-neutral because same-type table
+/// instances are identical for scoring.
 #[test]
-fn compact_table_numbers_moves_used_tables_to_the_lowest_numbers() {
+fn compact_table_numbers_moves_all_empty_tables_to_the_end() {
     // Closeness rules on same-table pairs make the proximity term non-zero,
     // so the score-neutral assertion below is not a tautology.
     let project = ProjectInput {
@@ -3206,7 +3498,23 @@ fn compact_table_numbers_moves_used_tables_to_the_lowest_numbers() {
     };
     let assignments = compact_assignments();
 
-    let compacted = compact_table_numbers(&project, &assignments);
+    let (order, map) = compact_table_numbers(&project, &assignments);
+    assert_eq!(
+        order,
+        vec![
+            "a".to_string(),
+            "a".to_string(),
+            "b".to_string(),
+            "a".to_string(),
+            "b".to_string(),
+        ]
+    );
+    assert_eq!(
+        map,
+        BTreeMap::from([(1, 1), (3, 2), (5, 3), (2, 4), (4, 5)])
+    );
+
+    let (compacted_project, compacted) = apply_compaction(&project, &assignments, order, &map);
 
     let table_of = |compacted: &[SeatingAssignment], person_id: &str| {
         let a = compacted.iter().find(|a| a.person_id == person_id).unwrap();
@@ -3216,21 +3524,21 @@ fn compact_table_numbers_moves_used_tables_to_the_lowest_numbers() {
     assert_eq!(table_of(&compacted, "p2"), (1, 1));
     assert_eq!(table_of(&compacted, "p3"), (2, 0));
     assert_eq!(table_of(&compacted, "p4"), (2, 1));
-    assert_eq!(table_of(&compacted, "p5"), (4, 0));
+    assert_eq!(table_of(&compacted, "p5"), (3, 0));
 
-    assert!(validate_seating_solution(&project, &compacted).is_ok());
+    assert!(validate_seating_solution(&compacted_project, &compacted).is_ok());
 
     let config = OptimizationConfig::default();
     let score_before = score_solution(&project, &assignments, &config).unwrap();
-    let score_after = score_solution(&project, &compacted, &config).unwrap();
-    assert_eq!(score_before, score_after);
+    let score_after = score_solution(&compacted_project, &compacted, &config).unwrap();
+    assert!((score_before - score_after).abs() < 1e-9);
 }
 
-/// A table holding a guest with `locked_table` set is pinned: it keeps its
-/// number, and the other used tables of that type fill the remaining lowest
-/// non-pinned numbers.
+/// A guest's `locked_table` moves with the map like any other table
+/// reference — compaction no longer pins a locked table's number in place,
+/// matching [`swap_table_numbers`]/[`move_table_number`].
 #[test]
-fn compact_table_numbers_keeps_locked_tables_in_place() {
+fn compact_table_numbers_map_carries_locked_tables() {
     let mut people = compact_people();
     people
         .iter_mut()
@@ -3245,7 +3553,8 @@ fn compact_table_numbers_keeps_locked_tables_in_place() {
     };
     let assignments = compact_assignments();
 
-    let compacted = compact_table_numbers(&project, &assignments);
+    let (order, map) = compact_table_numbers(&project, &assignments);
+    let (compacted_project, compacted) = apply_compaction(&project, &assignments, order, &map);
 
     let table_of = |compacted: &[SeatingAssignment], person_id: &str| {
         compacted
@@ -3256,17 +3565,26 @@ fn compact_table_numbers_keeps_locked_tables_in_place() {
     };
     assert_eq!(table_of(&compacted, "p1"), 1);
     assert_eq!(table_of(&compacted, "p2"), 1);
-    assert_eq!(table_of(&compacted, "p3"), 3);
-    assert_eq!(table_of(&compacted, "p4"), 3);
-    assert_eq!(table_of(&compacted, "p5"), 4);
+    assert_eq!(table_of(&compacted, "p3"), 2);
+    assert_eq!(table_of(&compacted, "p4"), 2);
+    assert_eq!(table_of(&compacted, "p5"), 3);
+    assert_eq!(
+        compacted_project
+            .people
+            .iter()
+            .find(|p| p.id == "p3")
+            .unwrap()
+            .locked_table,
+        Some(2)
+    );
 
-    assert!(validate_seating_solution(&project, &compacted).is_ok());
+    assert!(validate_seating_solution(&compacted_project, &compacted).is_ok());
 }
 
 /// With a non-empty [`ProjectInput::table_order`] (`b`, then `a`, then `a` —
-/// so `b` is #1 and `a`'s two instances are #2 and #3), compaction still
-/// groups by table type: table 3 (type `a`, occupied) moves onto table 2
-/// (type `a`, empty), never onto table 1, which belongs to type `b`.
+/// so `b` is #1 and `a`'s two instances are #2 and #3), the occupied table
+/// (3) moves onto the empty one (2); it can never land on table 1, since
+/// that one is occupied too — not because it belongs to a different type.
 #[test]
 fn compact_table_numbers_respects_a_nonempty_table_order() {
     let table_types = build_table_type_map(vec![
@@ -3327,7 +3645,8 @@ fn compact_table_numbers_respects_a_nonempty_table_order() {
         },
     ];
 
-    let compacted = compact_table_numbers(&project, &assignments);
+    let (order, map) = compact_table_numbers(&project, &assignments);
+    let (compacted_project, compacted) = apply_compaction(&project, &assignments, order, &map);
     let table_of = |compacted: &[SeatingAssignment], person_id: &str| {
         compacted
             .iter()
@@ -3338,7 +3657,7 @@ fn compact_table_numbers_respects_a_nonempty_table_order() {
     assert_eq!(table_of(&compacted, "p1"), 1);
     assert_eq!(table_of(&compacted, "p2"), 2);
 
-    assert!(validate_seating_solution(&project, &compacted).is_ok());
+    assert!(validate_seating_solution(&compacted_project, &compacted).is_ok());
 
     // Growing `a` to three instances: the order only names two `a` entries,
     // so the third is appended in derived order as #4, leaving 1/2/3
@@ -3355,6 +3674,391 @@ fn compact_table_numbers_respects_a_nonempty_table_order() {
             .map(|t| (t.number, t.table_type.as_str())),
         Some((4, "a"))
     );
+}
+
+/// Ratchet mitigation: an unlimited type grown to 3 instances via
+/// `table_order`, with guests removed so 2 of its 3 are empty — compaction
+/// drops the extra spare entirely (not just reorders it), leaving exactly
+/// one spare. A different, limited type's table moves to a new number but
+/// keeps its type.
+#[test]
+fn compact_table_numbers_drops_extra_unlimited_spares() {
+    let table_types = build_table_type_map(vec![
+        (
+            "round_4".to_string(),
+            TableTypeConfig {
+                shape: TableShape::Round,
+                people_per_side: None,
+                max_people: 4,
+                recommended_people: None,
+                min_people: None,
+                number_of_tables: None,
+            },
+        ),
+        (
+            "sq".to_string(),
+            TableTypeConfig {
+                shape: TableShape::Square,
+                people_per_side: Some(vec![1, 1, 1, 1]),
+                max_people: 4,
+                recommended_people: None,
+                min_people: None,
+                number_of_tables: Some(1),
+            },
+        ),
+    ])
+    .unwrap();
+    let people = vec![
+        Person {
+            id: "p1".to_string(),
+            name: "A".to_string(),
+            table_type: None,
+            groups: vec![],
+            locked_table: None,
+            locked_seat: None,
+        },
+        Person {
+            id: "p2".to_string(),
+            name: "B".to_string(),
+            table_type: None,
+            groups: vec![],
+            locked_table: None,
+            locked_seat: None,
+        },
+    ];
+    let project = ProjectInput {
+        people,
+        closeness_rules: vec![],
+        table_types,
+        table_order: vec![
+            "round_4".to_string(),
+            "round_4".to_string(),
+            "round_4".to_string(),
+            "sq".to_string(),
+        ],
+    };
+    assert_eq!(
+        instance_types(&project),
+        vec![
+            (1, "round_4".to_string()),
+            (2, "round_4".to_string()),
+            (3, "round_4".to_string()),
+            (4, "sq".to_string()),
+        ]
+    );
+
+    let assignments = vec![
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 0,
+            person_id: "p1".to_string(),
+            person_name: "A".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 4,
+            table_type: "sq".to_string(),
+            seat_index: 0,
+            person_id: "p2".to_string(),
+            person_name: "B".to_string(),
+        },
+    ];
+
+    let (order, map) = compact_table_numbers(&project, &assignments);
+
+    // Table 3 (the second empty `round_4`) is dropped entirely; table 2
+    // survives as the one remaining spare.
+    assert_eq!(
+        order,
+        vec![
+            "round_4".to_string(),
+            "sq".to_string(),
+            "round_4".to_string()
+        ]
+    );
+    assert_eq!(map, BTreeMap::from([(1, 1), (4, 2), (2, 3)]));
+    assert!(!map.contains_key(&3));
+
+    let (compacted_project, compacted) = apply_compaction(&project, &assignments, order, &map);
+    // `sq`'s table moved from 4 to 2, but it's still type `sq`.
+    assert_eq!(
+        instance_types(&compacted_project),
+        vec![
+            (1, "round_4".to_string()),
+            (2, "sq".to_string()),
+            (3, "round_4".to_string()),
+        ]
+    );
+    assert!(validate_seating_solution(&compacted_project, &compacted).is_ok());
+}
+
+/// A guest locked to a table number created only by the locked-table
+/// shortfall fill (see `generate_table_instances`) still has their lock
+/// correctly remapped by compaction.
+#[test]
+fn compact_table_numbers_remaps_a_lock_created_by_the_shortfall_fill() {
+    let table_types = build_table_type_map(vec![(
+        "a".to_string(),
+        TableTypeConfig {
+            shape: TableShape::Round,
+            people_per_side: None,
+            max_people: 4,
+            recommended_people: None,
+            min_people: None,
+            number_of_tables: None,
+        },
+    )])
+    .unwrap();
+    let people = vec![
+        Person {
+            id: "p1".to_string(),
+            name: "A".to_string(),
+            table_type: None,
+            groups: vec![],
+            locked_table: None,
+            locked_seat: None,
+        },
+        Person {
+            id: "p2".to_string(),
+            name: "B".to_string(),
+            table_type: None,
+            groups: vec![],
+            locked_table: Some(3),
+            locked_seat: None,
+        },
+    ];
+    let project = ProjectInput {
+        people,
+        closeness_rules: vec![],
+        table_types,
+        table_order: Vec::new(),
+    };
+
+    // Derived count alone (ceil(2/4) = 1) falls short of the locked table
+    // number 3; the shortfall fill pads type `a` up to 3 instances so the
+    // lock resolves.
+    assert_eq!(
+        instance_types(&project),
+        vec![
+            (1, "a".to_string()),
+            (2, "a".to_string()),
+            (3, "a".to_string()),
+        ]
+    );
+
+    let assignments = vec![
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "a".to_string(),
+            seat_index: 0,
+            person_id: "p1".to_string(),
+            person_name: "A".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 3,
+            table_type: "a".to_string(),
+            seat_index: 0,
+            person_id: "p2".to_string(),
+            person_name: "B".to_string(),
+        },
+    ];
+
+    let (order, map) = compact_table_numbers(&project, &assignments);
+    let (compacted_project, compacted) = apply_compaction(&project, &assignments, order, &map);
+
+    assert_eq!(
+        compacted_project
+            .people
+            .iter()
+            .find(|p| p.id == "p2")
+            .unwrap()
+            .locked_table,
+        Some(2)
+    );
+    assert!(validate_seating_solution(&compacted_project, &compacted).is_ok());
+}
+
+// ── ensure_spare_tables ────────────────────────────────────────────────────
+
+/// An unlimited type with no unoccupied instance left gets one appended to
+/// the table order.
+#[test]
+fn ensure_spare_tables_appends_when_an_unlimited_type_is_full() {
+    let table_types = build_table_type_map(vec![(
+        "round_4".to_string(),
+        TableTypeConfig {
+            shape: TableShape::Round,
+            people_per_side: None,
+            max_people: 4,
+            recommended_people: None,
+            min_people: None,
+            number_of_tables: None,
+        },
+    )])
+    .unwrap();
+    let project = ProjectInput {
+        people: vec![Person {
+            id: "p1".to_string(),
+            name: "A".to_string(),
+            table_type: None,
+            groups: vec![],
+            locked_table: None,
+            locked_seat: None,
+        }],
+        closeness_rules: vec![],
+        table_types,
+        table_order: Vec::new(),
+    };
+    let assignments = vec![SeatingAssignment {
+        table_number: 1,
+        table_type: "round_4".to_string(),
+        seat_index: 0,
+        person_id: "p1".to_string(),
+        person_name: "A".to_string(),
+    }];
+
+    let order = ensure_spare_tables(&project, &assignments).unwrap();
+    assert_eq!(order, vec!["round_4".to_string(), "round_4".to_string()]);
+
+    // The append never renumbers the existing (occupied) table.
+    let mut grown = project.clone();
+    grown.table_order = order;
+    assert_eq!(
+        instance_types(&grown),
+        vec![(1, "round_4".to_string()), (2, "round_4".to_string())]
+    );
+}
+
+/// With two unlimited types and no explicit `table_order`, only the full
+/// one (`a`) grows; `b`'s untouched spare is left alone, and every
+/// existing table number keeps its type after the append.
+#[test]
+fn ensure_spare_tables_grows_one_full_unlimited_type_leaving_others_untouched() {
+    let table_types = build_table_type_map(vec![
+        (
+            "a".to_string(),
+            TableTypeConfig {
+                shape: TableShape::Round,
+                people_per_side: None,
+                max_people: 4,
+                recommended_people: None,
+                min_people: None,
+                number_of_tables: None,
+            },
+        ),
+        (
+            "b".to_string(),
+            TableTypeConfig {
+                shape: TableShape::Round,
+                people_per_side: None,
+                max_people: 4,
+                recommended_people: None,
+                min_people: None,
+                number_of_tables: None,
+            },
+        ),
+    ])
+    .unwrap();
+    let project = ProjectInput {
+        people: vec![Person {
+            id: "p1".to_string(),
+            name: "A".to_string(),
+            table_type: None,
+            groups: vec![],
+            locked_table: None,
+            locked_seat: None,
+        }],
+        closeness_rules: vec![],
+        table_types,
+        table_order: Vec::new(),
+    };
+    // Derived: one instance per type (`a` = #1, `b` = #2, lexicographic).
+    assert_eq!(
+        instance_types(&project),
+        vec![(1, "a".to_string()), (2, "b".to_string())]
+    );
+    let assignments = vec![SeatingAssignment {
+        table_number: 1,
+        table_type: "a".to_string(),
+        seat_index: 0,
+        person_id: "p1".to_string(),
+        person_name: "A".to_string(),
+    }];
+
+    let order = ensure_spare_tables(&project, &assignments).unwrap();
+    assert_eq!(
+        order,
+        vec!["a".to_string(), "b".to_string(), "a".to_string()]
+    );
+
+    let mut grown = project.clone();
+    grown.table_order = order;
+    assert_eq!(
+        instance_types(&grown),
+        vec![
+            (1, "a".to_string()),
+            (2, "b".to_string()),
+            (3, "a".to_string()),
+        ]
+    );
+}
+
+/// A type that already has an unoccupied instance needs no growth.
+#[test]
+fn ensure_spare_tables_is_none_when_a_spare_exists() {
+    let project = ProjectInput {
+        people: compact_people(),
+        closeness_rules: vec![],
+        table_types: compact_table_types(),
+        table_order: Vec::new(),
+    };
+    let assignments = compact_assignments();
+
+    assert_eq!(ensure_spare_tables(&project, &assignments), None);
+}
+
+/// A *limited* type at its `number_of_tables` cap never grows, even with
+/// every instance occupied — the cap is a hard ceiling.
+#[test]
+fn ensure_spare_tables_is_none_when_a_limited_type_is_at_its_limit() {
+    let table_types = build_table_type_map(vec![(
+        "round_4".to_string(),
+        TableTypeConfig {
+            shape: TableShape::Round,
+            people_per_side: None,
+            max_people: 4,
+            recommended_people: None,
+            min_people: None,
+            number_of_tables: Some(1),
+        },
+    )])
+    .unwrap();
+    let project = ProjectInput {
+        people: vec![Person {
+            id: "p1".to_string(),
+            name: "A".to_string(),
+            table_type: None,
+            groups: vec![],
+            locked_table: None,
+            locked_seat: None,
+        }],
+        closeness_rules: vec![],
+        table_types,
+        table_order: Vec::new(),
+    };
+    let assignments = vec![SeatingAssignment {
+        table_number: 1,
+        table_type: "round_4".to_string(),
+        seat_index: 0,
+        person_id: "p1".to_string(),
+        person_name: "A".to_string(),
+    }];
+
+    // A limited type's instance count is always exactly `number_of_tables`
+    // (see `generate_table_instances`) — there is no "below the limit" state
+    // for `ensure_spare_tables` to grow into; the whole cap is already
+    // materialized from the start, and once full, it stays full.
+    assert_eq!(ensure_spare_tables(&project, &assignments), None);
 }
 
 // ── Table order ───────────────────────────────────────────────────────────
@@ -3469,6 +4173,54 @@ fn table_order_self_heals_when_counts_change() {
     assert_eq!(
         instance_types(&shrunk),
         vec![(1, "rodona".to_string()), (2, "square".to_string())]
+    );
+}
+
+/// An *unlimited* type's (`number_of_tables: None`) instance count grows to
+/// match how many times it appears in [`ProjectInput::table_order`] when
+/// that's larger than its derived count — the mechanism
+/// [`ensure_spare_tables`] relies on to grow a full type on demand. A
+/// *limited* type never grows this way (see `table_order_self_heals...`'s
+/// "Count SHRANK" case).
+#[test]
+fn unlimited_type_grows_to_match_table_order_entries() {
+    let table_types = build_table_type_map(vec![(
+        "round_4".to_string(),
+        TableTypeConfig {
+            shape: TableShape::Round,
+            people_per_side: None,
+            max_people: 4,
+            recommended_people: None,
+            min_people: None,
+            number_of_tables: None,
+        },
+    )])
+    .unwrap();
+    let project = ProjectInput {
+        people: vec![Person {
+            id: "p1".to_string(),
+            name: "A".to_string(),
+            table_type: None,
+            groups: vec![],
+            locked_table: None,
+            locked_seat: None,
+        }],
+        closeness_rules: vec![],
+        table_types,
+        table_order: Vec::new(),
+    };
+
+    // Derived count alone is ceil(1 / 4) = 1 instance.
+    assert_eq!(instance_types(&project), vec![(1, "round_4".to_string())]);
+
+    // Naming it twice in `table_order` grows it to 2 instances.
+    let grown = ProjectInput {
+        table_order: vec!["round_4".to_string(), "round_4".to_string()],
+        ..project
+    };
+    assert_eq!(
+        instance_types(&grown),
+        vec![(1, "round_4".to_string()), (2, "round_4".to_string())]
     );
 }
 

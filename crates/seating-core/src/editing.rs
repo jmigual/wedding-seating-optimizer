@@ -7,7 +7,9 @@ use crate::models::{
     ClosenessRule, GroupId, Person, ProjectInput, SeatingAssignment, TableInstance,
     TableTypeConfig, TableTypeId, ValidationError, ValidationReport,
 };
-use crate::validation::{canonical_pair, generate_table_instances, validate_seating_solution};
+use crate::validation::{
+    canonical_pair, generate_table_instances, validate_partial_seating_solution,
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Describes an identifier that can be referenced by a closeness rule.
@@ -305,16 +307,28 @@ pub fn merge_table_types(
 pub enum SeatDropOutcome {
     /// The target seat was empty; the dragged guest was placed there.
     Moved,
-    /// The target seat was occupied; the two guests swapped positions.
+    /// The target seat was occupied: either the two guests swapped
+    /// positions, or (when the mover was unassigned) the occupant was
+    /// bumped back to unassigned.
     Swapped,
 }
 
 /// Apply a drag-and-drop of `person_id` onto (`target_table`, `target_seat`).
 ///
-/// An empty target seat results in a move; an occupied one results in a swap
-/// of the two guests' `(table, seat)` positions. The candidate result is
-/// validated via [`validate_seating_solution`], so locks, table_type
-/// compatibility, capacity, and seat range are all enforced by that call.
+/// `person_id` may currently be unassigned (present in
+/// [`ProjectInput::people`] but absent from `assignments`); dropping an
+/// unassigned guest onto an empty seat seats them there, and dropping them
+/// onto an occupied seat bumps that seat's occupant back to unassigned
+/// (rather than swapping the occupant into a seat the mover never had) —
+/// unless that occupant has a `locked_table` or `locked_seat`, in which case
+/// the drop is rejected with [`ValidationError::LockedGuestDisplaced`]: a
+/// locked guest may never be unseated by someone else's drop, only moved by
+/// their own (which validation then re-checks against their lock).
+/// Otherwise, an empty target seat results in a move; an occupied one
+/// results in a swap of the two guests' `(table, seat)` positions. The
+/// candidate result is validated via [`validate_partial_seating_solution`],
+/// so locks, table_type compatibility, capacity, and seat range are all
+/// enforced by that call, while any guest left unassigned is not an error.
 /// The input `assignments` is not mutated on failure.
 ///
 /// A no-op drop (dropping a guest onto their own current seat) always
@@ -327,15 +341,10 @@ pub fn apply_seat_drop(
     target_table: usize,
     target_seat: usize,
 ) -> Result<(Vec<SeatingAssignment>, SeatDropOutcome), ValidationReport> {
-    let Some(mover_index) = assignments.iter().position(|a| a.person_id == person_id) else {
-        return Err(ValidationReport {
-            errors: vec![ValidationError::MissingOrDuplicatePerson(
-                person_id.to_string(),
-            )],
-        });
-    };
+    let mover_index = assignments.iter().position(|a| a.person_id == person_id);
 
-    if assignments[mover_index].table_number == target_table
+    if let Some(mover_index) = mover_index
+        && assignments[mover_index].table_number == target_table
         && assignments[mover_index].seat_index == target_seat
     {
         return Ok((assignments.to_vec(), SeatDropOutcome::Moved));
@@ -345,38 +354,97 @@ pub fn apply_seat_drop(
     let target_table_type = instances
         .iter()
         .find(|instance| instance.number == target_table)
-        .map(|instance| instance.table_type.clone())
-        .unwrap_or_else(|| assignments[mover_index].table_type.clone());
+        .map(|instance| instance.table_type.clone());
 
     let occupant_index = assignments
         .iter()
         .position(|a| a.table_number == target_table && a.seat_index == target_seat);
 
     let mut updated = assignments.to_vec();
-    let outcome = if let Some(occupant_index) = occupant_index {
-        let mover_table = updated[mover_index].table_number;
-        let mover_seat = updated[mover_index].seat_index;
-        let mover_table_type = updated[mover_index].table_type.clone();
 
-        updated[mover_index].table_number = target_table;
-        updated[mover_index].seat_index = target_seat;
-        updated[mover_index].table_type = target_table_type;
+    let outcome = if let Some(mover_index) = mover_index {
+        let target_table_type =
+            target_table_type.unwrap_or_else(|| updated[mover_index].table_type.clone());
+        if let Some(occupant_index) = occupant_index {
+            let mover_table = updated[mover_index].table_number;
+            let mover_seat = updated[mover_index].seat_index;
+            let mover_table_type = updated[mover_index].table_type.clone();
 
-        updated[occupant_index].table_number = mover_table;
-        updated[occupant_index].seat_index = mover_seat;
-        updated[occupant_index].table_type = mover_table_type;
+            updated[mover_index].table_number = target_table;
+            updated[mover_index].seat_index = target_seat;
+            updated[mover_index].table_type = target_table_type;
 
-        SeatDropOutcome::Swapped
+            updated[occupant_index].table_number = mover_table;
+            updated[occupant_index].seat_index = mover_seat;
+            updated[occupant_index].table_type = mover_table_type;
+
+            SeatDropOutcome::Swapped
+        } else {
+            updated[mover_index].table_number = target_table;
+            updated[mover_index].seat_index = target_seat;
+            updated[mover_index].table_type = target_table_type;
+
+            SeatDropOutcome::Moved
+        }
     } else {
-        updated[mover_index].table_number = target_table;
-        updated[mover_index].seat_index = target_seat;
-        updated[mover_index].table_type = target_table_type;
-
-        SeatDropOutcome::Moved
+        // The dragged guest has no current seat; they must still be a known
+        // person for the drop to mean anything.
+        let Some(person) = project.people.iter().find(|p| p.id == person_id) else {
+            return Err(ValidationReport {
+                errors: vec![ValidationError::UnknownPersonInSeating(
+                    person_id.to_string(),
+                )],
+            });
+        };
+        let new_assignment = SeatingAssignment {
+            table_number: target_table,
+            table_type: target_table_type.unwrap_or_default(),
+            seat_index: target_seat,
+            person_id: person.id.clone(),
+            person_name: person.name.clone(),
+        };
+        // Dropping an unassigned guest onto an occupied seat bumps its
+        // current occupant to unassigned, rather than swapping them into the
+        // mover's (nonexistent) old seat — unless that occupant is locked,
+        // in which case they may not be displaced at all.
+        if let Some(occupant_index) = occupant_index {
+            let occupant_id = updated[occupant_index].person_id.clone();
+            let occupant_is_locked = project.people.iter().any(|p| {
+                p.id == occupant_id && (p.locked_table.is_some() || p.locked_seat.is_some())
+            });
+            if occupant_is_locked {
+                return Err(ValidationReport {
+                    errors: vec![ValidationError::LockedGuestDisplaced(occupant_id)],
+                });
+            }
+            updated.remove(occupant_index);
+            updated.push(new_assignment);
+            SeatDropOutcome::Swapped
+        } else {
+            updated.push(new_assignment);
+            SeatDropOutcome::Moved
+        }
     };
 
-    validate_seating_solution(project, &updated)?;
+    validate_partial_seating_solution(project, &updated)?;
     Ok((updated, outcome))
+}
+
+// ── Unassigned guests ─────────────────────────────────────────────────────────
+
+/// Guests in `people` with no entry in `assignments`, in `people`'s order.
+pub fn unassigned_people<'a>(
+    people: &'a [Person],
+    assignments: &[SeatingAssignment],
+) -> Vec<&'a Person> {
+    let seated: HashSet<&str> = assignments
+        .iter()
+        .map(|assignment| assignment.person_id.as_str())
+        .collect();
+    people
+        .iter()
+        .filter(|person| !seated.contains(person.id.as_str()))
+        .collect()
 }
 
 // ── Table renumbering ─────────────────────────────────────────────────────────
@@ -505,81 +573,125 @@ pub fn move_table_number(
     Some((order, table_number_map(&numbers)))
 }
 
+// ── Table growth ──────────────────────────────────────────────────────────────
+
+/// If any table type has no unoccupied instance left and can still grow,
+/// append one more occurrence of it to the current table order and return
+/// the result; `None` if every type already has a spare (or is a *limited*
+/// type already at its `number_of_tables` cap — see
+/// [`generate_table_instances`]).
+///
+/// Only *unlimited* types (`number_of_tables: None`) can be grown this way:
+/// appending an occurrence to [`ProjectInput::table_order`] raises the type's
+/// instance count by one (see [`generate_table_instances`]). A *limited*
+/// type's instance count is always exactly `number_of_tables`, so it already
+/// has every table it will ever have from the start — there is nothing to
+/// append, and once all of them are occupied, no more appear, matching a
+/// hard capacity limit.
+///
+/// Appending never renumbers an existing table: the returned order
+/// reproduces the current instance order verbatim and only adds a name at
+/// the end, so re-running [`generate_table_instances`] against it keeps
+/// every existing table's number and only appends the new spare.
+pub fn ensure_spare_tables(
+    project: &ProjectInput,
+    assignments: &[SeatingAssignment],
+) -> Option<Vec<TableTypeId>> {
+    let instances = generate_table_instances(project);
+    let used_numbers: HashSet<usize> = assignments.iter().map(|a| a.table_number).collect();
+
+    let mut has_spare: HashMap<&TableTypeId, bool> = HashMap::new();
+    for instance in &instances {
+        let spare = !used_numbers.contains(&instance.number);
+        let entry = has_spare.entry(&instance.table_type).or_insert(false);
+        *entry = *entry || spare;
+    }
+
+    let mut order = current_table_order(project);
+    let mut grew = false;
+    for (table_type_id, cfg) in &project.table_types {
+        let is_full = !has_spare.get(table_type_id).copied().unwrap_or(false);
+        let can_grow = cfg.number_of_tables.is_none();
+        if is_full && can_grow {
+            order.push(table_type_id.clone());
+            grew = true;
+        }
+    }
+
+    grew.then_some(order)
+}
+
 // ── Table compaction ──────────────────────────────────────────────────────────
 
-/// Repack each table type's used instances onto that type's lowest-numbered
-/// instances, so used tables sort before empty ones (e.g. table 3 moves to
-/// table 2 when table 2 of the same type is empty). Preserves each guest's
-/// seat index and the relative order of used tables within their type.
+/// Renumber tables so every occupied table sorts before every empty one,
+/// across *all* types (not per type), returning the new explicit
+/// [`ProjectInput::table_order`] and an old→new table-number map covering
+/// every remaining table — same shape and semantics as
+/// [`swap_table_numbers`]/[`move_table_number`]: the whole table (its type,
+/// shape, and guests) moves with its number, so the caller applies the map
+/// to every [`SeatingAssignment::table_number`] and [`Person::locked_table`]
+/// (a locked guest's table moves with the map like any other, it is not
+/// pinned in place) and stores the returned order.
 ///
-/// A table holding any guest with [`locked_table`](Person::locked_table)
-/// set is pinned: it keeps its number, and the other used tables of that
-/// type fill the remaining lowest, non-pinned numbers in order.
+/// Also a ratchet mitigation for [`ensure_spare_tables`]: since that
+/// function only ever appends to `table_order`, repeated grow/compact
+/// cycles could otherwise leave an *unlimited* type with an ever-growing
+/// pile of empty spares. So every empty instance of an unlimited type
+/// beyond its lowest-numbered one is dropped from the returned order
+/// entirely (not renumbered — simply absent, shrinking that type's
+/// instance count) unless some guest is `locked_table`ed to it, in which
+/// case it is kept so the lock stays resolvable. *Limited* types are never
+/// dropped this way; every one of their `number_of_tables` instances
+/// remains, same as always.
 ///
-/// Score-preserving up to f64 summation order and validity-preserving:
-/// instances of the same table type are identical for scoring (same
-/// shape/capacity/min/recommended), so this only relabels which
-/// interchangeable instance a guest's occupant set sits at — it does not
-/// change which pairs of guests share a table, and moving a whole occupant
-/// set between same-type tables cannot violate capacity, seat, or lock
-/// invariants.
-///
-/// For the same reason it leaves [`ProjectInput::table_order`] valid: each
-/// table number keeps its type, so the order needs no update.
+/// Used tables keep their current relative (number) order; so do the
+/// surviving empty ones. Score-preserving up to f64 summation order and
+/// validity-preserving for the same reason [`swap_table_numbers`] is: each
+/// surviving table keeps its own occupants and its own type, only the
+/// numbers change, and a dropped table never held a guest or a lock.
 pub fn compact_table_numbers(
     project: &ProjectInput,
     assignments: &[SeatingAssignment],
-) -> Vec<SeatingAssignment> {
+) -> (Vec<TableTypeId>, BTreeMap<usize, usize>) {
     let instances = generate_table_instances(project);
-    let mut numbers_by_type: BTreeMap<&TableTypeId, Vec<usize>> = BTreeMap::new();
-    for instance in &instances {
-        numbers_by_type
-            .entry(&instance.table_type)
-            .or_default()
-            .push(instance.number);
-    }
-
-    let locked_person_ids: HashSet<&str> = project
+    let used_numbers: HashSet<usize> = assignments.iter().map(|a| a.table_number).collect();
+    let locked_numbers: HashSet<usize> = project
         .people
         .iter()
-        .filter(|person| person.locked_table.is_some())
-        .map(|person| person.id.as_str())
+        .filter_map(|p| p.locked_table)
+        .collect();
+    let unlimited_types: HashSet<&TableTypeId> = project
+        .table_types
+        .iter()
+        .filter(|(_, cfg)| cfg.number_of_tables.is_none())
+        .map(|(table_type_id, _)| table_type_id)
         .collect();
 
-    let mut used_numbers: BTreeSet<usize> = BTreeSet::new();
-    let mut pinned_numbers: BTreeSet<usize> = BTreeSet::new();
-    for assignment in assignments {
-        used_numbers.insert(assignment.table_number);
-        if locked_person_ids.contains(assignment.person_id.as_str()) {
-            pinned_numbers.insert(assignment.table_number);
-        }
-    }
-
-    let mut number_map: HashMap<usize, usize> = HashMap::new();
-    for numbers in numbers_by_type.values() {
-        let free_numbers = numbers
-            .iter()
-            .copied()
-            .filter(|n| !pinned_numbers.contains(n));
-        let unpinned_used = numbers
-            .iter()
-            .copied()
-            .filter(|n| used_numbers.contains(n) && !pinned_numbers.contains(n));
-        for (old, new) in unpinned_used.zip(free_numbers) {
-            number_map.insert(old, new);
-        }
-    }
-
-    assignments
+    let mut numbers: Vec<usize> = instances
         .iter()
-        .map(|assignment| SeatingAssignment {
-            table_number: number_map
-                .get(&assignment.table_number)
-                .copied()
-                .unwrap_or(assignment.table_number),
-            ..assignment.clone()
-        })
-        .collect()
+        .filter(|instance| used_numbers.contains(&instance.number))
+        .map(|instance| instance.number)
+        .collect();
+
+    let mut spare_kept: HashSet<&TableTypeId> = HashSet::new();
+    for instance in instances
+        .iter()
+        .filter(|instance| !used_numbers.contains(&instance.number))
+    {
+        let keep = locked_numbers.contains(&instance.number)
+            || !unlimited_types.contains(&instance.table_type)
+            || spare_kept.insert(&instance.table_type);
+        if keep {
+            numbers.push(instance.number);
+        }
+    }
+
+    let order = numbers
+        .iter()
+        .map(|&old_number| instances[old_number - 1].table_type.clone())
+        .collect();
+
+    (order, table_number_map(&numbers))
 }
 
 // ── ValidationError association helpers ───────────────────────────────────────
@@ -606,6 +718,7 @@ impl ValidationError {
             ValidationError::SeatingPersonTableTypeMismatch { person_id, .. } => Some(person_id),
             ValidationError::SeatingViolatesLockedTable { person_id, .. } => Some(person_id),
             ValidationError::SeatingViolatesLockedSeat { person_id, .. } => Some(person_id),
+            ValidationError::LockedGuestDisplaced(id) => Some(id),
             ValidationError::DuplicateTableTypeId(_)
             | ValidationError::EmptyTableTypeId
             | ValidationError::EmptyPersonId
@@ -677,7 +790,8 @@ impl ValidationError {
             | ValidationError::UnsupportedProjectVersion { .. }
             | ValidationError::NoFeasibleAssignment
             | ValidationError::SeatingViolatesLockedTable { .. }
-            | ValidationError::SeatingViolatesLockedSeat { .. } => None,
+            | ValidationError::SeatingViolatesLockedSeat { .. }
+            | ValidationError::LockedGuestDisplaced(_) => None,
         }
     }
 
@@ -722,7 +836,8 @@ impl ValidationError {
             | ValidationError::SeatingTableTypeMismatch { .. }
             | ValidationError::SeatingPersonTableTypeMismatch { .. }
             | ValidationError::SeatingViolatesLockedTable { .. }
-            | ValidationError::SeatingViolatesLockedSeat { .. } => None,
+            | ValidationError::SeatingViolatesLockedSeat { .. }
+            | ValidationError::LockedGuestDisplaced(_) => None,
         }
     }
 }

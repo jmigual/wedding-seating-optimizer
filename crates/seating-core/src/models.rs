@@ -487,4 +487,9 @@ pub enum ValidationError {
         locked_seat: usize,
         assigned_seat: usize,
     },
+    /// A drag-and-drop would displace a guest with a `locked_table` or
+    /// `locked_seat` from their required seat, rather than seating them
+    /// somewhere still consistent with their lock.
+    #[error("cannot displace locked guest '{0}' from their required seat")]
+    LockedGuestDisplaced(String),
 }

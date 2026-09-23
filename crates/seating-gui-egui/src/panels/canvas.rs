@@ -163,12 +163,18 @@ fn toolbar(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui::Ui)
             .clicked()
             && let Ok(project) = shared.materialize_project()
         {
-            shared.assignments = compact_table_numbers(&project, &shared.assignments);
+            let (order, map) = compact_table_numbers(&project, &shared.assignments);
+            shared.apply_table_number_map(&map);
+            shared.table_order = order;
             shared.refresh();
             shared.set_message(MessageKind::Success, "Compacted table numbers");
         }
         ui.separator();
-        ui.add_enabled_ui(shared.layout.is_some(), |ui| {
+        // Export uses the strict `build_layout`, which needs every guest
+        // seated — gate on `score_breakdown` (only `Some` for a strictly
+        // valid, fully-seated solution), not just `layout` (which also
+        // exists for a partial seating).
+        ui.add_enabled_ui(shared.score_breakdown.is_some(), |ui| {
             if ui.button("Export SVG").clicked() {
                 export_svg(shared);
             }

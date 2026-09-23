@@ -4,7 +4,9 @@
 //! into a layout description and exportable SVG/PNG outputs.
 
 use crate::models::{ProjectInput, SeatingAssignment, TableShape, ValidationReport};
-use crate::validation::{generate_table_instances, validate_seating_solution};
+use crate::validation::{
+    generate_table_instances, validate_partial_seating_solution, validate_seating_solution,
+};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -152,31 +154,47 @@ pub enum RenderingError {
 
 /// Build a reusable layout from a validated project and seating assignment.
 ///
-/// Tables with no occupants are omitted; see
-/// [`build_layout_with_empty_tables`] to include them.
+/// Every person must be seated exactly once (see [`validate_seating_solution`]);
+/// use [`build_editor_layout`] for a GUI editor where guests may still be
+/// unassigned. Tables with no occupants are omitted.
 pub fn build_layout(
     project: &ProjectInput,
     assignments: &[SeatingAssignment],
 ) -> Result<SeatingLayout, ValidationReport> {
-    build_layout_impl(project, assignments, false)
+    build_layout_impl(project, assignments, false, true)
 }
 
-/// Build a reusable layout like [`build_layout`], but including tables with
-/// no occupants (e.g. a table just added via the GUI), so the canvas can
-/// still render and hit-test drops onto them.
-pub fn build_layout_with_empty_tables(
+/// Build a reusable layout like [`build_layout`], but tolerating a *partial*
+/// seating (some guests not yet assigned — see
+/// [`validate_partial_seating_solution`]), and optionally including tables
+/// with no occupants (e.g. a table just added via the GUI), so the canvas
+/// can still render and hit-test drops onto them.
+///
+/// With `include_empty_tables: true`, at most one empty table per type is
+/// shown (the lowest-numbered one), regardless of how many that type
+/// actually has sitting empty — a *limited* type materializes every one of
+/// its `number_of_tables` instances up front (see
+/// [`generate_table_instances`]), so without this cap they would all show
+/// up as guests are moved out of them.
+pub fn build_editor_layout(
     project: &ProjectInput,
     assignments: &[SeatingAssignment],
+    include_empty_tables: bool,
 ) -> Result<SeatingLayout, ValidationReport> {
-    build_layout_impl(project, assignments, true)
+    build_layout_impl(project, assignments, include_empty_tables, false)
 }
 
 fn build_layout_impl(
     project: &ProjectInput,
     assignments: &[SeatingAssignment],
     include_empty_tables: bool,
+    require_all_people: bool,
 ) -> Result<SeatingLayout, ValidationReport> {
-    validate_seating_solution(project, assignments)?;
+    if require_all_people {
+        validate_seating_solution(project, assignments)?;
+    } else {
+        validate_partial_seating_solution(project, assignments)?;
+    }
 
     let options = RenderOptions::default();
     let instances = generate_table_instances(project);
@@ -191,9 +209,27 @@ fn build_layout_impl(
         table_assignments.sort_by_key(|assignment| assignment.seat_index);
     }
 
+    // When showing empty tables, cap them at one per type: `ensure_spare_tables`
+    // already keeps an *unlimited* type down to one spare, but a *limited*
+    // type always has every one of its `number_of_tables` instances
+    // materialized from the start (see `generate_table_instances`), so
+    // without this it would show every one of them as they empty out.
+    let mut lowest_empty_by_type: HashMap<&str, usize> = HashMap::new();
+    for table in &instances {
+        if !assignments_by_table.contains_key(&table.number) {
+            lowest_empty_by_type
+                .entry(table.table_type.as_str())
+                .and_modify(|lowest| *lowest = (*lowest).min(table.number))
+                .or_insert(table.number);
+        }
+    }
     let used_instances = instances
         .iter()
-        .filter(|table| include_empty_tables || assignments_by_table.contains_key(&table.number))
+        .filter(|table| {
+            assignments_by_table.contains_key(&table.number)
+                || (include_empty_tables
+                    && lowest_empty_by_type.get(table.table_type.as_str()) == Some(&table.number))
+        })
         .collect::<Vec<_>>();
     let columns = columns_for(used_instances.len());
     let mut tables = Vec::new();
