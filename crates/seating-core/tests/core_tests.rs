@@ -460,6 +460,23 @@ fn project_file_rejects_unsupported_version() {
 }
 
 #[test]
+fn project_file_without_empty_seat_weight_loads_the_default() {
+    // Files saved before `empty_seat_weight` existed carry the other weights
+    // but not this one.
+    let legacy = format!(
+        r#"{{"version": {PROJECT_FILE_VERSION}, "people": [], "closeness_rules": [],
+            "table_types": {{}}, "optimization": {{"optimal_table_size_weight": 20.0}},
+            "seating": []}}"#
+    );
+    let optimization = parse_project_file(&legacy).unwrap().optimization;
+    assert_eq!(optimization.optimal_table_size_weight, 20.0);
+    assert_eq!(
+        optimization.empty_seat_weight,
+        OptimizationConfig::default().empty_seat_weight
+    );
+}
+
+#[test]
 fn project_file_preserves_csv_representations() {
     // Uses CSV-hostile names (commas, quotes) so this test actually exercises
     // csv-crate quoting/escaping, unlike a plain round-trip on alphanumeric
@@ -2151,16 +2168,19 @@ fn min_people_shortfall_is_penalized_not_rejected() {
     // No closeness rules (proximity = 0), no recommended_people (size_penalty
     // = 0), default used_table_weight = 0 (used_table_penalty = 0). Table 2
     // has 1 guest against min_people = 2, so the shortfall of 1 is penalized
-    // at the default min_people_weight of 1000.0.
+    // at the default min_people_weight of 1000.0. The 2 + 3 empty seats at
+    // the two used tables cost the default empty_seat_weight of 1.0 each.
     assert_eq!(breakdown.min_people_penalty, 1000.0);
+    assert_eq!(breakdown.empty_seat_penalty, 5.0);
     assert_eq!(
         breakdown.total,
         breakdown.proximity
             - breakdown.used_table_penalty
             - breakdown.size_penalty
             - breakdown.min_people_penalty
+            - breakdown.empty_seat_penalty
     );
-    assert_eq!(breakdown.total, -1000.0);
+    assert_eq!(breakdown.total, -1005.0);
 }
 
 #[test]
@@ -2355,9 +2375,10 @@ fn used_table_and_size_penalties_apply() {
     //   p1-p3 (distance 2, weight 0.75) and p2-p3 (distance 1): no rule, 0.0
     //   used_table_weight: 1 table * 3.0 = -3.0
     //   size penalty: |3 - 2| * 2.0 = -2.0
-    //   total: 5.0 - 3.0 - 2.0 = 0.0
+    //   empty seats: (4 - 3) * 1.0 = -1.0
+    //   total: 5.0 - 3.0 - 2.0 - 1.0 = -1.0
     let score = score_solution(&project, &assignments, &config).unwrap();
-    assert!((score - 0.0).abs() < 1e-9, "expected 0.0, got {score}");
+    assert!((score + 1.0).abs() < 1e-9, "expected -1.0, got {score}");
 }
 
 /// Shared fixture for score breakdown tests: one round table (max 4,
@@ -2458,19 +2479,141 @@ fn score_solution_breakdown_reports_expected_components() {
     //   proximity: p1-p2 (distance 1, weight 1.0) => 5.0 * 1.0 * 1.0 = 5.0
     //   used_table_penalty: 1 table * 3.0 = 3.0
     //   size_penalty: |3 - 2| * 2.0 = 2.0
+    //   empty_seat_penalty: (4 - 3) * 1.0 = 1.0
     assert!((breakdown.proximity - 5.0).abs() < 1e-9);
     assert!((breakdown.used_table_penalty - 3.0).abs() < 1e-9);
     assert!((breakdown.size_penalty - 2.0).abs() < 1e-9);
-    assert!((breakdown.total - 0.0).abs() < 1e-9);
+    assert!((breakdown.empty_seat_penalty - 1.0).abs() < 1e-9);
+    assert!((breakdown.total + 1.0).abs() < 1e-9);
     assert!(
         (breakdown.total
             - (breakdown.proximity
                 - breakdown.used_table_penalty
                 - breakdown.size_penalty
-                - breakdown.min_people_penalty))
+                - breakdown.min_people_penalty
+                - breakdown.empty_seat_penalty))
             .abs()
             < 1e-9
     );
+}
+
+/// Ten guests of one group and two single tables: a 12-seat `big` and a
+/// 10-seat `small`, both recommending 10 (like a venue's 12-seat round laid
+/// for 10). Seating the group at either table scores the same proximity (k =
+/// 10 occupants either way) and the same size penalty; only empty seats
+/// separate the two.
+fn ten_guests_big_or_small_project() -> ProjectInput {
+    let mut people_csv = "id,name,table_type,groups,locked_table,locked_seat\n".to_string();
+    for index in 1..=10 {
+        people_csv.push_str(&format!("g{index},G {index},,G,,\n"));
+    }
+    make_project(
+        &people_csv,
+        "left_id,right_id,score\nG,G,5\ng1,g2,3\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nbig,round,12,10,,1,\nsmall,round,10,10,,1,\n",
+    )
+    .unwrap()
+}
+
+/// Every guest of `project` at `table`, from seat 0 in person order.
+fn seat_everyone_at(project: &ProjectInput, table: &TableInstance) -> Vec<SeatingAssignment> {
+    project
+        .people
+        .iter()
+        .enumerate()
+        .map(|(seat_index, person)| SeatingAssignment {
+            table_number: table.number,
+            table_type: table.table_type.clone(),
+            seat_index,
+            person_id: person.id.clone(),
+            person_name: person.name.clone(),
+        })
+        .collect()
+}
+
+#[test]
+fn empty_seats_at_used_tables_are_penalized_and_empty_tables_are_free() {
+    let project = ten_guests_big_or_small_project();
+    let instances = generate_table_instances(&project);
+    let table_of_type = |table_type: &str| {
+        instances
+            .iter()
+            .find(|table| table.table_type == table_type)
+            .unwrap()
+    };
+    let on_big = seat_everyone_at(&project, table_of_type("big"));
+    let on_small = seat_everyone_at(&project, table_of_type("small"));
+
+    let config = OptimizationConfig {
+        empty_seat_weight: 1.5,
+        ..OptimizationConfig::default()
+    };
+    let big = score_solution_breakdown(&project, &on_big, &config).unwrap();
+    let small = score_solution_breakdown(&project, &on_small, &config).unwrap();
+    // 12 - 10 = 2 empty seats at the used big table; the unused table in
+    // either layout (10 or 12 empty seats) adds nothing.
+    assert_eq!(big.empty_seat_penalty, 2.0 * 1.5);
+    assert_eq!(small.empty_seat_penalty, 0.0);
+    assert_eq!(big.proximity, small.proximity);
+    assert_eq!(big.size_penalty, small.size_penalty);
+    assert!(
+        (small.total - big.total - 2.0 * 1.5).abs() < 1e-9,
+        "small {} vs big {}",
+        small.total,
+        big.total
+    );
+
+    let unweighted = OptimizationConfig {
+        empty_seat_weight: 0.0,
+        ..OptimizationConfig::default()
+    };
+    assert_eq!(
+        score_solution(&project, &on_big, &unweighted).unwrap(),
+        score_solution(&project, &on_small, &unweighted).unwrap()
+    );
+}
+
+/// Warm-started from the whole group at the 12-seat table, the optimizer
+/// must end with it at the free 10-seat table. Without the empty-seat term
+/// the two layouts tie, so the whole-table swap was accepted but never
+/// recorded as a new best.
+#[test]
+fn optimizer_moves_a_group_to_the_free_table_that_fits_it_snugly() {
+    let project = ten_guests_big_or_small_project();
+    let instances = generate_table_instances(&project);
+    let big = instances
+        .iter()
+        .find(|table| table.table_type == "big")
+        .unwrap();
+    let small = instances
+        .iter()
+        .find(|table| table.table_type == "small")
+        .unwrap();
+    let initial = seat_everyone_at(&project, big);
+
+    for seed in 1..=4u64 {
+        let config = OptimizationConfig {
+            seed,
+            attempts: 2,
+            steps: 2_000,
+            time_limit_secs: 0,
+            ..OptimizationConfig::default()
+        };
+        let result = HeuristicOptimizer
+            .optimize_timed(&project, &config, Some(&initial))
+            .unwrap();
+        let assignments = &result.solutions[0].assignments;
+        validate_seating_solution(&project, assignments).unwrap();
+        assert!(
+            assignments.iter().all(|a| a.table_number == small.number),
+            "seed {seed}: group not moved to the 10-seat table"
+        );
+
+        let again = HeuristicOptimizer
+            .optimize_timed(&project, &config, Some(&initial))
+            .unwrap();
+        assert_eq!(&again.solutions[0].assignments, assignments, "seed {seed}");
+    }
 }
 
 #[test]
@@ -2639,11 +2782,13 @@ fn optimizer_minimizes_min_shortfall_when_no_feasible_split_exists() {
     sizes.sort_unstable();
     assert_eq!(sizes, [2, 3]);
     // No closeness rules (proximity 0), no recommended_people (size penalty
-    // 0), default used_table_weight 0; the only term is one missing guest
-    // on the 2-seat table at the default min_people_weight.
+    // 0), default used_table_weight 0; the terms are one missing guest on the
+    // 2-seat table at the default min_people_weight, and 1 + 2 empty seats
+    // at the default empty_seat_weight.
+    let defaults = OptimizationConfig::default();
     assert_eq!(
         solution.score,
-        -OptimizationConfig::default().min_people_weight
+        -defaults.min_people_weight - 3.0 * defaults.empty_seat_weight
     );
 }
 
@@ -5903,8 +6048,11 @@ fn optimizer_varied_start_reaches_plan_needing_an_extra_table() {
             "group split across tables: {group:?}"
         );
     }
+    // Three guests at each of three 6-seat tables: only the 3 × 3 empty
+    // seats cost anything.
     assert_eq!(
-        result.solutions[0].score, 0.0,
+        result.solutions[0].score,
+        -9.0 * OptimizationConfig::default().empty_seat_weight,
         "expected zero cross-group pairs once every group has its own table"
     );
 }
@@ -5949,8 +6097,11 @@ fn optimizer_kick_opens_the_extra_table_a_single_chain_needs() {
     used.sort_unstable();
     used.dedup();
     assert_eq!(used.len(), 3, "expected all three tables in use: {used:?}");
+    // Three guests at each of three 6-seat tables: only the 3 × 3 empty
+    // seats cost anything.
     assert_eq!(
-        result.solutions[0].score, 0.0,
+        result.solutions[0].score,
+        -9.0 * OptimizationConfig::default().empty_seat_weight,
         "expected zero cross-group pairs once every group has its own table"
     );
 }

@@ -202,7 +202,10 @@ pub struct ScoreBreakdown {
     /// for tables below their `min_people` — the magnitude subtracted from
     /// `total` for violating the (soft) minimum occupancy.
     pub min_people_penalty: f64,
-    /// `proximity - used_table_penalty - size_penalty - min_people_penalty`,
+    /// Sum over used tables of `(max_people - occupancy) × config.empty_seat_weight`
+    /// — the magnitude subtracted from `total` for empty seats at used tables.
+    pub empty_seat_penalty: f64,
+    /// `proximity - used_table_penalty - size_penalty - min_people_penalty - empty_seat_penalty`,
     /// computed via the exact same running-accumulator sequence as the
     /// current `score_solution` body (not recombined from the fields above
     /// at the end) so floating-point rounding is unchanged run to run.
@@ -225,11 +228,13 @@ pub struct ScoreBreakdown {
 ///
 /// Pairs at **different** tables contribute 0 regardless of their closeness.
 ///
-/// Additional global penalties are applied for every used table and for each
-/// used table where the occupancy deviates from `recommended_people`:
+/// Additional global penalties are applied for every used table, for each
+/// used table where the occupancy deviates from `recommended_people`, and for
+/// each empty seat at a used table:
 /// ```text
 /// table_penalty = used_table_count × config.used_table_weight
 /// size_penalty = |occupancy - recommended_people| × config.optimal_table_size_weight
+/// empty_seat_penalty = (max_people - occupancy) × config.empty_seat_weight
 /// ```
 ///
 /// The closeness lookup is built **once** and reused for all pair evaluations,
@@ -318,11 +323,24 @@ pub fn score_solution_breakdown(
         }
     }
 
+    // Soft penalty for empty seats at used tables; empty tables cost nothing.
+    // `count <= max_people` holds: the solution was validated above.
+    let mut empty_seat_penalty = 0.0;
+    for table in &instances {
+        let count = by_table.get(&table.number).map(|v| v.len()).unwrap_or(0);
+        if count > 0 {
+            let penalty = (table.max_people - count) as f64 * config.empty_seat_weight;
+            total -= penalty;
+            empty_seat_penalty += penalty;
+        }
+    }
+
     Ok(ScoreBreakdown {
         proximity,
         used_table_penalty,
         size_penalty,
         min_people_penalty,
+        empty_seat_penalty,
         total,
     })
 }
@@ -473,6 +491,12 @@ impl<'p> ScoringContext<'p> {
             }
         }
 
+        for (table, seated) in self.instances.iter().zip(scratch.iter()) {
+            if !seated.is_empty() {
+                total -= (table.max_people - seated.len()) as f64 * config.empty_seat_weight;
+            }
+        }
+
         total
     }
 }
@@ -495,6 +519,7 @@ mod tests {
         .unwrap();
         let config = OptimizationConfig {
             used_table_weight: 2.0,
+            empty_seat_weight: 1.5,
             ..OptimizationConfig::default()
         };
         // p1, p2 adjacent on table 1; p3 alone on table 2 (below min 2).
@@ -521,8 +546,8 @@ mod tests {
         );
 
         // proximity 5 (distance 1) - used tables 2 * 2.0 - size |2-3| + |1-3|
-        // = 3 - min shortfall 1 * 1000.0
-        assert_eq!(expected, 5.0 - 4.0 - 3.0 - 1000.0);
+        // = 3 - min shortfall 1 * 1000.0 - empty seats (2 + 3) * 1.5
+        assert_eq!(expected, 5.0 - 4.0 - 3.0 - 1000.0 - 5.0 * 1.5);
         assert_eq!(actual, expected);
     }
 

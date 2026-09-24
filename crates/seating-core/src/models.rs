@@ -205,6 +205,21 @@ pub struct OptimizationConfig {
     /// large by default so the minimum is only violated when no feasible
     /// arrangement exists or a guest is placed manually.
     pub min_people_weight: f64,
+    /// Penalty of this weight × (`max_people` − occupants) for each table
+    /// with at least one occupant; empty tables cost nothing. Breaks the tie
+    /// between seating a group at a table that fits it snugly and at a
+    /// larger one, which proximity and size penalties alone score equally.
+    ///
+    /// Tradeoff: the guest count is fixed, so the total penalty is always
+    /// weight × (combined capacity of the used tables − guests). It never
+    /// changes how guests spread over a given set of open tables, only which
+    /// tables are open — in effect a used-table penalty scaled by each
+    /// table's capacity, favoring fewer and smaller tables.
+    ///
+    /// Non-zero by default so project files saved before this field existed,
+    /// which pick up the default via `#[serde(default)]`, get the tie-breaker
+    /// too.
+    pub empty_seat_weight: f64,
 }
 
 impl Default for OptimizationConfig {
@@ -219,6 +234,7 @@ impl Default for OptimizationConfig {
             optimal_table_size_weight: 1.0,
             time_limit_secs: 10,
             min_people_weight: 1000.0,
+            empty_seat_weight: 1.0,
         }
     }
 }

@@ -1121,8 +1121,9 @@ impl<'a> SearchState<'a> {
 
     /// Exchange the whole occupant sets of two random tables. Seat indices
     /// are kept when they all fit the destination, otherwise re-indexed by
-    /// rank. Score-neutral apart from size/min penalties, this is what
-    /// opens an unused larger table for a group that outgrows its current one.
+    /// rank. Score-neutral apart from size/min/empty-seat penalties, this is
+    /// what opens an unused larger table for a group that outgrows its
+    /// current one, or a snugger one for a group that leaves seats empty.
     fn propose_table_swap(&self, rng: &mut StdRng, moves: &mut Vec<Move>) -> bool {
         let table_count = self.instances.len();
         if table_count < 2 {

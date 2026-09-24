@@ -75,8 +75,13 @@ pub(crate) fn show(app: &mut SeatingApp, ctx: &egui::Context, ui: &mut egui::Ui)
         ui.separator();
         let score_text = match &app.shared.score_breakdown {
             Some(b) => format!(
-                "Score: {:.1}  (proximity {:+.1} · tables {:+.1} · size {:+.1} · min {:+.1})",
-                b.total, b.proximity, -b.used_table_penalty, -b.size_penalty, -b.min_people_penalty
+                "Score: {:.1}  (proximity {:+.1} · tables {:+.1} · size {:+.1} · min {:+.1} · empty {:+.1})",
+                b.total,
+                b.proximity,
+                -b.used_table_penalty,
+                -b.size_penalty,
+                -b.min_people_penalty,
+                -b.empty_seat_penalty
             ),
             None => "Score: —".to_string(),
         };

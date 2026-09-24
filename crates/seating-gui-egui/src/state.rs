@@ -150,6 +150,7 @@ pub(crate) struct SharedState {
     pub(crate) optimal_table_size_weight: String,
     pub(crate) time_limit_secs: String,
     pub(crate) min_people_weight: String,
+    pub(crate) empty_seat_weight: String,
     pub(crate) message: String,
     pub(crate) message_kind: MessageKind,
     pub(crate) project_path: Option<PathBuf>,
@@ -185,6 +186,7 @@ impl SharedState {
             optimal_table_size_weight: defaults.optimal_table_size_weight.to_string(),
             time_limit_secs: defaults.time_limit_secs.to_string(),
             min_people_weight: defaults.min_people_weight.to_string(),
+            empty_seat_weight: defaults.empty_seat_weight.to_string(),
             message: "Create a new project or open a .wseat file.".to_string(),
             message_kind: MessageKind::Info,
             project_path: None,
@@ -400,6 +402,14 @@ impl SharedState {
                 defaults.min_people_weight
             }
         };
+        let empty_seat_weight = match parse_f64_value(&self.empty_seat_weight, "empty_seat_weight")
+        {
+            Ok(value) => value,
+            Err(error) => {
+                errors.push(error);
+                defaults.empty_seat_weight
+            }
+        };
         let time_limit_secs =
             match parse_optional_usize_value(&self.time_limit_secs, "time_limit_secs") {
                 Ok(Some(value)) => value as u64,
@@ -421,6 +431,7 @@ impl SharedState {
                 optimal_table_size_weight,
                 time_limit_secs,
                 min_people_weight,
+                empty_seat_weight,
             })
         } else {
             Err(ValidationReport { errors })
@@ -476,6 +487,7 @@ impl SharedState {
         self.optimal_table_size_weight = project.optimization.optimal_table_size_weight.to_string();
         self.time_limit_secs = project.optimization.time_limit_secs.to_string();
         self.min_people_weight = project.optimization.min_people_weight.to_string();
+        self.empty_seat_weight = project.optimization.empty_seat_weight.to_string();
         self.recompute();
         self.dirty = false;
     }

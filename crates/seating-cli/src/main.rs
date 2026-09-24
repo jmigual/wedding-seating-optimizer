@@ -136,6 +136,9 @@ enum Commands {
         /// Penalty per missing guest on a used table below its min_people.
         #[arg(long, default_value_t = OptimizationConfig::default().min_people_weight)]
         min_people_weight: f64,
+        /// Penalty per empty seat at a used table.
+        #[arg(long, default_value_t = OptimizationConfig::default().empty_seat_weight)]
+        empty_seat_weight: f64,
     },
 
     /// Score a pre-existing seating CSV and print the aggregate score.
@@ -167,6 +170,9 @@ enum Commands {
         /// Penalty per missing guest on a used table below its min_people.
         #[arg(long, default_value_t = OptimizationConfig::default().min_people_weight)]
         min_people_weight: f64,
+        /// Penalty per empty seat at a used table.
+        #[arg(long, default_value_t = OptimizationConfig::default().empty_seat_weight)]
+        empty_seat_weight: f64,
     },
 
     /// Render a seating CSV as an SVG or PNG seating plan.
@@ -254,6 +260,7 @@ fn main() -> Result<()> {
             optimal_table_size_weight,
             time_limit,
             min_people_weight,
+            empty_seat_weight,
         } => {
             let project = load_project_input(
                 project.as_ref(),
@@ -274,6 +281,7 @@ fn main() -> Result<()> {
                     optimal_table_size_weight,
                     time_limit_secs: time_limit,
                     min_people_weight,
+                    empty_seat_weight,
                 },
                 None,
             )?;
@@ -300,6 +308,7 @@ fn main() -> Result<()> {
             used_table_weight,
             optimal_table_size_weight,
             min_people_weight,
+            empty_seat_weight,
         } => {
             let project = load_project_input(
                 project.as_ref(),
@@ -316,6 +325,7 @@ fn main() -> Result<()> {
                     used_table_weight,
                     optimal_table_size_weight,
                     min_people_weight,
+                    empty_seat_weight,
                     ..OptimizationConfig::default()
                 },
             )?;

@@ -1233,6 +1233,12 @@ fn settings_section(shared: &mut SharedState, ui: &mut egui::Ui) {
                 .text_edit_singleline(&mut shared.min_people_weight)
                 .changed();
             ui.end_row();
+
+            ui.label("Empty seat weight");
+            changed |= ui
+                .text_edit_singleline(&mut shared.empty_seat_weight)
+                .changed();
+            ui.end_row();
         });
 
     if ui.button("Reset to defaults").clicked() {
@@ -1246,6 +1252,7 @@ fn settings_section(shared: &mut SharedState, ui: &mut egui::Ui) {
         shared.optimal_table_size_weight = defaults.optimal_table_size_weight.to_string();
         shared.time_limit_secs = defaults.time_limit_secs.to_string();
         shared.min_people_weight = defaults.min_people_weight.to_string();
+        shared.empty_seat_weight = defaults.empty_seat_weight.to_string();
         changed = true;
     }
 
