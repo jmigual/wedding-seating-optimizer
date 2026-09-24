@@ -506,7 +506,12 @@ fn table_instance_generation_uses_configured_counts() {
 
 #[test]
 fn round_table_layout_generation_places_seats_circularly() {
-    let layout = build_layout(&round_project(), &round_assignments()).unwrap();
+    let layout = build_layout(
+        &round_project(),
+        &round_assignments(),
+        &RenderOptions::default(),
+    )
+    .unwrap();
     let table = &layout.tables[0];
     assert_eq!(table.shape, TableShape::Round);
     assert_eq!(table.seats.len(), 4);
@@ -521,7 +526,12 @@ fn round_table_layout_generation_places_seats_circularly() {
 /// expose one surface center that both the seat ring and the surface use.
 #[test]
 fn round_table_surface_center_matches_seat_ring_center() {
-    let layout = build_layout(&round_project(), &round_assignments()).unwrap();
+    let layout = build_layout(
+        &round_project(),
+        &round_assignments(),
+        &RenderOptions::default(),
+    )
+    .unwrap();
     let table = &layout.tables[0];
     let TableSurface::Round { cx, cy, .. } = &table.surface else {
         panic!("expected a round surface for a round table");
@@ -548,7 +558,12 @@ fn round_table_surface_center_matches_seat_ring_center() {
 /// for the seat ring's radius `r`.
 #[test]
 fn min_seat_spacing_matches_the_regular_polygon_chord_length() {
-    let layout = build_layout(&round_project(), &round_assignments()).unwrap();
+    let layout = build_layout(
+        &round_project(),
+        &round_assignments(),
+        &RenderOptions::default(),
+    )
+    .unwrap();
     let table = &layout.tables[0];
     let TableSurface::Round { cx, cy, .. } = &table.surface else {
         panic!("expected a round surface for a round table");
@@ -580,7 +595,12 @@ fn min_seat_spacing_is_none_below_two_seats() {
 
 #[test]
 fn square_table_layout_generation_preserves_perimeter_order() {
-    let layout = build_layout(&square_project(), &square_assignments()).unwrap();
+    let layout = build_layout(
+        &square_project(),
+        &square_assignments(),
+        &RenderOptions::default(),
+    )
+    .unwrap();
     let table = &layout.tables[0];
     assert_eq!(table.shape, TableShape::Square);
     assert_eq!(table.seats.len(), 4);
@@ -633,7 +653,12 @@ fn semicircle_assignments() -> Vec<SeatingAssignment> {
 
 #[test]
 fn semicircle_layout_places_seats_on_the_arc_only() {
-    let layout = build_layout(&semicircle_project(), &semicircle_assignments()).unwrap();
+    let layout = build_layout(
+        &semicircle_project(),
+        &semicircle_assignments(),
+        &RenderOptions::default(),
+    )
+    .unwrap();
     let table = &layout.tables[0];
     assert_eq!(table.shape, TableShape::Semicircle);
     let TableSurface::Semicircle { cy, .. } = &table.surface else {
@@ -704,7 +729,7 @@ fn semicircle_seats_stay_separated_for_twelve_seats() {
         .collect();
 
     let options = RenderOptions::default();
-    let layout = build_layout(&project, &assignments).unwrap();
+    let layout = build_layout(&project, &assignments, &options).unwrap();
     let table = &layout.tables[0];
     assert_eq!(table.seats.len(), 12);
 
@@ -722,7 +747,12 @@ fn semicircle_seats_stay_separated_for_twelve_seats() {
 
 #[test]
 fn svg_rendering_contains_table_labels_types_and_guest_names() {
-    let layout = build_layout(&round_project(), &round_assignments()).unwrap();
+    let layout = build_layout(
+        &round_project(),
+        &round_assignments(),
+        &RenderOptions::default(),
+    )
+    .unwrap();
     let svg = render_svg(&layout, &RenderOptions::default());
     assert!(svg.contains("Table 1 — round_4"));
     assert!(svg.contains("Shape: round"));
@@ -755,7 +785,7 @@ fn layout_and_svg_skip_unused_tables_but_render_all_capacity_seats() {
         },
     ];
 
-    let layout = build_layout(&project, &assignments).unwrap();
+    let layout = build_layout(&project, &assignments, &RenderOptions::default()).unwrap();
     assert_eq!(layout.tables.len(), 1);
     // round_4 has capacity 4, but only the two occupied seats are rendered —
     // empty capacity slots no longer appear in `seats` at all.
@@ -859,7 +889,8 @@ fn editor_layout_shows_one_empty_table_per_type() {
         },
     ];
 
-    let full_layout = build_editor_layout(&project, &assignments, true).unwrap();
+    let full_layout =
+        build_editor_layout(&project, &assignments, true, &RenderOptions::default()).unwrap();
 
     // Both used tables, plus exactly one empty table (the lower-numbered
     // of `b`'s two empty instances, table 3) — never table 4.
@@ -931,7 +962,8 @@ fn editor_layout_always_shows_a_locked_but_unseated_guests_table() {
         person_name: "Alice".to_string(),
     }];
 
-    let layout = build_editor_layout(&project, &assignments, true).unwrap();
+    let layout =
+        build_editor_layout(&project, &assignments, true, &RenderOptions::default()).unwrap();
     let numbers: Vec<usize> = layout
         .tables
         .iter()
@@ -1015,7 +1047,7 @@ fn round_table_layout_spaces_occupied_seats_evenly_by_rank() {
         },
     ];
 
-    let layout = build_layout(&project, &assignments).unwrap();
+    let layout = build_layout(&project, &assignments, &RenderOptions::default()).unwrap();
     let table = &layout.tables[0];
     // Only the 3 occupied seats are rendered — the 3 empty capacity slots
     // (0, 2, 4) no longer appear in `seats` at all.
@@ -1050,7 +1082,8 @@ fn round_table_layout_spaces_occupied_seats_evenly_by_rank() {
 
     // The editor layout also exposes the 3 free seats (0, 2, 4) as
     // `empty_seats`, laid out below the table area.
-    let editor_layout = build_editor_layout(&project, &assignments, false).unwrap();
+    let editor_layout =
+        build_editor_layout(&project, &assignments, false, &RenderOptions::default()).unwrap();
     let editor_table = &editor_layout.tables[0];
     assert_eq!(
         editor_table
@@ -1079,7 +1112,7 @@ fn empty_seats_sit_below_the_table_area() {
     assignments.pop(); // leave seat 3 unassigned
     let options = RenderOptions::default();
 
-    let layout = build_editor_layout(&project, &assignments, false).unwrap();
+    let layout = build_editor_layout(&project, &assignments, false, &options).unwrap();
     let table = &layout.tables[0];
 
     assert_eq!(table.empty_seats.len(), 1);
@@ -1091,7 +1124,7 @@ fn empty_seats_sit_below_the_table_area() {
     assert!(seat_y > table.y + options.table_height);
     assert!(seat_y < table.y + table.height);
 
-    let export_layout = build_layout(&project, &round_assignments()).unwrap();
+    let export_layout = build_layout(&project, &round_assignments(), &options).unwrap();
     assert_eq!(export_layout.tables[0].height, options.table_height);
     assert!(export_layout.tables[0].empty_seats.is_empty());
 }
@@ -1102,7 +1135,7 @@ fn svg_wraps_long_guest_labels_without_ellipsis() {
     let mut assignments = round_assignments();
     assignments[0].person_name = "Alexandria Montgomery-Featherstonehaugh".to_string();
 
-    let layout = build_layout(&project, &assignments).unwrap();
+    let layout = build_layout(&project, &assignments, &RenderOptions::default()).unwrap();
     let svg = render_svg(&layout, &RenderOptions::default());
 
     let title = "<title>Alexandria Montgomery-Featherstonehaugh</title>";
@@ -1145,12 +1178,12 @@ fn svg_wraps_long_guest_labels_without_ellipsis() {
     assert_eq!(joined, expected);
 }
 
+/// 20 seats around the default round-table ring sit ~21px apart
+/// (2 * 67px radius * sin(pi/20)), too tight for a long word even at the
+/// minimum font: the label still keeps whole words (overflowing its box)
+/// rather than splitting one into chunks of a couple of characters.
 #[test]
-fn svg_respects_label_budget_floor_on_tightly_spaced_seats() {
-    // 20 seats evenly spaced around the default round-table ring put
-    // adjacent seats ~19px apart (2 * 61px radius * sin(pi/20)) — well
-    // below the ~71px floor `render_svg` guarantees the label budget, so
-    // the wrap must use the floor instead of the raw (tiny) spacing.
+fn svg_keeps_whole_words_on_a_tightly_spaced_twenty_seat_ring() {
     let table_types = build_table_type_map(vec![(
         "round_20".to_string(),
         TableTypeConfig {
@@ -1196,7 +1229,7 @@ fn svg_respects_label_budget_floor_on_tightly_spaced_seats() {
         table_order: Vec::new(),
     };
 
-    let layout = build_layout(&project, &assignments).unwrap();
+    let layout = build_layout(&project, &assignments, &RenderOptions::default()).unwrap();
     let svg = render_svg(&layout, &RenderOptions::default());
 
     let title = "<title>Alexandria Montgomery-Featherstonehaugh</title>";
@@ -1213,72 +1246,237 @@ fn svg_respects_label_budget_floor_on_tightly_spaced_seats() {
     let content_end = first_tspan.find("</tspan>").unwrap();
     let first_line = &first_tspan[content_start..content_end];
 
-    // On 8041d8a (no budget floor), the raw ~19px spacing would only fit
-    // 2 characters ("Al"); with the floor this whole first word fits.
+    // Splitting by character at the raw ~21px spacing would give "Al".
     assert_eq!(
         first_line, "Alexandria",
-        "expected the floored label budget to fit the whole first word, got {first_line:?} in {guest_text}"
+        "expected the whole first word on the first line, got {first_line:?} in {guest_text}"
     );
 }
 
+/// Numeric value of the first ` name="..."` attribute in `fragment`.
+fn svg_attr(fragment: &str, name: &str) -> f32 {
+    let key = format!(" {name}=\"");
+    let start = fragment.find(&key).unwrap() + key.len();
+    let rest = &fragment[start..];
+    rest[..rest.find('"').unwrap()].parse().unwrap()
+}
+
+/// The `<tspan>` line contents of the guest label right after `name`'s
+/// `<title>`.
+fn guest_label_lines<'a>(svg: &'a str, name: &str) -> Vec<&'a str> {
+    let title = format!("<title>{name}</title>");
+    let after_title = &svg[svg.find(&title).unwrap() + title.len()..];
+    let guest_text = &after_title[after_title.find("<text class=\"guest\"").unwrap()..];
+    let guest_text = &guest_text[..guest_text.find("</text>").unwrap()];
+    guest_text
+        .split("<tspan")
+        .skip(1)
+        .map(|tspan| &tspan[tspan.find('>').unwrap() + 1..tspan.find("</tspan>").unwrap()])
+        .collect()
+}
+
+/// A name breaks only between words: a 17-character word that is wider
+/// than the old label budget stays whole on its own line.
 #[test]
-fn svg_height_grows_to_fit_wrapped_labels_without_clipping() {
+fn svg_never_splits_a_guest_name_inside_a_word() {
     let project = round_project();
     let mut assignments = round_assignments();
-    // Seat index 2 sits at the bottom of the ring, closest to the image
-    // edge — its wrapped label lines are the ones a fixed layout.height
-    // would clip.
+    assignments[0].person_name = "Featherstonehaugh Montgomery".to_string();
+    let options = RenderOptions::default();
+
+    let layout = build_layout(&project, &assignments, &options).unwrap();
+    let svg = render_svg(&layout, &options);
+
+    assert_eq!(
+        guest_label_lines(&svg, "Featherstonehaugh Montgomery"),
+        vec!["Featherstonehaugh", "Montgomery"]
+    );
+}
+
+/// Every guest-label line lies inside its table card (horizontally by the
+/// renderer's 0.55 x font-size width estimate), so the SVG canvas stays
+/// exactly the layout size instead of growing to fit labels that spill past
+/// the bottom of the card.
+#[test]
+fn svg_guest_labels_stay_inside_the_canvas() {
+    let project = round_project();
+    let mut assignments = round_assignments();
+    // Seat index 2 sits at the bottom of the ring, closest to the image edge.
     assignments[2].person_name = "Alexandria Montgomery-Featherstonehaugh".to_string();
+    let options = RenderOptions::default();
 
-    let layout = build_layout(&project, &assignments).unwrap();
-    let svg = render_svg(&layout, &RenderOptions::default());
+    let layout = build_layout(&project, &assignments, &options).unwrap();
+    let svg = render_svg(&layout, &options);
 
-    let height_attr: f32 = svg
-        .split("height=\"")
-        .nth(1)
-        .and_then(|rest| rest.split('"').next())
-        .and_then(|value| value.parse().ok())
-        .unwrap();
-
-    assert!(
-        height_attr > layout.height,
-        "expected the SVG canvas ({height_attr}) to grow past the base layout height \
-         ({}) to fit the wrapped label instead of clipping it",
-        layout.height
-    );
-
-    // The canvas must reach all the way down to the wrapped label's lowest
-    // baseline, not just be taller than layout.height by some margin.
-    let title = "<title>Alexandria Montgomery-Featherstonehaugh</title>";
-    let after_title = &svg[svg.find(title).unwrap() + title.len()..];
-    let guest_text_start = after_title.find("<text class=\"guest\"").unwrap();
-    let guest_text = &after_title[guest_text_start..];
-    let guest_text_end = guest_text.find("</text>").unwrap() + "</text>".len();
-    let guest_text = &guest_text[..guest_text_end];
-
-    let text_y_start = guest_text.find("y=\"").unwrap() + "y=\"".len();
-    let text_y_rest = &guest_text[text_y_start..];
-    let base_y: f32 = text_y_rest[..text_y_rest.find('"').unwrap()]
-        .parse()
-        .unwrap();
-
-    let mut last_baseline = base_y;
-    let mut rest = guest_text;
-    while let Some(open) = rest.find("<tspan") {
-        let after_open = &rest[open..];
-        let dy_start = after_open.find("dy=\"").unwrap() + "dy=\"".len();
-        let dy_rest = &after_open[dy_start..];
-        let dy: f32 = dy_rest[..dy_rest.find('"').unwrap()].parse().unwrap();
-        last_baseline += dy;
-        let close = after_open.find("</tspan>").unwrap();
-        rest = &after_open[close + "</tspan>".len()..];
+    assert_eq!(svg_attr(&svg, "height"), layout.height.round());
+    let table = &layout.tables[0];
+    let mut line_count = 0;
+    for guest_text in svg.split("<text class=\"guest\"").skip(1) {
+        let guest_text = &guest_text[..guest_text.find("</text>").unwrap()];
+        let anchor = guest_text
+            .split("text-anchor=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap();
+        let font_size: f32 = guest_text
+            .split("font-size: ")
+            .nth(1)
+            .and_then(|rest| rest.split("px").next())
+            .unwrap()
+            .parse()
+            .unwrap();
+        for tspan in guest_text.split("<tspan").skip(1) {
+            let (x, y) = (svg_attr(tspan, "x"), svg_attr(tspan, "y"));
+            let text = &tspan[tspan.find('>').unwrap() + 1..tspan.find("</tspan>").unwrap()];
+            let width = text.chars().count() as f32 * 0.55 * font_size;
+            let (left, right) = match anchor {
+                "start" => (x, x + width),
+                "middle" => (x - width / 2.0, x + width / 2.0),
+                "end" => (x - width, x),
+                other => panic!("unexpected text-anchor {other:?}"),
+            };
+            assert!(
+                left >= table.x && right <= table.x + table.width,
+                "line {text:?} spans x={left}..{right}, outside card {table:?}"
+            );
+            assert!(
+                (table.y..=table.y + table.height).contains(&y),
+                "line baseline y={y} outside card {table:?}"
+            );
+            line_count += 1;
+        }
     }
+    // Four guests, and the long name wraps onto more than one line.
+    assert!(line_count > 4);
+}
 
-    assert!(
-        height_attr >= last_baseline,
-        "expected the SVG canvas ({height_attr}) to reach the wrapped label's last \
-         baseline ({last_baseline})"
-    );
+/// Font sizes of every text span whose content is exactly `content`.
+fn usvg_span_font_sizes(group: &resvg::usvg::Group, content: &str, sizes: &mut Vec<f32>) {
+    for node in group.children() {
+        match node {
+            resvg::usvg::Node::Group(child) => usvg_span_font_sizes(child, content, sizes),
+            resvg::usvg::Node::Text(text) => {
+                for chunk in text.chunks() {
+                    if chunk.text() == content {
+                        sizes.extend(chunk.spans().iter().map(|span| span.font_size().get()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The renderer must actually draw guest labels at the fitted label size:
+/// a plain `font-size` attribute loses to the stylesheet's `text` rule.
+#[test]
+fn svg_guest_labels_render_at_the_label_font_size() {
+    let options = RenderOptions::default();
+    let layout = build_layout(&round_project(), &round_assignments(), &options).unwrap();
+    let svg = render_svg(&layout, &options);
+
+    let mut usvg_options = resvg::usvg::Options::default();
+    usvg_options.fontdb_mut().load_system_fonts();
+    let tree = resvg::usvg::Tree::from_str(&svg, &usvg_options).unwrap();
+    let mut sizes = Vec::new();
+    usvg_span_font_sizes(tree.root(), "Alice", &mut sizes);
+
+    assert_eq!(sizes, vec![options.label_font_size]);
+}
+
+/// No two seat markers on a rectangular table overlap — in particular the
+/// end seats of two adjacent sides, which meet at a corner.
+#[test]
+fn rectangular_seat_markers_never_overlap() {
+    for people_per_side in [vec![3, 3, 3, 3], vec![4, 2, 4, 2], vec![2, 2, 2, 2]] {
+        let seat_count: usize = people_per_side.iter().sum();
+        let people: Vec<Person> = (0..seat_count)
+            .map(|i| Person {
+                id: format!("p{i}"),
+                name: format!("Guest {i}"),
+                table_type: Some("rect".to_string()),
+                groups: vec![],
+                locked_table: None,
+                locked_seat: None,
+            })
+            .collect();
+        let assignments: Vec<SeatingAssignment> = (0..seat_count)
+            .map(|seat_index| SeatingAssignment {
+                table_number: 1,
+                table_type: "rect".to_string(),
+                seat_index,
+                person_id: format!("p{seat_index}"),
+                person_name: format!("Guest {seat_index}"),
+            })
+            .collect();
+        let project = ProjectInput {
+            people,
+            closeness_rules: vec![],
+            table_types: build_table_type_map(vec![(
+                "rect".to_string(),
+                TableTypeConfig {
+                    shape: TableShape::Rectangular,
+                    people_per_side: Some(people_per_side.clone()),
+                    max_people: seat_count,
+                    recommended_people: None,
+                    min_people: None,
+                    number_of_tables: Some(1),
+                },
+            )])
+            .unwrap(),
+            table_order: Vec::new(),
+        };
+        let options = RenderOptions::default();
+
+        let layout = build_layout(&project, &assignments, &options).unwrap();
+
+        let spacing = min_seat_spacing(&layout.tables[0].seats).unwrap();
+        assert!(
+            spacing >= 2.0 * options.seat_radius,
+            "{people_per_side:?}: seats {spacing} apart overlap"
+        );
+    }
+}
+
+/// A bigger label font grows the table cards so the text keeps its size,
+/// and seat spacing never tightens as the text grows.
+#[test]
+fn bigger_label_font_grows_cards_without_shrinking_seat_spacing() {
+    let sizes = [
+        MIN_LABEL_FONT_SIZE,
+        RenderOptions::default().label_font_size,
+        14.0,
+    ];
+    for (project, assignments) in [
+        (round_project(), round_assignments()),
+        (semicircle_project(), semicircle_assignments()),
+        (square_project(), square_assignments()),
+    ] {
+        let tables: Vec<LayoutTable> = sizes
+            .iter()
+            .map(|&label_font_size| {
+                let options = RenderOptions {
+                    label_font_size,
+                    ..RenderOptions::default()
+                };
+                build_layout(&project, &assignments, &options)
+                    .unwrap()
+                    .tables[0]
+                    .clone()
+            })
+            .collect();
+        for pair in tables.windows(2) {
+            assert!(pair[1].width >= pair[0].width);
+            assert!(pair[1].height >= pair[0].height);
+            assert!(
+                min_seat_spacing(&pair[1].seats).unwrap()
+                    >= min_seat_spacing(&pair[0].seats).unwrap()
+            );
+        }
+        let (default_table, big_table) = (&tables[1], &tables[2]);
+        assert!(big_table.width > default_table.width);
+        assert!(big_table.height > default_table.height);
+    }
 }
 
 #[test]
@@ -1347,7 +1545,12 @@ fn png_rendering_includes_guest_text_when_fonts_are_loaded() {
 
 #[test]
 fn png_rendering_writes_a_file() {
-    let layout = build_layout(&round_project(), &round_assignments()).unwrap();
+    let layout = build_layout(
+        &round_project(),
+        &round_assignments(),
+        &RenderOptions::default(),
+    )
+    .unwrap();
     let output = std::env::temp_dir().join(format!(
         "wedding-seating-{}.png",
         SystemTime::now()
@@ -2813,7 +3016,7 @@ fn svg_escapes_special_characters_in_names() {
         person_name: "A & B <VIP>".to_string(),
     }];
 
-    let layout = build_layout(&project, &assignments).unwrap();
+    let layout = build_layout(&project, &assignments, &RenderOptions::default()).unwrap();
     let svg = render_svg(&layout, &RenderOptions::default());
     assert!(svg.contains("A &amp; B &lt;VIP&gt;"));
     assert!(svg.contains("round &amp; 4"));
@@ -3729,19 +3932,19 @@ fn apply_seat_append_unknown_person_errors() {
     );
 }
 
-/// [`LayoutTable::empty_seats`] must never let markers overlap: an 11-seat
-/// gap (12-capacity table, 1 guest) at the default `RenderOptions` fits at
-/// most 8 per row (see `empty_seat_row_capacity`), so it wraps into 2 rows —
+/// [`LayoutTable::empty_seats`] must never let markers overlap: a 15-seat
+/// gap (16-capacity table, 1 guest) at the default `RenderOptions` fits at
+/// most 12 per row (see `empty_seat_row_capacity`), so it wraps into 2 rows —
 /// every marker stays at least `2 * seat_radius` from every other, and
 /// inside the (grown) card.
 #[test]
 fn empty_seat_markers_wrap_into_multiple_rows_without_overlapping() {
     let table_types = build_table_type_map(vec![(
-        "round_12".to_string(),
+        "round_16".to_string(),
         TableTypeConfig {
             shape: TableShape::Round,
             people_per_side: None,
-            max_people: 12,
+            max_people: 16,
             recommended_people: None,
             min_people: None,
             number_of_tables: Some(1),
@@ -3763,17 +3966,17 @@ fn empty_seat_markers_wrap_into_multiple_rows_without_overlapping() {
     };
     let assignments = vec![SeatingAssignment {
         table_number: 1,
-        table_type: "round_12".to_string(),
+        table_type: "round_16".to_string(),
         seat_index: 0,
         person_id: "p1".to_string(),
         person_name: "Alice".to_string(),
     }];
 
-    let layout = build_editor_layout(&project, &assignments, false).unwrap();
-    let table = &layout.tables[0];
     let options = RenderOptions::default();
+    let layout = build_editor_layout(&project, &assignments, false, &options).unwrap();
+    let table = &layout.tables[0];
 
-    assert_eq!(table.empty_seats.len(), 11);
+    assert_eq!(table.empty_seats.len(), 15);
     let min_distance = 2.0 * options.seat_radius;
     for i in 0..table.empty_seats.len() {
         for j in (i + 1)..table.empty_seats.len() {
@@ -3839,7 +4042,7 @@ fn semicircle_layout_spaces_occupied_seats_by_rank_angle() {
         })
         .collect();
 
-    let layout = build_layout(&project, &assignments).unwrap();
+    let layout = build_layout(&project, &assignments, &RenderOptions::default()).unwrap();
     let table = &layout.tables[0];
     let TableSurface::Semicircle { cx, cy, .. } = &table.surface else {
         panic!("expected a semicircle surface for a semicircle table");
@@ -4004,7 +4207,7 @@ fn editor_layout_accepts_partial_seating() {
         .filter(|a| a.person_id != "p1")
         .collect();
 
-    let strict_err = build_layout(&project, &assignments).unwrap_err();
+    let strict_err = build_layout(&project, &assignments, &RenderOptions::default()).unwrap_err();
     assert!(
         strict_err
             .errors
@@ -4012,7 +4215,8 @@ fn editor_layout_accepts_partial_seating() {
             .any(|e| matches!(e, ValidationError::MissingOrDuplicatePerson(id) if id == "p1"))
     );
 
-    let layout = build_editor_layout(&project, &assignments, false).unwrap();
+    let layout =
+        build_editor_layout(&project, &assignments, false, &RenderOptions::default()).unwrap();
     assert!(
         !layout
             .tables

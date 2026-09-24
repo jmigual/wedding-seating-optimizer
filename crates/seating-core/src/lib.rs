@@ -71,9 +71,10 @@ pub use models::{
 pub use optimizer::{HeuristicOptimizer, SeatingOptimizer};
 pub use render::{
     COLOR_BACKGROUND, COLOR_CARD, COLOR_GUEST_TEXT, COLOR_MUTED, COLOR_SEAT_FILL,
-    COLOR_SEAT_STROKE, COLOR_STROKE, COLOR_TABLE_FILL, COLOR_TABLE_STROKE, LayoutSeat, LayoutTable,
-    RenderOptions, RenderingError, SeatingLayout, TableSurface, build_editor_layout, build_layout,
-    min_seat_spacing, render_png, render_svg,
+    COLOR_SEAT_STROKE, COLOR_STROKE, COLOR_TABLE_FILL, COLOR_TABLE_STROKE, LabelAlign, LayoutSeat,
+    LayoutTable, MIN_LABEL_FONT_SIZE, RenderOptions, RenderingError, SeatLabel, SeatingLayout,
+    TableSurface, build_editor_layout, build_layout, min_seat_spacing, render_png, render_svg,
+    seat_label,
 };
 pub use scoring::{
     ScoreBreakdown, circular_distance, default_proximity_weight, effective_person_pair_score,

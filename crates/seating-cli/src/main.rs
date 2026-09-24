@@ -328,8 +328,8 @@ fn main() -> Result<()> {
         } => {
             let project = load_render_project(project.as_ref(), people.as_ref(), tables.as_ref())?;
             let assignments = parse_seating_csv(&read_file(&seating, "seating")?)?;
-            let layout = build_layout(&project, &assignments)?;
             let options = RenderOptions::default();
+            let layout = build_layout(&project, &assignments, &options)?;
             match output
                 .extension()
                 .and_then(|extension| extension.to_str())

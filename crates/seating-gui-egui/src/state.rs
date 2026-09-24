@@ -7,14 +7,14 @@
 //! panel modules never need to reach into `app.rs`.
 
 use seating_core::{
-    ClosenessRule, OptimizationConfig, Person, ProjectFile, ProjectInput, ScoreBreakdown,
-    SeatingAssignment, SeatingLayout, TableShape, TableTypeConfig, TableTypeId, ValidationError,
-    ValidationReport, build_editor_layout, build_table_type_map, ensure_spare_tables,
-    generate_table_instances, merge_closeness_rules, merge_people, merge_table_types,
-    parse_closeness_csv, parse_f64_value, parse_optional_usize_value, parse_people_csv,
-    parse_people_per_side, parse_project_file, parse_required_usize_value, parse_tables_csv,
-    score_solution_breakdown, validate_partial_seating_solution, validate_project,
-    write_closeness_csv, write_people_csv, write_project_file, write_tables_csv,
+    ClosenessRule, OptimizationConfig, Person, ProjectFile, ProjectInput, RenderOptions,
+    ScoreBreakdown, SeatingAssignment, SeatingLayout, TableShape, TableTypeConfig, TableTypeId,
+    ValidationError, ValidationReport, build_editor_layout, build_table_type_map,
+    ensure_spare_tables, generate_table_instances, merge_closeness_rules, merge_people,
+    merge_table_types, parse_closeness_csv, parse_f64_value, parse_optional_usize_value,
+    parse_people_csv, parse_people_per_side, parse_project_file, parse_required_usize_value,
+    parse_tables_csv, score_solution_breakdown, validate_partial_seating_solution,
+    validate_project, write_closeness_csv, write_people_csv, write_project_file, write_tables_csv,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -510,7 +510,12 @@ impl SharedState {
             return;
         }
 
-        match build_editor_layout(&project, &self.assignments, self.show_empty_tables) {
+        match build_editor_layout(
+            &project,
+            &self.assignments,
+            self.show_empty_tables,
+            &RenderOptions::default(),
+        ) {
             Ok(layout) => self.layout = Some(layout),
             Err(error) => self.set_message(
                 MessageKind::Error,

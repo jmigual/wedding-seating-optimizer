@@ -1432,7 +1432,7 @@ fn rule_endpoint_label<'a>(id: &'a str, shared: &'a SharedState) -> &'a str {
 /// tables that actually seat someone.
 fn export_layout(shared: &SharedState) -> Option<SeatingLayout> {
     let project = shared.materialize_project().ok()?;
-    build_layout(&project, &shared.assignments).ok()
+    build_layout(&project, &shared.assignments, &RenderOptions::default()).ok()
 }
 
 fn export_svg(shared: &mut SharedState) {
@@ -1529,7 +1529,8 @@ mod tests {
             person_id: "p1".to_string(),
             person_name: "Alice".to_string(),
         }];
-        let layout = build_editor_layout(&project, &assignments, false).unwrap();
+        let layout =
+            build_editor_layout(&project, &assignments, false, &RenderOptions::default()).unwrap();
         let table = &layout.tables[0];
         assert_eq!(table.empty_seats.len(), 3);
 
@@ -1557,7 +1558,8 @@ mod tests {
             person_id: "p1".to_string(),
             person_name: "Alice".to_string(),
         }];
-        let mut layout = build_editor_layout(&project, &assignments, false).unwrap();
+        let mut layout =
+            build_editor_layout(&project, &assignments, false, &RenderOptions::default()).unwrap();
         let occupied = layout.tables[0].seats[0].clone();
         // Force the tie: move the first empty marker onto the occupied
         // seat's exact position.

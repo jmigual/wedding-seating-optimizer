@@ -10,11 +10,36 @@ use crate::validation::{
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+mod labels;
+
+pub use labels::{LabelAlign, MIN_LABEL_FONT_SIZE, SeatLabel, seat_label};
+
 /// Height of one row of [`LayoutTable::empty_seats`] markers, added below
 /// the table area for each row needed in [`build_editor_layout`] (a table
 /// with many free seats wraps into several). The strict [`build_layout`]
 /// never adds this since it never populates `empty_seats`.
 const EMPTY_SEAT_ROW_HEIGHT: f32 = 40.0;
+
+/// Default [`RenderOptions::label_font_size`]. Below it the seat area keeps
+/// this size; above it the seat area grows proportionally (see
+/// [`seat_area_size`]).
+const DEFAULT_LABEL_FONT_SIZE: f32 = 9.0;
+
+/// Seat-area size (the box every seat marker sits in) at or below
+/// [`DEFAULT_LABEL_FONT_SIZE`]. Wide enough for a 12-seat semicircle of
+/// radius > 100 and tall enough for a round ring of radius 67, whose 9-seat
+/// chord fits a 9-character word at the default label size.
+const SEAT_AREA_WIDTH: f32 = 231.0;
+const SEAT_AREA_HEIGHT: f32 = 160.0;
+
+/// Room reserved for guest labels on the left and right of the seat area,
+/// in multiples of `label_font_size`: a 9-character word beside a
+/// rectangular table's side seats, plus the seat gap and card inset.
+const LABEL_ROOM_X: f32 = 6.0;
+/// Room reserved for guest labels above and below the seat area, in
+/// multiples of `label_font_size`: three wrapped lines plus the seat gap and
+/// card inset.
+const LABEL_ROOM_Y: f32 = 4.5;
 
 /// Geometry and spacing options for layout/rendering.
 #[derive(Debug, Clone, PartialEq)]
@@ -25,30 +50,42 @@ pub struct RenderOptions {
     pub column_gap: f32,
     /// Vertical gap between tables.
     pub row_gap: f32,
-    /// Width of each table card.
+    /// Minimum width of each table card. Cards grow past it to fit the seat
+    /// area plus the guest-label room `label_font_size` needs.
     pub table_width: f32,
-    /// Height of each table card.
+    /// Minimum height of each table card's table area (before any editor
+    /// free-seat rows). Grows the same way as `table_width`.
     pub table_height: f32,
     /// Radius of each rendered seat marker.
     pub seat_radius: f32,
-    /// Base font size for labels.
+    /// Base font size for table titles and seat indices.
     pub font_size: f32,
+    /// Requested font size for guest-name labels. [`seat_label`] shrinks it
+    /// per label, down to [`MIN_LABEL_FONT_SIZE`], only when a name does not
+    /// fit its box; table cards grow with it.
+    pub label_font_size: f32,
     /// PNG rasterization scale factor (1.0 = CSS pixel size).
     pub png_scale: f32,
 }
 
 impl Default for RenderOptions {
     fn default() -> Self {
-        Self {
+        let mut options = Self {
             margin: 24.0,
             column_gap: 36.0,
             row_gap: 36.0,
-            table_width: 240.0,
-            table_height: 220.0,
+            // Replaced below by the derived card size.
+            table_width: 0.0,
+            table_height: 0.0,
             seat_radius: 13.0,
             font_size: 14.0,
+            label_font_size: DEFAULT_LABEL_FONT_SIZE,
             png_scale: 2.0,
-        }
+        };
+        // The minimum card is exactly what `card_size` derives at the default
+        // sizes, so the two can never drift apart.
+        (options.table_width, options.table_height) = card_size(&options);
+        options
     }
 }
 
@@ -172,12 +209,15 @@ pub enum RenderingError {
 ///
 /// Every person must be seated exactly once (see [`validate_seating_solution`]);
 /// use [`build_editor_layout`] for a GUI editor where guests may still be
-/// unassigned. Tables with no occupants are omitted.
+/// unassigned. Tables with no occupants are omitted. Card and seat geometry
+/// follow `options` (notably `label_font_size`), so render the result with
+/// the same options.
 pub fn build_layout(
     project: &ProjectInput,
     assignments: &[SeatingAssignment],
+    options: &RenderOptions,
 ) -> Result<SeatingLayout, ValidationReport> {
-    build_layout_impl(project, assignments, false, true)
+    build_layout_impl(project, assignments, options, false, true)
 }
 
 /// Build a reusable layout like [`build_layout`], but tolerating a *partial*
@@ -199,13 +239,15 @@ pub fn build_editor_layout(
     project: &ProjectInput,
     assignments: &[SeatingAssignment],
     include_empty_tables: bool,
+    options: &RenderOptions,
 ) -> Result<SeatingLayout, ValidationReport> {
-    build_layout_impl(project, assignments, include_empty_tables, false)
+    build_layout_impl(project, assignments, options, include_empty_tables, false)
 }
 
 fn build_layout_impl(
     project: &ProjectInput,
     assignments: &[SeatingAssignment],
+    options: &RenderOptions,
     include_empty_tables: bool,
     require_all_people: bool,
 ) -> Result<SeatingLayout, ValidationReport> {
@@ -215,7 +257,7 @@ fn build_layout_impl(
         validate_partial_seating_solution(project, assignments)?;
     }
 
-    let options = RenderOptions::default();
+    let (table_width, table_height) = card_size(options);
     let instances = generate_table_instances(project);
     let mut assignments_by_table: HashMap<usize, Vec<&SeatingAssignment>> = HashMap::new();
     for assignment in assignments {
@@ -270,7 +312,7 @@ fn build_layout_impl(
     // height, sized to whichever table needs the most empty-seat rows (at
     // least one, even for a fully-occupied table) so free-seat markers never
     // overlap regardless of how many seats are free.
-    let max_per_row = empty_seat_row_capacity(&options);
+    let max_per_row = empty_seat_row_capacity(options);
     let empty_seats_by_table: Vec<Vec<usize>> = if require_all_people {
         Vec::new()
     } else {
@@ -293,16 +335,16 @@ fn build_layout_impl(
         .max()
         .unwrap_or(0);
     let card_height = if require_all_people {
-        options.table_height
+        table_height
     } else {
-        options.table_height + extra_rows as f32 * EMPTY_SEAT_ROW_HEIGHT
+        table_height + extra_rows as f32 * EMPTY_SEAT_ROW_HEIGHT
     };
     let mut tables = Vec::new();
 
     for (index, table) in used_instances.iter().enumerate() {
         let column = index % columns;
         let row = index / columns;
-        let x = options.margin + column as f32 * (options.table_width + options.column_gap);
+        let x = options.margin + column as f32 * (table_width + options.column_gap);
         let y = options.margin + row as f32 * (card_height + options.row_gap);
         let config = &project.table_types[&table.table_type];
         let table_assignments = assignments_by_table
@@ -315,21 +357,21 @@ fn build_layout_impl(
             table.max_people,
             x,
             y,
-            &options,
+            options,
             table_assignments,
         );
         let empty_seats = empty_seats_by_table
             .get(index)
-            .map(|free_seats| build_empty_seat_row(free_seats, x, y, &options, max_per_row))
+            .map(|free_seats| build_empty_seat_row(free_seats, x, y, options, max_per_row))
             .unwrap_or_default();
-        let surface = build_surface(&table.shape, x, y, &options);
+        let surface = build_surface(&table.shape, x, y, options);
         tables.push(LayoutTable {
             table_number: table.number,
             table_type: table.table_type.clone(),
             shape: table.shape.clone(),
             x,
             y,
-            width: options.table_width,
+            width: table_width,
             height: card_height,
             seats,
             empty_seats,
@@ -346,7 +388,7 @@ fn build_layout_impl(
         options.margin * 2.0
     } else {
         options.margin * 2.0
-            + columns as f32 * options.table_width
+            + columns as f32 * table_width
             + columns.saturating_sub(1) as f32 * options.column_gap
     };
     let height = if rows == 0 {
@@ -366,35 +408,24 @@ fn build_layout_impl(
 
 /// Render a layout as standalone SVG markup.
 ///
-/// The document's height grows past `layout.height` when a wrapped guest
-/// label's lowest line would otherwise be clipped by the image bottom (e.g.
-/// a long name at a seat in the last row); the header/footer geometry is
-/// unaffected, only the canvas the image is drawn on.
+/// Guest labels are wrapped and fitted by [`seat_label`] (widths estimated
+/// at `0.55 * font_size` per character), so they stay inside their card;
+/// pass the same `options` the layout was built with.
 pub fn render_svg(layout: &SeatingLayout, options: &RenderOptions) -> String {
     let mut body = String::new();
-    let mut max_label_bottom: f32 = 0.0;
     body.push_str(&format!(
         "<rect width=\"100%\" height=\"100%\" fill=\"{}\"/>",
         hex(COLOR_BACKGROUND)
     ));
     body.push_str(&format!(
-        "<style>text {{ fill: {}; font-family: Arial, Helvetica, sans-serif; font-size: {}px; }} .muted {{ fill: {}; }} .seat-index {{ fill: {}; font-size: {}px; font-weight: bold; }} .guest {{ fill: {}; font-size: {}px; }}</style>",
+        "<style>text {{ fill: {}; font-family: Arial, Helvetica, sans-serif; font-size: {}px; }} .muted {{ fill: {}; }} .seat-index {{ fill: {}; font-size: {}px; font-weight: bold; }} .guest {{ fill: {}; }}</style>",
         hex(COLOR_SEAT_FILL),
         options.font_size,
         hex(COLOR_MUTED),
         hex(COLOR_BACKGROUND),
         options.font_size - 3.0,
-        hex(COLOR_GUEST_TEXT),
-        options.font_size - 1.0
+        hex(COLOR_GUEST_TEXT)
     ));
-
-    let label_font_size = options.font_size - 1.0;
-    let label_char_width = (label_font_size * 0.55).max(1.0);
-    // Words still wrap on word boundaries in the common case; without this
-    // floor, a tight seat spacing (e.g. rectangular-table corners) could
-    // shrink the budget to a couple of characters per line.
-    let min_label_budget = 10.0 * label_char_width;
-    let label_line_height = label_font_size * 1.2;
 
     for table in &layout.tables {
         let label_x = table.x + table.width / 2.0;
@@ -446,16 +477,12 @@ pub fn render_svg(layout: &SeatingLayout, options: &RenderOptions) -> String {
             )),
         }
 
-        let label_budget = min_seat_spacing(&table.seats)
-            .unwrap_or(table.width - 40.0)
-            .max(min_label_budget);
-
         for seat in &table.seats {
             body.push_str("<g>");
             if let Some(name) = seat.person_name.as_deref() {
                 body.push_str(&format!("<title>{}</title>", escape_xml(name)));
             }
-            if let Some(person_name) = seat.person_name.as_deref() {
+            if seat.person_name.is_some() {
                 body.push_str(&format!(
                     "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1.5\"/>",
                     seat.x, seat.y, options.seat_radius, hex(COLOR_SEAT_FILL), hex(COLOR_SEAT_STROKE)
@@ -466,30 +493,33 @@ pub fn render_svg(layout: &SeatingLayout, options: &RenderOptions) -> String {
                     seat.y + 0.5,
                     seat.seat_index
                 ));
-                let lines = wrap_label(person_name, label_budget, label_font_size);
-                let label_y = seat.y + options.seat_radius + 16.0;
-                body.push_str(&format!(
-                    "<text class=\"guest\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">",
-                    seat.x, label_y
-                ));
-                for (line_index, line) in lines.iter().enumerate() {
-                    let dy = if line_index == 0 {
-                        0.0
-                    } else {
-                        label_line_height
+                if let Some(label) = seat_label(table, seat, options, |text, font_size| {
+                    text.chars().count() as f32 * 0.55 * font_size
+                }) {
+                    let anchor = match label.align {
+                        LabelAlign::Start => "start",
+                        LabelAlign::Center => "middle",
+                        LabelAlign::End => "end",
                     };
+                    // Inline `style`, not a `font-size` attribute: the
+                    // stylesheet's `text` rule would override an attribute.
                     body.push_str(&format!(
-                        "<tspan x=\"{:.1}\" dy=\"{:.1}\">{}</tspan>",
-                        seat.x,
-                        dy,
-                        escape_xml(line)
+                        "<text class=\"guest\" text-anchor=\"{anchor}\" style=\"font-size: {:.2}px\">",
+                        label.font_size
                     ));
+                    for (line_index, line) in label.lines.iter().enumerate() {
+                        // Baseline of a line whose box starts at `top`.
+                        let baseline =
+                            label.top + line_index as f32 * label.line_height + label.font_size;
+                        body.push_str(&format!(
+                            "<tspan x=\"{:.1}\" y=\"{:.1}\">{}</tspan>",
+                            label.x,
+                            baseline,
+                            escape_xml(line)
+                        ));
+                    }
+                    body.push_str("</text>");
                 }
-                body.push_str("</text>");
-                let label_bottom = label_y
-                    + (lines.len().saturating_sub(1)) as f32 * label_line_height
-                    + label_font_size;
-                max_label_bottom = max_label_bottom.max(label_bottom);
             } else {
                 // Unoccupied capacity slot: hollow, dimmed marker.
                 body.push_str(&format!(
@@ -509,14 +539,10 @@ pub fn render_svg(layout: &SeatingLayout, options: &RenderOptions) -> String {
         body.push_str("</g>");
     }
 
-    // Grow the canvas past `layout.height` when a wrapped label's lowest
-    // line would otherwise be clipped by the image bottom.
-    let height = layout.height.max(max_label_bottom + 8.0);
-
     let mut svg = String::new();
     svg.push_str(&format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{:.0}" height="{:.0}" viewBox="0 0 {:.0} {:.0}">"#,
-        layout.width, height, layout.width, height
+        layout.width, layout.height, layout.width, layout.height
     ));
     svg.push_str(&body);
     svg.push_str("</svg>");
@@ -583,42 +609,95 @@ fn header_bottom(y: f32, options: &RenderOptions) -> f32 {
     header_positions(y, options).1 + 8.0
 }
 
-/// Center and ring radius for a round table's seats, sized from the card
-/// dimensions and `seat_radius` so the ring fits inside the card and the
-/// topmost seat clears the header rows.
+/// An axis-aligned box in layout units.
+#[derive(Debug, Clone, Copy)]
+struct Bounds {
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+}
+
+/// Seat-area width and height: [`SEAT_AREA_WIDTH`]x[`SEAT_AREA_HEIGHT`] up
+/// to the default label font size, growing proportionally above it so seat
+/// spacing (and the label width it bounds) keeps up with bigger text.
+fn seat_area_size(options: &RenderOptions) -> (f32, f32) {
+    let grow = (options.label_font_size / DEFAULT_LABEL_FONT_SIZE).max(1.0);
+    (SEAT_AREA_WIDTH * grow, SEAT_AREA_HEIGHT * grow)
+}
+
+/// Card width and table-area height (the card before any editor free-seat
+/// rows): the seat area plus [`LABEL_ROOM_X`]/[`LABEL_ROOM_Y`] of label room
+/// on each side plus the header, never below `table_width`/`table_height`.
+fn card_size(options: &RenderOptions) -> (f32, f32) {
+    let (seat_width, seat_height) = seat_area_size(options);
+    let room_x = LABEL_ROOM_X * options.label_font_size;
+    let room_y = LABEL_ROOM_Y * options.label_font_size;
+    let width = seat_width + 2.0 * room_x;
+    let height = header_bottom(0.0, options) + seat_height + 2.0 * room_y;
+    (
+        width.max(options.table_width),
+        height.max(options.table_height),
+    )
+}
+
+/// The box every seat marker (center ± `seat_radius`) of the card at
+/// `(x, y)` sits in: centered horizontally in the card and vertically
+/// between the header and the table-area bottom, leaving label room around it.
+fn seat_area(x: f32, y: f32, options: &RenderOptions) -> Bounds {
+    let (card_width, card_height) = card_size(options);
+    let (width, height) = seat_area_size(options);
+    let header = header_bottom(y, options);
+    let left = x + (card_width - width) / 2.0;
+    let top = header + (y + card_height - header - height) / 2.0;
+    Bounds {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+    }
+}
+
+/// Center and ring radius for a round table's seats: the largest ring
+/// whose markers fit inside the [`seat_area`], centered in it.
 fn round_table_metrics(x: f32, y: f32, options: &RenderOptions) -> (f32, f32, f32) {
-    let top = header_bottom(y, options);
-    let bottom = y + options.table_height - options.font_size - 6.0;
-    let center_x = x + options.table_width / 2.0;
-    let center_y = (top + bottom) / 2.0;
-    let vertical_radius = ((bottom - top) / 2.0 - options.seat_radius).max(20.0);
-    let horizontal_radius = (options.table_width / 2.0 - options.seat_radius - 20.0).max(20.0);
-    let radius = vertical_radius.min(horizontal_radius);
+    let area = seat_area(x, y, options);
+    let center_x = (area.left + area.right) / 2.0;
+    let center_y = (area.top + area.bottom) / 2.0;
+    let radius = ((area.bottom - area.top).min(area.right - area.left) / 2.0 - options.seat_radius)
+        .max(20.0);
     (center_x, center_y, radius)
 }
 
 /// Center and ring radius for a semicircle table's seats, sized to use the
-/// card's full available height instead of half of it.
+/// seat area's full height instead of half of it.
 ///
-/// [`round_table_metrics`] centers its ring in the card so a full circle
-/// fits, giving a semicircle (which only draws its upper arc) roughly half
-/// the usable height. Centering the flat edge near the card's bottom
-/// instead lets the arc span almost the full height below the header,
-/// roughly doubling how many seats fit before adjacent markers overlap.
+/// [`round_table_metrics`] centers its ring so a full circle fits, giving a
+/// semicircle (which only draws its upper arc) roughly half the usable
+/// height. Putting the flat edge at the seat area's bottom instead lets the
+/// arc span its full height, roughly doubling how many seats fit before
+/// adjacent markers overlap.
 fn semicircle_table_metrics(x: f32, y: f32, options: &RenderOptions) -> (f32, f32, f32) {
-    let top = header_bottom(y, options);
-    let bottom = y + options.table_height - options.font_size - 6.0;
-    let center_x = x + options.table_width / 2.0;
-    let center_y = bottom;
-    let vertical_radius = (bottom - top - options.seat_radius - 20.0).max(20.0);
-    // No extra aesthetic buffer here (unlike `round_table_metrics`'s
-    // `- 20.0`): the arc needs every available pixel of width to seat a
-    // realistic 10-12 person table without overlapping markers, and the
-    // `- seat_radius` term alone already keeps seats from spilling past the
-    // card edge.
-    let horizontal_radius = (options.table_width / 2.0 - options.seat_radius).max(20.0);
-    let radius = vertical_radius.min(horizontal_radius);
+    let area = seat_area(x, y, options);
+    let center_x = (area.left + area.right) / 2.0;
+    let center_y = area.bottom - options.seat_radius;
+    let vertical_radius = area.bottom - area.top - 2.0 * options.seat_radius;
+    let horizontal_radius = (area.right - area.left) / 2.0 - options.seat_radius;
+    let radius = vertical_radius.min(horizontal_radius).max(20.0);
     (center_x, center_y, radius)
+}
+
+/// Seat-center lines of a rectangular/square table (left, top, right,
+/// bottom): the [`seat_area`] inset by `seat_radius`, so every marker stays
+/// inside it.
+fn rectangular_seat_lines(x: f32, y: f32, options: &RenderOptions) -> Bounds {
+    let area = seat_area(x, y, options);
+    Bounds {
+        left: area.left + options.seat_radius,
+        top: area.top + options.seat_radius,
+        right: area.right - options.seat_radius,
+        bottom: area.bottom - options.seat_radius,
+    }
 }
 
 /// Table-surface geometry for `shape`, using the same center/insets as the
@@ -637,16 +716,17 @@ fn build_surface(shape: &TableShape, x: f32, y: f32, options: &RenderOptions) ->
                 radius: surface_radius,
             }
         }
-        // Rectangular/square insets are fixed proportions of the default
-        // 240x220 card rather than derived from RenderOptions; a
-        // table_width/table_height far below the defaults can crowd seats
-        // against the card edge.
-        TableShape::Rectangular | TableShape::Square => TableSurface::Rect {
-            x: x + 60.0,
-            y: y + 72.0,
-            width: options.table_width - 120.0,
-            height: options.table_height - 110.0,
-        },
+        // The surface sits just inside the seat lines, so seats straddle
+        // its edges.
+        TableShape::Rectangular | TableShape::Square => {
+            let lines = rectangular_seat_lines(x, y, options);
+            TableSurface::Rect {
+                x: lines.left + 8.0,
+                y: lines.top + 4.0,
+                width: lines.right - lines.left - 16.0,
+                height: lines.bottom - lines.top - 8.0,
+            }
+        }
         TableShape::Semicircle => {
             let (center_x, center_y, ring_radius) = semicircle_table_metrics(x, y, options);
             let surface_radius = (ring_radius - options.seat_radius - 6.0).max(20.0);
@@ -755,12 +835,12 @@ fn build_rectangular_seats(
     options: &RenderOptions,
 ) -> Vec<LayoutSeat> {
     let mut points = Vec::new();
-    // Fixed proportions of the default 240x220 card; see the render_svg
-    // surface-rect comment for the same caveat.
-    let left = x + 52.0;
-    let right = x + options.table_width - 52.0;
-    let top = y + 68.0;
-    let bottom = y + options.table_height - 58.0;
+    let Bounds {
+        left,
+        top,
+        right,
+        bottom,
+    } = rectangular_seat_lines(x, y, options);
     let base_counts =
         if people_per_side.len() == 4 && people_per_side.iter().sum::<usize>() == max_people {
             people_per_side.to_vec()
@@ -768,19 +848,29 @@ fn build_rectangular_seats(
             spread_evenly(max_people)
         };
     let counts = apportion(&base_counts, table_assignments.len());
+    // Each side's end seats stop this far short of the corner, so the end
+    // seats of two adjacent sides sit `corner * sqrt(2)` (> 2 * seat_radius)
+    // apart and their markers never overlap.
+    let corner = options.seat_radius * 1.5;
 
-    points.extend(line_points(counts[0], left + 14.0, right - 14.0, top, top));
+    points.extend(line_points(
+        counts[0],
+        left + corner,
+        right - corner,
+        top,
+        top,
+    ));
     points.extend(line_points(
         counts[1],
         right,
         right,
-        top + 14.0,
-        bottom - 14.0,
+        top + corner,
+        bottom - corner,
     ));
     points.extend(line_points(
         counts[2],
-        right - 14.0,
-        left + 14.0,
+        right - corner,
+        left + corner,
         bottom,
         bottom,
     ));
@@ -788,8 +878,8 @@ fn build_rectangular_seats(
         counts[3],
         left,
         left,
-        bottom - 14.0,
-        top + 14.0,
+        bottom - corner,
+        top + corner,
     ));
 
     points
@@ -840,7 +930,7 @@ fn apportion(weights: &[usize], total: usize) -> Vec<usize> {
 /// (the diameter, i.e. touching) apart, given the row's usable width (the
 /// same left/right inset [`build_empty_seat_row`] places markers within).
 fn empty_seat_row_capacity(options: &RenderOptions) -> usize {
-    let usable_width = (options.table_width - 48.0).max(0.0);
+    let usable_width = (card_size(options).0 - 48.0).max(0.0);
     let diameter = (options.seat_radius * 2.0).max(1.0);
     ((usable_width / diameter).floor() as usize + 1).max(1)
 }
@@ -857,13 +947,14 @@ fn build_empty_seat_row(
     options: &RenderOptions,
     max_per_row: usize,
 ) -> Vec<LayoutSeat> {
+    let (table_width, table_height) = card_size(options);
     let left = x + 24.0;
-    let right = x + options.table_width - 24.0;
+    let right = x + table_width - 24.0;
     free_seat_indices
         .chunks(max_per_row.max(1))
         .enumerate()
         .flat_map(|(row_index, chunk)| {
-            let row_y = y + options.table_height + EMPTY_SEAT_ROW_HEIGHT * (row_index as f32 + 0.5);
+            let row_y = y + table_height + EMPTY_SEAT_ROW_HEIGHT * (row_index as f32 + 0.5);
             line_points(chunk.len(), left, right, row_y, row_y)
                 .into_iter()
                 .zip(chunk.iter())
@@ -909,9 +1000,8 @@ fn spread_evenly(seat_count: usize) -> Vec<usize> {
         .collect()
 }
 
-/// Smallest center-to-center distance between any two seats at a table,
-/// used as a guest-label width budget so labels don't overlap their
-/// neighbors. `None` when there are fewer than two seats to compare.
+/// Smallest center-to-center distance between any two seats at a table.
+/// `None` when there are fewer than two seats to compare.
 pub fn min_seat_spacing(seats: &[LayoutSeat]) -> Option<f32> {
     let mut min_dist = f32::INFINITY;
     for i in 0..seats.len() {
@@ -922,48 +1012,6 @@ pub fn min_seat_spacing(seats: &[LayoutSeat]) -> Option<f32> {
         }
     }
     min_dist.is_finite().then_some(min_dist)
-}
-
-/// Greedily word-wraps `name` into lines that each fit within `budget_px`,
-/// approximating Arial glyph width as `0.55 * font_size` per character.
-/// Words longer than one line are split across lines by character. Never
-/// truncates or adds an ellipsis; the full name is always recoverable by
-/// rejoining the returned lines, and is also preserved separately in a
-/// `<title>` element for hover text.
-fn wrap_label(name: &str, budget_px: f32, font_size: f32) -> Vec<String> {
-    let char_width = (font_size * 0.55).max(1.0);
-    let max_chars = (budget_px / char_width).floor().max(1.0) as usize;
-
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in name.split_whitespace() {
-        for chunk in split_into_chunks(word, max_chars) {
-            if current.is_empty() {
-                current = chunk;
-            } else if current.chars().count() + 1 + chunk.chars().count() <= max_chars {
-                current.push(' ');
-                current.push_str(&chunk);
-            } else {
-                lines.push(std::mem::take(&mut current));
-                current = chunk;
-            }
-        }
-    }
-    lines.push(current);
-    lines
-}
-
-/// Splits `word` into chunks of at most `max_chars` characters, so a single
-/// word longer than the label budget still wraps instead of overflowing.
-fn split_into_chunks(word: &str, max_chars: usize) -> Vec<String> {
-    let chars: Vec<char> = word.chars().collect();
-    if chars.len() <= max_chars {
-        return vec![word.to_string()];
-    }
-    chars
-        .chunks(max_chars)
-        .map(|chunk| chunk.iter().collect())
-        .collect()
 }
 
 fn escape_xml(text: &str) -> String {
@@ -985,7 +1033,7 @@ fn shape_label(shape: &TableShape) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{RenderOptions, SeatingAssignment, apportion, build_rectangular_seats, wrap_label};
+    use super::{RenderOptions, SeatingAssignment, apportion, build_rectangular_seats};
 
     /// `apportion` is the largest-remainder method: each side gets its exact
     /// proportional share (5|5|0|0 scaled to 6 total is exactly 3|3|0|0 with
@@ -1043,62 +1091,5 @@ mod tests {
         // mid-height as the right side (both single midpoints).
         assert!(seats[4].x < seats[0].x);
         assert_eq!(seats[4].y, seats[2].y);
-    }
-
-    /// Every line `wrap_label` returns must fit the same width estimate the
-    /// budget was computed with, and rejoining the lines (ignoring the
-    /// whitespace introduced/removed at wrap points) must reproduce the
-    /// original name — i.e. no characters are dropped or replaced with an
-    /// ellipsis.
-    #[test]
-    fn wrap_label_fits_budget_and_preserves_all_characters() {
-        let name = "Alexandria Montgomery-Featherstonehaugh";
-        let font_size: f32 = 13.0;
-        let budget_px: f32 = 90.0;
-        let char_width = (font_size * 0.55).max(1.0);
-        let max_chars = (budget_px / char_width).floor().max(1.0) as usize;
-
-        let lines = wrap_label(name, budget_px, font_size);
-        assert!(lines.len() >= 2);
-        for line in &lines {
-            assert!(
-                line.chars().count() <= max_chars,
-                "line {line:?} exceeds max_chars {max_chars}"
-            );
-        }
-
-        let rejoined: String = lines
-            .concat()
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect();
-        let original: String = name.chars().filter(|c| !c.is_whitespace()).collect();
-        assert_eq!(rejoined, original);
-    }
-
-    /// A budget that fits any single word but not two adjacent ones wraps
-    /// one word per line.
-    #[test]
-    fn wrap_label_breaks_on_word_boundaries() {
-        let lines = wrap_label("Ana Maria Lopez", 45.0, 13.0);
-        assert_eq!(lines, vec!["Ana", "Maria", "Lopez"]);
-    }
-
-    /// Multi-byte (accented) characters count as one character each, same
-    /// as the width estimate assumes; combining-accent edge cases are out of
-    /// scope. The budget here (max_chars = 8) sits strictly between
-    /// "Ångström"'s char length (8, fits) and its UTF-8 byte length (10,
-    /// wouldn't fit) — a regression to byte-counting would wrongly split
-    /// this word.
-    #[test]
-    fn wrap_label_handles_multi_byte_names() {
-        let lines = wrap_label("Núñez Ångström", 60.0, 13.0);
-        assert_eq!(lines, vec!["Núñez", "Ångström"]);
-    }
-
-    #[test]
-    fn wrap_label_of_empty_name_returns_one_empty_line() {
-        let lines = wrap_label("", 90.0, 13.0);
-        assert_eq!(lines, vec![String::new()]);
     }
 }
