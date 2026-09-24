@@ -5794,3 +5794,107 @@ fn optimizer_keeps_locked_guests_in_place_across_seeds_with_cluster_exchange() {
         assert_eq!(seat_of("ls1").seat_index, 0, "seed {seed}");
     }
 }
+
+/// Three mutually hostile groups `A`/`B`/`C` of 3 guests each, one table type
+/// with `max_people: 6` and three instances (18 seats total for 9 guests).
+/// Capacity-filling construction always packs everyone onto exactly 2 of the
+/// 3 tables (2 tables' worth of capacity, 12, already covers all 9 guests, so
+/// the third is never opened) and merges exactly two of the three groups
+/// there — the only 3-table arrangement (one group per table, zero
+/// cross-group pairs) needs a table no capacity-filling start ever opens.
+///
+/// `propose_swap`/`propose_join` only ever touch tables that already hold a
+/// `positions[i]`, and `propose_cluster_exchange` can never target an empty
+/// table at all (both tables it picks come from an existing occupant's
+/// position). `propose_table_swap` and the whole-table branch of
+/// `propose_table_split` could move occupants onto the empty third table,
+/// but both refuse to when the source and destination share a type (a
+/// same-type move is a score-neutral relabel) — true here, since all three
+/// tables are the same type. So without a varied start the third table stays
+/// empty for the entire search, for any number of steps.
+#[test]
+fn optimizer_varied_start_reaches_plan_needing_an_extra_table() {
+    let project = make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\n\
+         a1,A1,,A,,\na2,A2,,A,,\na3,A3,,A,,\n\
+         b1,B1,,B,,\nb2,B2,,B,,\nb3,B3,,B,,\n\
+         c1,C1,,C,,\nc2,C2,,C,,\nc3,C3,,C,,\n",
+        "left_id,right_id,score\nA,B,-1000\nA,C,-1000\nB,C,-1000\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nrt,round,6,,,3,\n",
+    )
+    .unwrap();
+    let config = OptimizationConfig {
+        seed: 1,
+        attempts: 4,
+        steps: 6_000,
+        time_limit_secs: 0,
+        ..OptimizationConfig::default()
+    };
+
+    let result = HeuristicOptimizer.optimize(&project, &config).unwrap();
+    let assignments = &result.solutions[0].assignments;
+    validate_seating_solution(&project, assignments).unwrap();
+
+    let table_of = |id: &str| {
+        assignments
+            .iter()
+            .find(|a| a.person_id == id)
+            .unwrap()
+            .table_number
+    };
+    let mut used: Vec<usize> = assignments.iter().map(|a| a.table_number).collect();
+    used.sort_unstable();
+    used.dedup();
+    assert_eq!(used.len(), 3, "expected all three tables in use: {used:?}");
+    for group in [["a1", "a2", "a3"], ["b1", "b2", "b3"], ["c1", "c2", "c3"]] {
+        let table = table_of(group[0]);
+        assert!(
+            group.iter().all(|id| table_of(id) == table),
+            "group split across tables: {group:?}"
+        );
+    }
+    assert_eq!(
+        result.solutions[0].score, 0.0,
+        "expected zero cross-group pairs once every group has its own table"
+    );
+}
+
+/// Same three-table, one-type shape as
+/// [`optimizer_varied_start_reaches_plan_needing_an_extra_table`], but with a
+/// guest locked to table 1 and another locked to a specific seat on table 2 —
+/// exercising [`HeuristicOptimizer::open_extra_table`]'s donor selection
+/// (which must skip locked guests) across several seeds. Every attempt is
+/// fresh (no warm start) and `attempts >= 2` guarantees an odd attempt that
+/// opens the extra table, so this always runs the extra-table code path.
+#[test]
+fn optimizer_extra_table_start_respects_locks_and_stays_valid() {
+    let project = make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\n\
+         lt1,LT1,,A,1,\n\
+         ls1,LS1,,B,2,0\n\
+         a2,A2,,A,,\na3,A3,,A,,\n\
+         b2,B2,,B,,\nb3,B3,,B,,\n\
+         c1,C1,,C,,\nc2,C2,,C,,\nc3,C3,,C,,\n",
+        "left_id,right_id,score\nA,B,-1000\nA,C,-1000\nB,C,-1000\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nrt,round,6,,,3,\n",
+    )
+    .unwrap();
+
+    for seed in 1..=8u64 {
+        let config = OptimizationConfig {
+            seed,
+            attempts: 3,
+            steps: 500,
+            time_limit_secs: 0,
+            ..OptimizationConfig::default()
+        };
+        let result = HeuristicOptimizer.optimize(&project, &config).unwrap();
+        let assignments = &result.solutions[0].assignments;
+        validate_seating_solution(&project, assignments).unwrap();
+
+        let seat_of = |id: &str| assignments.iter().find(|a| a.person_id == id).unwrap();
+        assert_eq!(seat_of("lt1").table_number, 1, "seed {seed}");
+        assert_eq!(seat_of("ls1").table_number, 2, "seed {seed}");
+        assert_eq!(seat_of("ls1").seat_index, 0, "seed {seed}");
+    }
+}

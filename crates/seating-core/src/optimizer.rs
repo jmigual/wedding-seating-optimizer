@@ -46,13 +46,40 @@ pub trait SeatingOptimizer {
 ///    deterministic seed derived from `config.seed` (or start from the
 ///    warm-start solution), consolidating guests onto fewer tables when
 ///    `min_people` allows (see [`HeuristicOptimizer::repair_min_constraints`]).
+///    Every odd-numbered fresh-random attempt then reserves one more,
+///    currently-empty table (see [`HeuristicOptimizer::open_extra_table`]).
+///    Note that attempt indices start at 0, so this only takes effect from
+///    the second attempt on — `attempts: 1` with `time_limit_secs: 0` (the
+///    only attempt that runs) never opens an extra table.
+///    This is a heuristic, not an exact fix for a structural blind spot:
+///    join and swap only touch tables that already have an occupant, and
+///    cluster exchange can never target an empty table at all (it selects
+///    both tables from an existing occupant's position), so none of those
+///    can increase how many tables are in use. Table swap trades whole
+///    occupant sets between two tables of *different* types — it can move a
+///    group onto a currently-unused table, but the table it came from
+///    becomes unused in exchange, so the total count in use never changes.
+///    Table split is the one move that *can* increase it, by sending part of
+///    an overflowing table onto a second, currently-empty, differently
+///    (typically smaller) typed table — but only when such a smaller type
+///    exists. So when every table shares one type, or there is no smaller
+///    type to split onto, the count of tables in use can only go down during
+///    a run, and a plan whose optimum needs more tables than a
+///    capacity-filling start ever opens is unreachable regardless of step
+///    budget; otherwise it is reachable only rarely, since table split needs
+///    a specific split of a specific table to land exactly right. Seeding
+///    half the fresh attempts with one extra table trades a wasted attempt
+///    (when the extra table doesn't help) for making that class of plan
+///    reachable at all.
 /// 2. Run `config.steps` LAHC moves (see `lahc_search`):
 ///    a move is accepted when it is at least as good as the current score
 ///    *or* as the score held `LAHC_HISTORY_LEN` steps ago, which lets the
 ///    search cross score-neutral and mildly worse plateaus. Moves: guest
 ///    pair swap, "join" (move a guest onto the table of another guest, or
 ///    to another seat of their own table), whole-table occupant swap (the
-///    move that opens an unused, larger table for a group), table split
+///    move that relocates a group onto an unused, larger table by trading
+///    places with it — the table count in use is unchanged, since the
+///    group's old table becomes unused in exchange), table split
 ///    (the move that empties a table by splitting its occupants across two
 ///    smaller ones, for a group that doesn't fit either alone), and cluster
 ///    exchange (the move that swaps a coherent multi-guest subset between
@@ -76,8 +103,9 @@ const LAHC_HISTORY_LEN: usize = 200;
 /// - `SWAP_MOVE_PERCENT` guest pair swaps — cheap, local refinement.
 /// - `JOIN_MOVE_PERCENT` "join" moves — relocate one guest, the bulk of
 ///   fine-grained exploration.
-/// - `TABLE_SWAP_MOVE_PERCENT` whole-table occupant swaps — opens an unused,
-///   larger table for a group that fits it whole.
+/// - `TABLE_SWAP_MOVE_PERCENT` whole-table occupant swaps — relocates a
+///   group onto an unused, larger table by trading places with it (table
+///   count in use is unchanged).
 /// - `CLUSTER_EXCHANGE_MOVE_PERCENT` cluster exchanges — swaps a coherent
 ///   multi-guest subset between two tables in one move (see
 ///   [`SearchState::propose_cluster_exchange`]).
@@ -147,7 +175,16 @@ impl HeuristicOptimizer {
                 }
                 positions
             }
-            None => self.random_feasible_assignment(project, &ctx.instances, attempt_seed)?,
+            // Every odd-numbered fresh-random attempt opens one extra table
+            // beyond what capacity-filling would, so the search can reach
+            // plans an all-capacity-filling start structurally cannot; see
+            // the module doc for why no later move can do this on its own.
+            None => self.random_feasible_assignment(
+                project,
+                &ctx.instances,
+                attempt_seed,
+                attempt % 2 == 1,
+            )?,
         };
         let improved =
             self.lahc_search(project, &ctx, config, positions, attempt_seed ^ 0xA5A5_5A5A);
@@ -244,12 +281,15 @@ impl HeuristicOptimizer {
     ///
     /// Returns `None` only when locks conflict or a guest has no candidate
     /// seat at all; an under-`min_people` start is returned as is (it is
-    /// penalized by scoring, not rejected).
+    /// penalized by scoring, not rejected). When `open_extra_table` is true,
+    /// reserves one more, currently-unused table after the usual
+    /// capacity-filling placement (see [`Self::open_extra_table`]).
     fn random_feasible_assignment(
         &self,
         project: &ProjectInput,
         instances: &[TableInstance],
         seed: u64,
+        open_extra_table: bool,
     ) -> Option<Vec<(usize, usize)>> {
         let table_lookup: HashMap<usize, &TableInstance> =
             instances.iter().map(|t| (t.number, t)).collect();
@@ -308,11 +348,118 @@ impl HeuristicOptimizer {
             );
         }
 
+        if open_extra_table {
+            self.open_extra_table(
+                project,
+                instances,
+                &table_lookup,
+                &mut assigned,
+                &mut occupied,
+                seed,
+            );
+        }
+
         project
             .people
             .iter()
             .map(|p| assigned.get(&p.id).copied())
             .collect()
+    }
+
+    /// Reserve one additional, currently-empty table for the search to grow
+    /// into: try each currently-unused table (in an order shuffled
+    /// deterministically from `seed`) and open the first one that can be
+    /// filled to `min_people` (or 1, if the table type sets no minimum) from
+    /// other tables' surplus above their own minimum — trying every
+    /// candidate rather than just the first means one unfillable empty table
+    /// (e.g. a head-table type nobody is compatible with) doesn't waste the
+    /// attempt when another empty table could have been opened instead.
+    /// Donors are shuffled deterministically too, so the choice of table and
+    /// donors is reproducible.
+    ///
+    /// Leaves `assigned`/`occupied` unchanged if there is no empty table, or
+    /// none of them can be filled without leaving a donor table both used
+    /// and under its own minimum — the caller's fallback is simply the
+    /// capacity-filling start already built.
+    fn open_extra_table(
+        &self,
+        project: &ProjectInput,
+        instances: &[TableInstance],
+        table_lookup: &HashMap<usize, &TableInstance>,
+        assigned: &mut HashMap<String, (usize, usize)>,
+        occupied: &mut HashSet<(usize, usize)>,
+        seed: u64,
+    ) {
+        let mut counts: HashMap<usize, usize> = HashMap::new();
+        for (table_num, _) in assigned.values() {
+            *counts.entry(*table_num).or_insert(0) += 1;
+        }
+        let mut empty: Vec<usize> = instances
+            .iter()
+            .map(|t| t.number)
+            .filter(|number| counts.get(number).copied().unwrap_or(0) == 0)
+            .collect();
+        if empty.is_empty() {
+            return; // No extra table to open; fall back to the normal start.
+        }
+        let mut rng = StdRng::seed_from_u64(seed ^ 0x0BE7_0BE7);
+        empty.shuffle(&mut rng);
+
+        for target in empty {
+            let table = table_lookup[&target];
+            let need = table.min_people.unwrap_or(1).max(1).min(table.max_people);
+
+            let mut donors: Vec<&str> = project
+                .people
+                .iter()
+                .filter(|p| Self::movable_to(p, table))
+                .map(|p| p.id.as_str())
+                .collect();
+            donors.shuffle(&mut rng);
+
+            let mut moves: Vec<(String, usize)> = Vec::new();
+            let mut trial_counts = counts.clone();
+            let mut moved = 0usize;
+            for id in donors {
+                if moved == need {
+                    break;
+                }
+                let (src, _) = assigned[id];
+                let src_min = table_lookup[&src].min_people.unwrap_or(1).max(1);
+                let src_count = trial_counts.get(&src).copied().unwrap_or(0);
+                if src_count <= src_min {
+                    continue; // Donating would leave the source under its own minimum.
+                }
+                moves.push((id.to_string(), moved));
+                *trial_counts.entry(src).or_insert(0) -= 1;
+                moved += 1;
+            }
+
+            if moved < need {
+                continue; // Not enough surplus at this table; try the next one.
+            }
+            for (id, seat) in moves {
+                let old = assigned
+                    .insert(id, (target, seat))
+                    .expect("donor already assigned");
+                occupied.remove(&old);
+                occupied.insert((target, seat));
+            }
+            return;
+        }
+        // No candidate table could be filled; leave the capacity-filling start as is.
+    }
+
+    /// Whether `person` is a movable donor candidate for `table`: not locked
+    /// to any table (locking always fixes a guest's table, seat or not), and
+    /// either untyped or matching `table`'s `table_type`.
+    fn movable_to(person: &Person, table: &TableInstance) -> bool {
+        person.locked_table.is_none()
+            && person
+                .table_type
+                .as_ref()
+                .map(|tt| tt == &table.table_type)
+                .unwrap_or(true)
     }
 
     fn compatible_table_count(&self, person: &Person, instances: &[TableInstance]) -> usize {
@@ -511,18 +658,12 @@ impl HeuristicOptimizer {
             let mut donors: Vec<String> = project
                 .people
                 .iter()
-                .filter(|p| p.locked_table.is_none())
+                .filter(|p| Self::movable_to(p, table))
                 .filter(|p| {
                     assigned
                         .get(&p.id)
                         .map(|(t, _)| *t != table_num)
                         .unwrap_or(false)
-                })
-                .filter(|p| {
-                    p.table_type
-                        .as_ref()
-                        .map(|tt| tt == &table.table_type)
-                        .unwrap_or(true)
                 })
                 .map(|p| p.id.clone())
                 .collect();
@@ -1107,5 +1248,173 @@ impl SeatingOptimizer for HeuristicOptimizer {
     ) -> Result<OptimizationResult, ValidationReport> {
         validate_project(project)?;
         self.run_attempts(project, config, None, None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::make_project;
+    use crate::validation::generate_table_instances;
+
+    fn used_table_counts(positions: &[(usize, usize)]) -> HashMap<usize, usize> {
+        let mut counts = HashMap::new();
+        for &(table, _) in positions {
+            *counts.entry(table).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    /// 12 guests (2 locked) and one table type with `min_people: 3`, three
+    /// instances. Capacity-filling fills exactly two of the three tables to
+    /// their `max_people: 6` (12 people, 6+6), leaving the third empty.
+    /// `open_extra_table` must fill that third table to its `min_people`
+    /// (3, so `need > 1`), donating from the two full tables (each with
+    /// surplus `6 - 3 = 3` above its own minimum — the source-min guard is
+    /// exercised since a table can donate down to, but not below, 3).
+    #[test]
+    fn open_extra_table_adds_one_table_and_respects_locks_and_min() {
+        let project = make_project(
+            "id,name,table_type,groups,locked_table,locked_seat\n\
+             lt1,LT1,,,1,\n\
+             ls1,LS1,,,2,0\n\
+             r1,R1,,,,\nr2,R2,,,,\nr3,R3,,,,\nr4,R4,,,,\nr5,R5,,,,\n\
+             r6,R6,,,,\nr7,R7,,,,\nr8,R8,,,,\nr9,R9,,,,\nr10,R10,,,,\n",
+            "left_id,right_id,score\n",
+            "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nrt,round,6,,3,3,\n",
+        )
+        .unwrap();
+        let instances = generate_table_instances(&project);
+        let optimizer = HeuristicOptimizer;
+        let seed = 11;
+
+        let without = optimizer
+            .random_feasible_assignment(&project, &instances, seed, false)
+            .unwrap();
+        let with = optimizer
+            .random_feasible_assignment(&project, &instances, seed, true)
+            .unwrap();
+
+        let counts_without = used_table_counts(&without);
+        let counts_with = used_table_counts(&with);
+        assert_eq!(
+            counts_with.len(),
+            counts_without.len() + 1,
+            "expected exactly one more table in use: without {counts_without:?}, with {counts_with:?}"
+        );
+
+        // Locked guests never move, with or without the extra table.
+        let lt1 = project.people.iter().position(|p| p.id == "lt1").unwrap();
+        let ls1 = project.people.iter().position(|p| p.id == "ls1").unwrap();
+        assert_eq!(without[lt1].0, 1);
+        assert_eq!(with[lt1].0, 1);
+        assert_eq!(without[ls1], (2, 0));
+        assert_eq!(with[ls1], (2, 0));
+
+        // No used table is left under its min_people.
+        for table in &instances {
+            if let Some(&count) = counts_with.get(&table.number) {
+                assert!(
+                    count >= table.min_people.unwrap_or(0),
+                    "table {} under min: {count} < {:?}",
+                    table.number,
+                    table.min_people
+                );
+            }
+        }
+    }
+
+    /// Fallback: every table is already in use, so there is nothing for
+    /// `open_extra_table` to open.
+    #[test]
+    fn open_extra_table_is_a_no_op_when_no_table_is_empty() {
+        let project = make_project(
+            "id,name,table_type,groups,locked_table,locked_seat\n\
+             p1,P1,,,,\np2,P2,,,,\np3,P3,,,,\np4,P4,,,,\np5,P5,,,,\np6,P6,,,,\np7,P7,,,,\n",
+            "left_id,right_id,score\n",
+            "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nrt,round,4,,,2,\n",
+        )
+        .unwrap();
+        let instances = generate_table_instances(&project);
+        let optimizer = HeuristicOptimizer;
+        let seed = 5;
+
+        let without = optimizer
+            .random_feasible_assignment(&project, &instances, seed, false)
+            .unwrap();
+        let with = optimizer
+            .random_feasible_assignment(&project, &instances, seed, true)
+            .unwrap();
+        assert_eq!(
+            with, without,
+            "no empty table to open, so the two starts must match"
+        );
+    }
+
+    /// Fallback: an empty table exists, but every other table is exactly at
+    /// its own `min_people`, so no guest can be donated without violating
+    /// the source's minimum.
+    #[test]
+    fn open_extra_table_is_a_no_op_when_no_donor_has_surplus() {
+        let project = make_project(
+            "id,name,table_type,groups,locked_table,locked_seat\n\
+             p1,P1,,,,\np2,P2,,,,\np3,P3,,,,\np4,P4,,,,\n\
+             p5,P5,,,,\np6,P6,,,,\np7,P7,,,,\np8,P8,,,,\n",
+            "left_id,right_id,score\n",
+            "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nrt,round,4,,4,3,\n",
+        )
+        .unwrap();
+        let instances = generate_table_instances(&project);
+        let optimizer = HeuristicOptimizer;
+        let seed = 9;
+
+        let without = optimizer
+            .random_feasible_assignment(&project, &instances, seed, false)
+            .unwrap();
+        let with = optimizer
+            .random_feasible_assignment(&project, &instances, seed, true)
+            .unwrap();
+        assert_eq!(
+            with, without,
+            "every used table is exactly at its own min, so no donor can spare a guest"
+        );
+    }
+
+    /// Regression for trying only the first shuffled empty table: `special`
+    /// (a 2-seat, min-2 table nobody is compatible with, since every guest is
+    /// typed `rt`) can never be filled, but the empty `rt` table always can.
+    /// Before the fix (trying only `empty[0]`), whenever `special` happened
+    /// to shuffle first the attempt gave up instead of trying the fillable
+    /// `rt` table next — looping over seeds so at least one hits that order.
+    #[test]
+    fn open_extra_table_tries_every_empty_table_not_just_the_first() {
+        let project = make_project(
+            "id,name,table_type,groups,locked_table,locked_seat\n\
+             p1,P1,rt,,,\np2,P2,rt,,,\np3,P3,rt,,,\np4,P4,rt,,,\n\
+             p5,P5,rt,,,\np6,P6,rt,,,\np7,P7,rt,,,\np8,P8,rt,,,\n",
+            "left_id,right_id,score\n",
+            "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\n\
+             rt,round,6,,,3,\nspecial,round,2,,2,1,\n",
+        )
+        .unwrap();
+        let instances = generate_table_instances(&project);
+        let optimizer = HeuristicOptimizer;
+
+        for seed in 1..=20u64 {
+            let without = optimizer
+                .random_feasible_assignment(&project, &instances, seed, false)
+                .unwrap();
+            let with = optimizer
+                .random_feasible_assignment(&project, &instances, seed, true)
+                .unwrap();
+            let counts_without = used_table_counts(&without);
+            let counts_with = used_table_counts(&with);
+            assert_eq!(
+                counts_with.len(),
+                counts_without.len() + 1,
+                "seed {seed}: expected the fillable rt table to open even when \
+                 `special` shuffles first: without {counts_without:?}, with {counts_with:?}"
+            );
+        }
     }
 }

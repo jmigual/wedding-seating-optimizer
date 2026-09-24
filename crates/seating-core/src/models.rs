@@ -211,7 +211,7 @@ impl Default for OptimizationConfig {
         Self {
             seed: 42,
             attempts: 10,
-            steps: 50_000,
+            steps: 200_000,
             solutions: 1,
             proximity_weight: 1.0,
             used_table_weight: 0.0,
