@@ -1185,15 +1185,22 @@ fn settings_section(shared: &mut SharedState, ui: &mut egui::Ui) {
             changed |= ui.text_edit_singleline(&mut shared.seed).changed();
             ui.end_row();
 
-            ui.label("Attempts");
+            ui.label("Chains").on_hover_text(
+                "Search chains to run; only used when the time limit is 0. \
+                 Timed runs use one chain per CPU thread.",
+            );
             changed |= ui.text_edit_singleline(&mut shared.attempts).changed();
             ui.end_row();
 
-            ui.label("Steps per attempt");
+            ui.label("Steps per chain")
+                .on_hover_text("Steps per chain; only used when the time limit is 0.");
             changed |= ui.text_edit_singleline(&mut shared.steps).changed();
             ui.end_row();
 
-            ui.label("Time limit (s)");
+            ui.label("Time limit (s)").on_hover_text(
+                "Search until this many seconds pass. \
+                 0 runs the Chains for Steps per chain each, with reproducible results.",
+            );
             changed |= ui
                 .text_edit_singleline(&mut shared.time_limit_secs)
                 .changed();

@@ -150,13 +150,13 @@ impl SeatingApp {
             Ok(result) => match result.solutions.into_iter().next() {
                 Some(solution) => {
                     let score = solution.score;
-                    let attempts_completed = result.attempts_completed;
+                    let segments = result.attempts_completed;
                     self.shared.assignments = solution.assignments;
                     self.shared.refresh();
                     self.shared.set_message(
                         MessageKind::Success,
                         format!(
-                            "Optimized. Score: {score:.3} ({attempts_completed} attempts completed)"
+                            "Optimized. Score: {score:.3} ({segments} search segments completed)"
                         ),
                     );
                 }

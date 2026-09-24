@@ -50,7 +50,7 @@ pub(crate) fn show(app: &mut SeatingApp, ctx: &egui::Context, ui: &mut egui::Ui)
             app.shared.score_breakdown.is_some(),
             egui::Checkbox::new(&mut app.warm_start, "Refine current seating"),
         )
-        .on_hover_text("Start every attempt from the current seating instead of a random one")
+        .on_hover_text("Start every search chain from the current seating instead of a random one")
         .on_disabled_hover_text("Needs a valid, scored seating to refine");
         if app.is_optimizing {
             let elapsed = app

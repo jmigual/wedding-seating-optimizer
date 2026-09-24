@@ -107,16 +107,17 @@ enum Commands {
         /// Destination path for the output seating CSV.
         #[arg(long)]
         output: PathBuf,
-        /// RNG seed for reproducible runs.
+        /// RNG seed; runs are reproducible only with `--time-limit 0`.
         #[arg(long, default_value_t = 42)]
         seed: u64,
-        /// Number of independent random-restart attempts.
+        /// Number of independent search chains; only used with `--time-limit 0`
+        /// (timed runs use one chain per CPU thread).
         #[arg(long, default_value_t = 10)]
         attempts: usize,
         /// Number of top solutions to keep (only the best is written to output).
         #[arg(long, default_value_t = 1)]
         solutions: usize,
-        /// Local-search moves evaluated per attempt.
+        /// Local-search steps per chain; only used with `--time-limit 0`.
         #[arg(long, default_value_t = OptimizationConfig::default().steps)]
         steps: usize,
         /// Global multiplier for closeness and proximity scoring.
@@ -128,7 +129,8 @@ enum Commands {
         /// Weight applied to the penalty for deviating from recommended table size.
         #[arg(long, default_value_t = 1.0)]
         optimal_table_size_weight: f64,
-        /// Wall-clock search budget in seconds; 0 runs exactly `attempts` attempts.
+        /// Wall-clock search budget in seconds; 0 runs exactly `attempts` chains
+        /// of `steps` steps each, reproducibly.
         #[arg(long, default_value_t = OptimizationConfig::default().time_limit_secs)]
         time_limit: u64,
         /// Penalty per missing guest on a used table below its min_people.
@@ -282,7 +284,7 @@ fn main() -> Result<()> {
             fs::write(&output, write_seating_csv(&best.assignments)?)
                 .with_context(|| format!("failed writing output {}", output.display()))?;
             println!(
-                "Wrote seating to {} with score {} ({} attempts completed)",
+                "Wrote seating to {} with score {} ({} search segments completed)",
                 output.display(),
                 best.score,
                 result.attempts_completed
