@@ -29,8 +29,8 @@ Layout of the library (`crates/seating-core/src/`):
   seating-solution validation.
 - `scoring.rs` — distance functions (circular/perimeter), proximity weights, pairwise and
   whole-solution scoring.
-- `optimizer.rs` — the `SeatingOptimizer` trait and `HeuristicOptimizer` (multi-restart
-  hill-climbing).
+- `optimizer.rs` — the `SeatingOptimizer` trait and `HeuristicOptimizer` (iterated
+  local search: one late-acceptance hill-climbing chain per thread, kicked on stagnation).
 - `render.rs` — layout building and SVG/PNG rendering via `resvg`.
 - `editing.rs` — GUI-facing parse/lookup helpers for editing project data.
 
@@ -57,9 +57,11 @@ The public surface is re-exported from `lib.rs`. Sample inputs live in `examples
   person assigned exactly once. Validation lives in `validation.rs`; changes that touch the
   optimizer or models must keep these intact and prove it with a test.
 - **Determinism is a contract.** `HeuristicOptimizer` seeds every RNG stream from
-  `OptimizationConfig::seed` (`StdRng::seed_from_u64`, per-attempt seeds derived
-  deterministically). The same seed + same input must always produce the same result. Never
-  reach for `thread_rng()` or any nondeterministic source in the optimizer or scoring.
+  `OptimizationConfig::seed` (`StdRng::seed_from_u64`, per-chain seeds derived
+  deterministically). With `time_limit_secs == 0` the same seed + same input must always
+  produce the same result. Timed runs differ only in how many steps each chain completes
+  before the deadline — that is the sole allowed source of variation. Never reach for
+  `thread_rng()` or any nondeterministic source in the optimizer or scoring.
 - Scoring drives optimization decisions — treat changes to distance functions, proximity
   weights, or `score_solution` as behavior changes and cover them with tests, not just the
   happy path.
