@@ -514,4 +514,12 @@ pub enum ValidationError {
     /// stay seated, not just that others may not displace them.
     #[error("cannot unassign locked guest '{0}' from their required table")]
     LockedGuestUnassigned(String),
+    /// [`crate::editing::relocate_table`]/[`crate::editing::split_table`] found
+    /// fewer unoccupied, unreserved instances of `table_type` than needed.
+    #[error("no free table of type '{table_type}': needed {needed}, free {free}")]
+    NoFreeTableOfType {
+        table_type: String,
+        needed: usize,
+        free: usize,
+    },
 }

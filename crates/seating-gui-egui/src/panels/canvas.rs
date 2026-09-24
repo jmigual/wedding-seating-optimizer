@@ -13,9 +13,10 @@ use seating_core::{
     COLOR_BACKGROUND, COLOR_CARD, COLOR_GUEST_TEXT, COLOR_MUTED, COLOR_SEAT_FILL,
     COLOR_SEAT_STROKE, COLOR_STROKE, COLOR_TABLE_FILL, COLOR_TABLE_STROKE, LabelAlign, LayoutSeat,
     LayoutTable, MIN_LABEL_FONT_SIZE, Person, ProjectInput, RenderOptions, SeatDropOutcome,
-    SeatingAssignment, SeatingLayout, TableSurface, apply_seat_append, apply_seat_drop,
-    build_layout, compact_table_numbers, render_png, render_svg, seat_label, swap_table_numbers,
-    unassign_person, unassigned_people,
+    SeatingAssignment, SeatingLayout, TableRelocation, TableSurface, TableTypeId, ValidationError,
+    apply_seat_append, apply_seat_drop, build_layout, compact_table_numbers, relocate_table,
+    render_png, render_svg, seat_label, split_table, swap_table_numbers, unassign_person,
+    unassigned_people,
 };
 use std::collections::HashMap;
 
@@ -53,6 +54,10 @@ pub(crate) struct CanvasState {
     /// the generic score-change detector (which also catches
     /// optimizer-driven changes) doesn't spawn a duplicate on the next frame.
     suppress_diff_toast: bool,
+    /// A "Change table type" whose destination type is too small for the
+    /// group, awaiting the user's stop-or-split decision in
+    /// [`split_decision_modal`].
+    pending_split: Option<PendingSplit>,
 }
 
 impl Default for CanvasState {
@@ -65,8 +70,18 @@ impl Default for CanvasState {
             toast: None,
             last_score: None,
             suppress_diff_toast: false,
+            pending_split: None,
         }
     }
+}
+
+/// A "Change table type" attempt that would overflow the destination type's
+/// capacity for the whole group.
+struct PendingSplit {
+    from_table: usize,
+    to_type: TableTypeId,
+    guests: usize,
+    capacity: usize,
 }
 
 /// A guest picked up off a seat, mid-drag.
@@ -128,6 +143,32 @@ pub(crate) fn show(shared: &mut SharedState, state: &mut CanvasState, ui: &mut e
         canvas_area(shared, state, ui);
     } else {
         empty_state(shared, ui);
+    }
+
+    if let Some(pending) = &state.pending_split {
+        let from = pending.from_table;
+        let to_type = pending.to_type.clone();
+        let guests = pending.guests;
+        let capacity = pending.capacity;
+        if let Some(decision) = split_decision_modal(ui.ctx(), from, &to_type, guests, capacity) {
+            state.pending_split = None;
+            match decision {
+                SplitDecision::Cancel => {
+                    shared.set_message(MessageKind::Info, "Table type unchanged.");
+                }
+                SplitDecision::Split => {
+                    if let Ok(project) = shared.materialize_project() {
+                        match split_table(&project, &shared.assignments, from, &to_type) {
+                            Ok(relocation) => apply_relocation(shared, from, relocation),
+                            Err(report) => shared.set_message(
+                                MessageKind::Error,
+                                format!("Split failed: {}", SharedState::report_summary(&report)),
+                            ),
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -361,6 +402,7 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
     let mut pending_unassign = false;
     let mut pending_lock: Option<(String, Option<usize>, Option<usize>)> = None;
     let mut pending_swap: Option<(usize, usize)> = None;
+    let mut pending_retype: Option<(usize, TableTypeId)> = None;
 
     // Guest-name label lines are collected here and painted once after
     // every table/seat has been drawn, so a later seat, its drop-highlight
@@ -397,6 +439,15 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
             if state.drag.is_none() {
                 table_response.context_menu(|ui| {
                     table_swap_menu(ui, &layout, table.table_number, &mut pending_swap);
+                    if !table.seats.is_empty() {
+                        table_retype_menu(
+                            ui,
+                            shared,
+                            table.table_number,
+                            &table.table_type,
+                            &mut pending_retype,
+                        );
+                    }
                 });
             }
         }
@@ -626,6 +677,8 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
         finish_lock(shared, &person_id, locked_table, locked_seat);
     } else if let Some((a, b)) = pending_swap {
         finish_swap(shared, a, b);
+    } else if let Some((from, to_type)) = pending_retype {
+        finish_retype(shared, state, from, &to_type);
     } else if state.drag.is_some() && ui.ctx().input(|i| i.pointer.primary_released()) {
         // Safety net: the primary button was released this frame but no
         // path above consumed it (e.g. the dragged seat ended up outside
@@ -680,6 +733,135 @@ fn finish_swap(shared: &mut SharedState, a: usize, b: usize) {
         MessageKind::Success,
         format!("Swapped table {a} and table {b}."),
     );
+}
+
+/// Submenu contents for right-clicking an occupied table's surface: retype
+/// every occupant to a different table type via [`relocate_table`]. Lists
+/// every table type except the table's own current one; a type without
+/// enough free instances is left enabled — [`relocate_table`] reports
+/// [`ValidationError::NoFreeTableOfType`] for that, same as any other
+/// failure.
+fn table_retype_menu(
+    ui: &mut egui::Ui,
+    shared: &SharedState,
+    table_number: usize,
+    current_type: &str,
+    pending_retype: &mut Option<(usize, TableTypeId)>,
+) {
+    let Ok(project) = shared.materialize_project() else {
+        return;
+    };
+    ui.menu_button("Change table type", |ui| {
+        for (table_type_id, cfg) in &project.table_types {
+            if table_type_id == current_type {
+                continue;
+            }
+            if ui
+                .button(format!("{table_type_id} ({} seats)", cfg.max_people))
+                .clicked()
+            {
+                *pending_retype = Some((table_number, table_type_id.clone()));
+                ui.close();
+            }
+        }
+    });
+}
+
+/// Applies a right-click "Change table type" selection via
+/// [`relocate_table`]. If the destination type is too small for the whole
+/// group, stashes a [`PendingSplit`] instead of failing outright, so [`show`]
+/// can offer a stop-or-split choice via [`split_decision_modal`].
+fn finish_retype(
+    shared: &mut SharedState,
+    state: &mut CanvasState,
+    from: usize,
+    to_type: &TableTypeId,
+) {
+    let Ok(project) = shared.materialize_project() else {
+        return;
+    };
+    match relocate_table(&project, &shared.assignments, from, to_type) {
+        Ok(relocation) => apply_relocation(shared, from, relocation),
+        Err(report) => match report.errors.as_slice() {
+            [
+                ValidationError::TableCapacityExceeded {
+                    count, capacity, ..
+                },
+            ] => {
+                state.pending_split = Some(PendingSplit {
+                    from_table: from,
+                    to_type: to_type.clone(),
+                    guests: *count,
+                    capacity: *capacity,
+                });
+            }
+            _ => shared.set_message(
+                MessageKind::Error,
+                format!(
+                    "Change table type failed: {}",
+                    SharedState::report_summary(&report)
+                ),
+            ),
+        },
+    }
+}
+
+/// Applies a [`TableRelocation`] from [`relocate_table`]/[`split_table`]:
+/// replaces the seating assignments, adopts a grown `table_order` if the
+/// destination type had to grow to fit, and re-validates/re-scores.
+fn apply_relocation(shared: &mut SharedState, from: usize, relocation: TableRelocation) {
+    shared.assignments = relocation.assignments;
+    if let Some(order) = relocation.table_order {
+        shared.table_order = order;
+    }
+    shared.refresh();
+    let message = match relocation.tables.as_slice() {
+        [only] => format!("Moved table {from}'s guests to table {only}."),
+        [a, b] => format!("Split table {from} into tables {a} and {b}."),
+        _ => format!(
+            "Moved table {from}'s guests to tables {:?}.",
+            relocation.tables
+        ),
+    };
+    shared.set_message(MessageKind::Success, message);
+}
+
+/// The user's choice when a [`PendingSplit`] reports the destination type is
+/// too small for the group.
+enum SplitDecision {
+    Cancel,
+    Split,
+}
+
+/// Warns that the destination table type is too small for the group and asks
+/// whether to cancel or split the group across two tables of that type.
+/// Mirrors `import_decision_modal`'s shape (see `editors.rs`).
+fn split_decision_modal(
+    ctx: &egui::Context,
+    from: usize,
+    to_type: &str,
+    guests: usize,
+    capacity: usize,
+) -> Option<SplitDecision> {
+    let mut decision = None;
+    let modal = egui::Modal::new(egui::Id::new("split_decision_modal")).show(ctx, |ui| {
+        ui.heading("Table too small");
+        ui.label(format!(
+            "Table {from} has {guests} guests, but a '{to_type}' table seats {capacity}."
+        ));
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").clicked() {
+                decision = Some(SplitDecision::Cancel);
+            }
+            if ui.button("Split into two tables").clicked() {
+                decision = Some(SplitDecision::Split);
+            }
+        });
+    });
+    if decision.is_none() && modal.should_close() {
+        decision = Some(SplitDecision::Cancel);
+    }
+    decision
 }
 
 /// Menu contents for right-clicking an occupied seat: lock the guest to
