@@ -1,7 +1,7 @@
 use seating_core::*;
 use std::collections::BTreeMap;
 use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn sample_tables_csv() -> &'static str {
     "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nround_4,round,4,4,2,2,\nrect_4,rectangular,4,4,2,1,1|1|1|1\n"
@@ -2811,7 +2811,6 @@ fn optimizer_splits_a_table_across_smaller_tables_when_that_scores_better() {
 fn timed_optimizer_finds_compacted_min_capacity_solution() {
     let project = crowded_min_capacity_project();
     let config = OptimizationConfig {
-        steps: 300,
         time_limit_secs: 2,
         ..OptimizationConfig::default()
     };
@@ -2819,7 +2818,6 @@ fn timed_optimizer_finds_compacted_min_capacity_solution() {
         .optimize_timed(&project, &config, None)
         .unwrap();
 
-    assert!(result.attempts_completed >= config.attempts);
     validate_seating_solution(&project, &result.solutions[0].assignments).unwrap();
 
     let mut counts: BTreeMap<usize, usize> = BTreeMap::new();
@@ -2852,6 +2850,58 @@ fn zero_time_limit_run_equals_exact_attempts_run() {
 
     assert_eq!(timed.solutions, exact.solutions);
     assert_eq!(timed.attempts_completed, config.attempts);
+}
+
+/// The kicks decide where the groups land and when the extra table opens,
+/// so the returned seating and segment count both depend on the kick RNG.
+#[test]
+fn untimed_run_is_reproducible_through_kicks() {
+    let project = three_hostile_groups_project();
+    let config = OptimizationConfig {
+        attempts: 2,
+        steps: 20_000,
+        time_limit_secs: 0,
+        ..OptimizationConfig::default()
+    };
+
+    let run1 = HeuristicOptimizer
+        .optimize_timed(&project, &config, None)
+        .unwrap();
+    let run2 = HeuristicOptimizer
+        .optimize_timed(&project, &config, None)
+        .unwrap();
+
+    // More segments than chains means at least one chain kicked.
+    assert!(
+        run1.attempts_completed > config.attempts,
+        "no kick happened: {} segments",
+        run1.attempts_completed
+    );
+    assert_eq!(run1.attempts_completed, run2.attempts_completed);
+    assert_eq!(run1.solutions, run2.solutions);
+}
+
+/// `steps` is far more than fits in the limit: timed mode must ignore it.
+#[test]
+fn timed_run_stops_close_to_its_deadline() {
+    let project = crowded_min_capacity_project();
+    let config = OptimizationConfig {
+        steps: 5_000_000,
+        time_limit_secs: 1,
+        ..OptimizationConfig::default()
+    };
+
+    let started = Instant::now();
+    let result = HeuristicOptimizer
+        .optimize_timed(&project, &config, None)
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    validate_seating_solution(&project, &result.solutions[0].assignments).unwrap();
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "timed run overshot its 1 s limit: {elapsed:?}"
+    );
 }
 
 #[test]
@@ -5853,6 +5903,52 @@ fn optimizer_varied_start_reaches_plan_needing_an_extra_table() {
             "group split across tables: {group:?}"
         );
     }
+    assert_eq!(
+        result.solutions[0].score, 0.0,
+        "expected zero cross-group pairs once every group has its own table"
+    );
+}
+
+/// The fixture of [`optimizer_varied_start_reaches_plan_needing_an_extra_table`]:
+/// three mutually hostile groups of 3 and three 6-seat tables, where
+/// capacity-filling starts use only two tables.
+fn three_hostile_groups_project() -> ProjectInput {
+    make_project(
+        "id,name,table_type,groups,locked_table,locked_seat\n\
+         a1,A1,,A,,\na2,A2,,A,,\na3,A3,,A,,\n\
+         b1,B1,,B,,\nb2,B2,,B,,\nb3,B3,,B,,\n\
+         c1,C1,,C,,\nc2,C2,,C,,\nc3,C3,,C,,\n",
+        "left_id,right_id,score\nA,B,-1000\nA,C,-1000\nB,C,-1000\n",
+        "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nrt,round,6,,,3,\n",
+    )
+    .unwrap()
+}
+
+/// Same fixture as [`optimizer_varied_start_reaches_plan_needing_an_extra_table`],
+/// but with a single chain: chain 0 starts capacity-filling on two tables, so
+/// only a kick that opens the third table can reach the one-group-per-table
+/// plan. The budget allows dozens of kicks, so a seed whose kicks never open
+/// the table is vanishingly rare (98 of 100 seeds already pass at half this
+/// budget).
+#[test]
+fn optimizer_kick_opens_the_extra_table_a_single_chain_needs() {
+    let project = three_hostile_groups_project();
+    let config = OptimizationConfig {
+        seed: 1,
+        attempts: 1,
+        steps: 80_000,
+        time_limit_secs: 0,
+        ..OptimizationConfig::default()
+    };
+
+    let result = HeuristicOptimizer.optimize(&project, &config).unwrap();
+    let assignments = &result.solutions[0].assignments;
+    validate_seating_solution(&project, assignments).unwrap();
+
+    let mut used: Vec<usize> = assignments.iter().map(|a| a.table_number).collect();
+    used.sort_unstable();
+    used.dedup();
+    assert_eq!(used.len(), 3, "expected all three tables in use: {used:?}");
     assert_eq!(
         result.solutions[0].score, 0.0,
         "expected zero cross-group pairs once every group has its own table"

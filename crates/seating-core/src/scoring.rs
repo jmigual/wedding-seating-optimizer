@@ -347,9 +347,9 @@ fn canonical_pair_ref<'a>(a: &'a str, b: &'a str) -> (&'a str, &'a str) {
 }
 
 /// Precomputed, allocation-light scoring context reused across every
-/// accept/reject decision within one optimizer attempt.
+/// accept/reject decision within one optimizer chain.
 ///
-/// Building this once per attempt — rather than once per step — avoids
+/// Building this once per chain — rather than once per step — avoids
 /// regenerating table instances and resolving closeness rules per pair:
 /// every effective pair score is resolved once into `pair_matrix`, so a step
 /// costs one table lookup, one rank computed per occupant per table (O(k²)

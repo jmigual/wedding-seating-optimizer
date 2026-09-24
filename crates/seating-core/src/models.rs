@@ -172,17 +172,17 @@ pub struct SeatingSolution {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OptimizationConfig {
-    /// RNG seed for reproducible runs.
+    /// RNG seed; runs are reproducible only when `time_limit_secs` is `0`.
     pub seed: u64,
-    /// Number of independent random-restart attempts: exact when
-    /// `time_limit_secs` is `0`, otherwise a minimum (batches keep launching
-    /// until the deadline passes).
+    /// Number of independent search chains when `time_limit_secs` is `0`.
+    /// Ignored by timed runs, which run one chain per available thread.
     ///
-    /// More attempts increase the chance of finding a better global optimum.
+    /// More chains increase the chance of finding a better global optimum.
     pub attempts: usize,
-    /// Local-search moves proposed per attempt.
+    /// Local-search steps per chain when `time_limit_secs` is `0`. Ignored
+    /// by timed runs, whose chains search until the deadline.
     ///
-    /// More steps refine each individual attempt further. Renamed from
+    /// More steps refine each individual chain further. Renamed from
     /// `iterations`: old `.wseat` files persisted `iterations: 200`, which
     /// would be uselessly small under the new default — the rename lets
     /// them pick up the new default via `#[serde(default)]` instead of
@@ -198,7 +198,8 @@ pub struct OptimizationConfig {
     pub optimal_table_size_weight: f64,
     /// Wall-clock budget, in seconds, for [`crate::optimizer::HeuristicOptimizer::optimize_timed`].
     ///
-    /// `0` means run exactly `attempts` attempts regardless of elapsed time.
+    /// `0` means run exactly `attempts` chains of `steps` steps each,
+    /// regardless of elapsed time — the reproducible mode.
     pub time_limit_secs: u64,
     /// Penalty per missing guest on a used table below its `min_people`;
     /// large by default so the minimum is only violated when no feasible
@@ -282,10 +283,10 @@ impl ProjectFile {
 pub struct OptimizationResult {
     /// Top solutions, sorted from best to worst score.
     pub solutions: Vec<SeatingSolution>,
-    /// Number of restart attempts actually completed. Combined with
-    /// `config.seed` and `config.steps`, this fully determines the run — see
-    /// the determinism contract documented on
-    /// [`crate::optimizer::HeuristicOptimizer::optimize_timed`].
+    /// Number of search segments completed across all chains: each chain's
+    /// start plus one per kick (restart from the chain's best with random
+    /// changes). Informational only — see the determinism contract
+    /// documented on [`crate::optimizer::HeuristicOptimizer::optimize_timed`].
     pub attempts_completed: usize,
 }
 

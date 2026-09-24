@@ -1,9 +1,9 @@
 //! Optimizer abstraction and heuristic seating optimizer.
 //!
 //! [`SeatingOptimizer`] is the public trait that any optimizer must implement.
-//! [`HeuristicOptimizer`] provides a practical default: multiple random (or
-//! warm-started) restarts of late acceptance hill climbing, keeping the top-N
-//! solutions.
+//! [`HeuristicOptimizer`] provides a practical default: parallel chains of
+//! iterated local search over late acceptance hill climbing, each started
+//! from a random (or warm-start) seating, keeping the top-N solutions.
 
 use crate::models::{
     OptimizationConfig, OptimizationResult, Person, ProjectInput, SeatingAssignment,
@@ -36,21 +36,21 @@ pub trait SeatingOptimizer {
 
 // ── Heuristic optimizer ───────────────────────────────────────────────────────
 
-/// Multi-restart late acceptance hill climbing (LAHC) optimizer.
+/// Iterated local search (ILS) over late acceptance hill climbing (LAHC),
+/// run as independent parallel chains.
 ///
 /// An **approximate** metaheuristic: it returns the best solution it visits,
 /// with no optimality guarantee.
 ///
 /// **Algorithm:**
-/// 1. For each restart attempt, build a structurally valid assignment with a
-///    deterministic seed derived from `config.seed` (or start from the
-///    warm-start solution), consolidating guests onto fewer tables when
-///    `min_people` allows (see [`HeuristicOptimizer::repair_min_constraints`]).
-///    Every odd-numbered fresh-random attempt then reserves one more,
-///    currently-empty table (see [`HeuristicOptimizer::open_extra_table`]).
-///    Note that attempt indices start at 0, so this only takes effect from
-///    the second attempt on — `attempts: 1` with `time_limit_secs: 0` (the
-///    only attempt that runs) never opens an extra table.
+/// 1. For each chain, build a structurally valid assignment with a
+///    deterministic seed derived from `config.seed` and the chain index (or
+///    start from the warm-start solution), consolidating guests onto fewer
+///    tables when `min_people` allows (see
+///    [`HeuristicOptimizer::repair_min_constraints`]).
+///    Every odd-numbered fresh-random chain then reserves one more,
+///    currently-empty table (see [`HeuristicOptimizer::open_extra_table`]);
+///    chain 0 starts without one, but its kicks (step 3) can open one too.
 ///    This is a heuristic, not an exact fix for a structural blind spot:
 ///    join and swap only touch tables that already have an occupant, and
 ///    cluster exchange can never target an empty table at all (it selects
@@ -68,10 +68,10 @@ pub trait SeatingOptimizer {
 ///    capacity-filling start ever opens is unreachable regardless of step
 ///    budget; otherwise it is reachable only rarely, since table split needs
 ///    a specific split of a specific table to land exactly right. Seeding
-///    half the fresh attempts with one extra table trades a wasted attempt
+///    half the fresh chains with one extra table trades a wasted start
 ///    (when the extra table doesn't help) for making that class of plan
 ///    reachable at all.
-/// 2. Run `config.steps` LAHC moves (see `lahc_search`):
+/// 2. Run LAHC moves (see `lahc_search`):
 ///    a move is accepted when it is at least as good as the current score
 ///    *or* as the score held `LAHC_HISTORY_LEN` steps ago, which lets the
 ///    search cross score-neutral and mildly worse plateaus. Moves: guest
@@ -86,11 +86,28 @@ pub trait SeatingOptimizer {
 ///    two tables at once, for a rearrangement that no sequence of
 ///    single-guest moves can reach without a strictly worse intermediate
 ///    state — see [`SearchState::propose_cluster_exchange`]).
-/// 3. Score the best state visited and keep the top-N solutions.
+/// 3. When a chain's current segment goes [`stall_patience`] steps without
+///    improving on its own best, kick: restart from the chain's best seating
+///    after a few random moves (see [`HeuristicOptimizer::kick`]), sometimes
+///    opening a table, reset the LAHC history to the kicked score and keep
+///    climbing. Each run of steps between two kicks is a *segment*.
+/// 4. Stop at the deadline or, without one, after `config.steps` steps per
+///    chain. Score each chain's best state and keep the top-N solutions.
 ///
-/// **Determinism:** attempt `i` is fully determined by
-/// `(config.seed, config.steps, i)` and, when given, the warm-start
-/// solution; the same input always produces the same result.
+/// **Tradeoff:** a kick keeps most of a good seating and only has to
+/// re-optimize around a few changes, so it reaches better plans per step
+/// than a fresh random restart — at the risk of a chain staying near one
+/// basin. The table-opening kicks and the parallel, independently seeded
+/// chains are what keep it diverse; without table opening ILS stays stuck
+/// on plans with too few tables. The patience trades kicking too early
+/// (before LAHC has converged) against idling on a converged seating.
+///
+/// **Determinism:** chain `i` is fully determined by
+/// `(config.seed, i, steps run)` and, when given, the warm-start solution.
+/// With `time_limit_secs == 0` every chain runs exactly `config.steps`
+/// steps, so the run is bit-reproducible. Timed runs depend on how many
+/// steps each chain completed before the deadline, which varies with
+/// machine load, so they are not reproducible.
 #[derive(Debug, Default)]
 pub struct HeuristicOptimizer;
 
@@ -120,19 +137,52 @@ const JOIN_MOVE_PERCENT: u32 = 40;
 const TABLE_SWAP_MOVE_PERCENT: u32 = 10;
 const CLUSTER_EXCHANGE_MOVE_PERCENT: u32 = 10;
 
+/// Random guest swaps or joins a kick applies to the chain's best seating.
+/// Few enough to stay in a good seating's neighborhood, enough to leave its
+/// LAHC basin; measured better than 8 or 20 on an 81-guest wedding.
+const KICK_MOVES: usize = 3;
+
+/// Chance, in percent, that a kick first opens one currently-empty table.
+/// Without it a chain can never grow past its start's table count.
+const KICK_OPEN_TABLE_PERCENT: u32 = 25;
+
+/// Lower bound for [`stall_patience`]: ten LAHC history lengths, so the
+/// late-acceptance window of even a tiny project settles before a kick.
+const PATIENCE_FLOOR: usize = 10 * LAHC_HISTORY_LEN;
+
+/// Steps between deadline checks, keeping the clock read off the hot path
+/// while bounding a timed run's overshoot to one block of steps.
+const DEADLINE_CHECK_STEPS: usize = 1024;
+
+/// Steps a segment may go without improving its own best before the chain
+/// kicks: `4 · guests²`, at least [`PATIENCE_FLOOR`].
+///
+/// The time LAHC needs to converge grows about quadratically with the guest
+/// count (last improvement at a median ~78k steps for 81 guests, ~269k for
+/// 162, from a random start); `4 · n²` (26k at 81 guests, 105k at 162) was
+/// measured to reach the best-known plans most often.
+fn stall_patience(guests: usize) -> usize {
+    (4 * guests * guests).max(PATIENCE_FLOOR)
+}
+
 impl HeuristicOptimizer {
-    /// Run the heuristic for up to `config.time_limit_secs`, optionally warm
-    /// starting every restart attempt from `initial` instead of a random
-    /// feasible assignment.
+    /// Run the heuristic, optionally warm starting every chain from `initial`
+    /// instead of a random feasible assignment.
     ///
-    /// **Determinism contract:** attempt `i` is fully determined by
-    /// `(config.seed, config.steps, i)` (and, when given, `initial`). The
-    /// time limit only changes how many attempts complete before the run
-    /// stops; results are always merged in ascending attempt order via a
-    /// stable sort, so a run is reproducible given the number of attempts
-    /// completed — reported as [`OptimizationResult::attempts_completed`].
-    /// `config.time_limit_secs == 0` runs exactly `config.attempts` attempts,
-    /// same as [`SeatingOptimizer::optimize`].
+    /// With `config.time_limit_secs > 0`, one chain per available thread
+    /// searches until the time limit passes (`config.attempts` and
+    /// `config.steps` are ignored). With `config.time_limit_secs == 0`,
+    /// exactly `config.attempts` chains run `config.steps` steps each, same
+    /// as [`SeatingOptimizer::optimize`]; so does a time limit too large to
+    /// represent as a deadline. On a single-thread machine a timed run is
+    /// chain 0 alone, which starts without an extra table and relies on its
+    /// kicks to open one.
+    ///
+    /// **Determinism contract:** chain `i` is fully determined by
+    /// `(config.seed, i, steps run)` (and, when given, `initial`), and chain
+    /// results are merged in ascending chain order via a stable sort. An
+    /// untimed run is therefore bit-reproducible; a timed one is not, since
+    /// the steps each chain completes depend on machine load.
     ///
     /// Every returned solution's assignments are in `project.people` order,
     /// regardless of `initial`'s ordering.
@@ -154,17 +204,22 @@ impl HeuristicOptimizer {
         let deadline = (config.time_limit_secs > 0)
             .then(|| Instant::now().checked_add(Duration::from_secs(config.time_limit_secs)))
             .flatten();
-        self.run_attempts(project, config, initial, deadline)
+        self.run_chains(project, config, initial, deadline)
     }
 
-    fn run_attempt(
+    /// Run search chain `chain` from its start (see the type-level docs)
+    /// until `deadline` or, without one, for exactly `config.steps` steps.
+    /// Returns the chain's best solution and its segment count (the start
+    /// plus one per kick), or `None` if no feasible start exists.
+    fn run_chain(
         &self,
         project: &ProjectInput,
         config: &OptimizationConfig,
-        attempt: usize,
+        chain: usize,
         initial: Option<&[SeatingAssignment]>,
-    ) -> Option<SeatingSolution> {
-        let attempt_seed = config.seed.wrapping_add((attempt as u64) * 17);
+        deadline: Option<Instant>,
+    ) -> Option<(SeatingSolution, usize)> {
+        let chain_seed = config.seed.wrapping_add((chain as u64) * 17);
         let ctx = ScoringContext::build(project);
         let positions = match initial {
             Some(initial) => {
@@ -175,26 +230,32 @@ impl HeuristicOptimizer {
                 }
                 positions
             }
-            // Every odd-numbered fresh-random attempt opens one extra table
+            // Every odd-numbered fresh-random chain opens one extra table
             // beyond what capacity-filling would, so the search can reach
             // plans an all-capacity-filling start structurally cannot; see
-            // the module doc for why no later move can do this on its own.
+            // the type-level doc for why no LAHC move can do this on its own.
             None => self.random_feasible_assignment(
                 project,
                 &ctx.instances,
-                attempt_seed,
-                attempt % 2 == 1,
+                chain_seed,
+                chain % 2 == 1,
             )?,
         };
-        let improved =
-            self.lahc_search(project, &ctx, config, positions, attempt_seed ^ 0xA5A5_5A5A);
+        let (improved, segments) = self.lahc_search(
+            project,
+            &ctx,
+            config,
+            positions,
+            chain_seed ^ 0xA5A5_5A5A,
+            deadline,
+        );
         let assignments = self.build_assignments(project, &ctx.instances, &improved);
         debug_assert!(
             validate_seating_solution(project, &assignments).is_ok(),
             "lahc_search produced an illegal move: every candidate must be legal by construction"
         );
         let score = score_solution(project, &assignments, config).ok()?;
-        Some(SeatingSolution { assignments, score })
+        Some((SeatingSolution { assignments, score }, segments))
     }
 
     fn merge_solution(
@@ -208,14 +269,14 @@ impl HeuristicOptimizer {
         best.truncate(keep.max(1));
     }
 
-    /// Run restart attempts in parallel batches sized to the machine's core
-    /// count, until at least `config.attempts` have completed and, if
-    /// `deadline` is set, until it passes. A `None` deadline stops after
-    /// exactly `config.attempts.max(1)` attempts. When `initial` is `Some`,
-    /// every attempt warm-starts local improvement from it (with its own
-    /// per-attempt seed) instead of a fresh random feasible assignment.
-    /// `project` must already be validated by the caller.
-    fn run_attempts(
+    /// Run the search chains in parallel batches sized to the machine's core
+    /// count. With a `deadline`, runs one chain per core until it passes;
+    /// without one, runs exactly `config.attempts.max(1)` chains of
+    /// `config.steps` steps each. When `initial` is `Some`, every chain
+    /// warm-starts from it (with its own per-chain seed) instead of a fresh
+    /// random feasible assignment. `project` must already be validated by
+    /// the caller.
+    fn run_chains(
         &self,
         project: &ProjectInput,
         config: &OptimizationConfig,
@@ -226,42 +287,33 @@ impl HeuristicOptimizer {
             .map(|count| count.get())
             .unwrap_or(1)
             .max(1);
-        let min_attempts = config.attempts.max(1);
+        let chain_count = if deadline.is_some() {
+            worker_count
+        } else {
+            config.attempts.max(1)
+        };
         let mut best = Vec::new();
-        let mut next_attempt = 0usize;
+        let mut segments = 0usize;
 
-        loop {
-            if next_attempt >= min_attempts && deadline.is_none_or(|end| Instant::now() >= end) {
-                break;
-            }
-
-            let batch_start = next_attempt;
-            let batch_len = if next_attempt < min_attempts {
-                worker_count.min(min_attempts - next_attempt)
-            } else {
-                worker_count
-            };
-            let batch_end = batch_start + batch_len;
-            let project_owned = project.clone();
-            let config_owned = config.clone();
-
+        for batch_start in (0..chain_count).step_by(worker_count) {
+            let batch_end = (batch_start + worker_count).min(chain_count);
             thread::scope(|scope| {
-                let mut handles = Vec::with_capacity(batch_len);
-                for attempt in batch_start..batch_end {
-                    let project_ref = &project_owned;
-                    let config_ref = &config_owned;
-                    handles.push(scope.spawn(move || {
-                        self.run_attempt(project_ref, config_ref, attempt, initial)
-                    }));
-                }
+                let handles: Vec<_> = (batch_start..batch_end)
+                    .map(|chain| {
+                        scope.spawn(move || {
+                            self.run_chain(project, config, chain, initial, deadline)
+                        })
+                    })
+                    .collect();
                 for handle in handles {
-                    if let Some(solution) = handle.join().expect("optimizer worker panicked") {
+                    if let Some((solution, chain_segments)) =
+                        handle.join().expect("optimizer worker panicked")
+                    {
+                        segments += chain_segments;
                         self.merge_solution(&mut best, solution, config.solutions);
                     }
                 }
             });
-
-            next_attempt = batch_end;
         }
 
         if best.is_empty() {
@@ -272,7 +324,7 @@ impl HeuristicOptimizer {
 
         Ok(OptimizationResult {
             solutions: best,
-            attempts_completed: next_attempt,
+            attempts_completed: segments,
         })
     }
 
@@ -373,14 +425,16 @@ impl HeuristicOptimizer {
     /// other tables' surplus above their own minimum — trying every
     /// candidate rather than just the first means one unfillable empty table
     /// (e.g. a head-table type nobody is compatible with) doesn't waste the
-    /// attempt when another empty table could have been opened instead.
-    /// Donors are shuffled deterministically too, so the choice of table and
-    /// donors is reproducible.
+    /// chain's start or kick when another empty table could have been opened
+    /// instead. Donors are shuffled deterministically too, so the choice of
+    /// table and donors is reproducible.
     ///
     /// Leaves `assigned`/`occupied` unchanged if there is no empty table, or
     /// none of them can be filled without leaving a donor table both used
     /// and under its own minimum — the caller's fallback is simply the
-    /// capacity-filling start already built.
+    /// seating it passed in: the capacity-filling start for
+    /// [`Self::random_feasible_assignment`], the unchanged best seating for
+    /// [`Self::kick`].
     fn open_extra_table(
         &self,
         project: &ProjectInput,
@@ -770,8 +824,74 @@ impl HeuristicOptimizer {
             .collect()
     }
 
-    /// Late acceptance hill climbing over `positions` (person-indexed
-    /// `(table_number, seat_index)`), returning the best state visited.
+    /// Perturb `best` for an iterated local search restart: with
+    /// [`KICK_OPEN_TABLE_PERCENT`]% probability first open one
+    /// currently-empty table (see [`Self::open_extra_table`]), then apply
+    /// [`KICK_MOVES`] random guest swaps or joins (50/50), accepted
+    /// regardless of score.
+    ///
+    /// Every move is legal by construction — capacity, locks, `table_type`,
+    /// no double booking — so the result is a valid seating: guests with a
+    /// `locked_seat` never move and guests with a `locked_table` stay at it.
+    /// A move can be refused (e.g. a full table or a locked guest), so the
+    /// retries are bounded; a project with nothing movable comes back as is.
+    // ponytail: the id-keyed maps are rebuilt per table-opening kick (a rare
+    // event) because `open_extra_table` works on them; port it to positions
+    // if kicks ever become frequent.
+    fn kick(
+        &self,
+        project: &ProjectInput,
+        instances: &[TableInstance],
+        table_lookup: &HashMap<usize, &TableInstance>,
+        best: &[(usize, usize)],
+        rng: &mut StdRng,
+    ) -> Vec<(usize, usize)> {
+        let mut positions = best.to_vec();
+        if rng.random_range(0..100u32) < KICK_OPEN_TABLE_PERCENT {
+            let mut assigned: HashMap<String, (usize, usize)> = project
+                .people
+                .iter()
+                .zip(&positions)
+                .map(|(p, &position)| (p.id.clone(), position))
+                .collect();
+            let mut occupied: HashSet<(usize, usize)> = positions.iter().copied().collect();
+            self.open_extra_table(
+                project,
+                instances,
+                table_lookup,
+                &mut assigned,
+                &mut occupied,
+                rng.random(),
+            );
+            positions = project.people.iter().map(|p| assigned[&p.id]).collect();
+        }
+
+        let mut state = SearchState::new(&project.people, instances, positions);
+        let mut moves: Vec<Move> = Vec::new();
+        let mut applied = 0;
+        for _ in 0..KICK_MOVES * 20 {
+            if applied == KICK_MOVES {
+                break;
+            }
+            moves.clear();
+            let proposed = if rng.random_range(0..2u32) == 0 {
+                state.propose_swap(rng, &mut moves)
+            } else {
+                state.propose_join(rng, &mut moves)
+            };
+            if proposed {
+                state.apply(&moves);
+                applied += 1;
+            }
+        }
+        state.positions
+    }
+
+    /// Iterated local search over late acceptance hill climbing, from
+    /// `positions` (person-indexed `(table_number, seat_index)`). Runs until
+    /// `deadline` or, without one, for exactly `config.steps` steps, and
+    /// returns the best state visited plus the number of segments (the
+    /// start plus one per kick).
     ///
     /// Each step proposes one move — pair swap, join, whole-table swap,
     /// cluster exchange, or table split (see [`SearchState`]) — skips it if
@@ -780,6 +900,12 @@ impl HeuristicOptimizer {
     /// [`LAHC_HISTORY_LEN`] steps earlier.
     /// Every candidate is legal by construction (locks, `table_type`,
     /// capacity, no double booking), so scoring skips validation.
+    ///
+    /// When the current segment goes [`stall_patience`] steps without
+    /// beating its own best, the search [kicks](Self::kick) the overall best
+    /// state and continues LAHC from there with the history reset to the
+    /// kicked score. Kicks always restart from the best, never from the
+    /// (possibly worse) state the stalled segment ended in.
     ///
     /// Guests with a `locked_seat` never move; guests with only a
     /// `locked_table` change seats within it, so a "head table" of
@@ -792,9 +918,10 @@ impl HeuristicOptimizer {
         config: &OptimizationConfig,
         positions: Vec<(usize, usize)>,
         seed: u64,
-    ) -> Vec<(usize, usize)> {
+        deadline: Option<Instant>,
+    ) -> (Vec<(usize, usize)>, usize) {
         if positions.is_empty() {
-            return positions;
+            return (positions, 1);
         }
         let mut rng = StdRng::seed_from_u64(seed);
         let mut state = SearchState::new(&project.people, &ctx.instances, positions);
@@ -806,8 +933,38 @@ impl HeuristicOptimizer {
         let mut history = vec![current; LAHC_HISTORY_LEN];
         let mut moves: Vec<Move> = Vec::new();
         let mut undo: Vec<Move> = Vec::new();
+        let table_lookup: HashMap<usize, &TableInstance> =
+            ctx.instances.iter().map(|t| (t.number, t)).collect();
+        let patience = stall_patience(project.people.len());
+        let mut segment_best = current;
+        let mut stalled = 0usize;
+        let mut segments = 1usize;
+        let max_steps = if deadline.is_some() {
+            usize::MAX
+        } else {
+            config.steps
+        };
 
-        for step in 0..config.steps {
+        for step in 0..max_steps {
+            if step % DEADLINE_CHECK_STEPS == 0 && deadline.is_some_and(|end| Instant::now() >= end)
+            {
+                break;
+            }
+            if stalled >= patience {
+                let kicked = self.kick(project, &ctx.instances, &table_lookup, &best, &mut rng);
+                state = SearchState::new(&project.people, &ctx.instances, kicked);
+                current = ctx.score_positions(&state.positions, config, &mut scratch, &mut ranks);
+                if current > best_score {
+                    best_score = current;
+                    best.copy_from_slice(&state.positions);
+                }
+                history.fill(current);
+                segment_best = current;
+                stalled = 0;
+                segments += 1;
+            }
+            stalled += 1;
+
             let slot = step % LAHC_HISTORY_LEN;
             moves.clear();
             let roll = rng.random_range(0..100u32);
@@ -842,6 +999,10 @@ impl HeuristicOptimizer {
             let score = ctx.score_positions(&state.positions, config, &mut scratch, &mut ranks);
             if score >= current || score >= history[slot] {
                 current = score;
+                if score > segment_best {
+                    segment_best = score;
+                    stalled = 0;
+                }
                 if score > best_score {
                     best_score = score;
                     best.copy_from_slice(&state.positions);
@@ -851,11 +1012,11 @@ impl HeuristicOptimizer {
             }
             history[slot] = current;
         }
-        best
+        (best, segments)
     }
 }
 
-/// Mutable state of one LAHC attempt: `positions[i]` is person `i`'s
+/// Mutable state of one LAHC chain: `positions[i]` is person `i`'s
 /// `(table_number, seat_index)`, mirrored by `seats[table_number - 1][seat]`
 /// for O(1) occupancy checks and cheap reverts.
 struct SearchState<'a> {
@@ -1231,23 +1392,23 @@ impl<'a> SearchState<'a> {
 }
 
 impl SeatingOptimizer for HeuristicOptimizer {
-    /// Run the multi-restart heuristic and return the best solutions.
+    /// Run the heuristic and return the best solutions.
     ///
-    /// Runs exactly `config.attempts.max(1)` independent random restarts.
-    /// Each attempt applies `config.steps` local improvement steps. Only the
+    /// Runs exactly `config.attempts.max(1)` independent search chains of
+    /// `config.steps` steps each, ignoring `config.time_limit_secs`. Only the
     /// top `config.solutions` solutions (by score) are returned.
     ///
-    /// Each attempt uses a distinct, deterministic seed derived from
+    /// Each chain uses a distinct, deterministic seed derived from
     /// `config.seed` so results are reproducible — see the determinism
-    /// contract documented on [`HeuristicOptimizer::optimize_timed`], which
-    /// this delegates to with no warm start and no deadline.
+    /// contract documented on [`HeuristicOptimizer::optimize_timed`]; this
+    /// is its untimed mode with no warm start.
     fn optimize(
         &self,
         project: &ProjectInput,
         config: &OptimizationConfig,
     ) -> Result<OptimizationResult, ValidationReport> {
         validate_project(project)?;
-        self.run_attempts(project, config, None, None)
+        self.run_chains(project, config, None, None)
     }
 }
 
@@ -1322,6 +1483,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn stall_patience_scales_with_guests_squared_above_its_floor() {
+        assert_eq!(stall_patience(81), 26_244);
+        assert_eq!(stall_patience(162), 104_976);
+        assert_eq!(stall_patience(0), PATIENCE_FLOOR);
+        assert_eq!(stall_patience(9), PATIENCE_FLOOR);
+        // 4 · 22² = 1936 is still under the floor; 4 · 23² = 2116 is not.
+        assert_eq!(stall_patience(22), PATIENCE_FLOOR);
+        assert_eq!(stall_patience(23), 2_116);
+    }
+
+    /// Same fixture as the first `open_extra_table` test: the capacity-filling
+    /// start uses two of three tables and `lt1`/`ls1` are locked. Across many
+    /// kick seeds, every kicked seating must stay valid with the locks
+    /// intact, and the kicks must both change the seating and, sometimes,
+    /// open the third table.
+    #[test]
+    fn kick_keeps_seating_valid_and_locked_guests_in_place() {
+        let project = make_project(
+            "id,name,table_type,groups,locked_table,locked_seat\n\
+             lt1,LT1,,,1,\n\
+             ls1,LS1,,,2,0\n\
+             r1,R1,,,,\nr2,R2,,,,\nr3,R3,,,,\nr4,R4,,,,\nr5,R5,,,,\n\
+             r6,R6,,,,\nr7,R7,,,,\nr8,R8,,,,\nr9,R9,,,,\nr10,R10,,,,\n",
+            "left_id,right_id,score\n",
+            "table_type_id,shape,max_people,recommended_people,min_people,number_of_tables,people_per_side\nrt,round,6,,3,3,\n",
+        )
+        .unwrap();
+        let instances = generate_table_instances(&project);
+        let table_lookup: HashMap<usize, &TableInstance> =
+            instances.iter().map(|t| (t.number, t)).collect();
+        let optimizer = HeuristicOptimizer;
+        let start = optimizer
+            .random_feasible_assignment(&project, &instances, 11, false)
+            .unwrap();
+        let tables_at_start = used_table_counts(&start).len();
+        let lt1 = project.people.iter().position(|p| p.id == "lt1").unwrap();
+        let ls1 = project.people.iter().position(|p| p.id == "ls1").unwrap();
+
+        let mut changed = false;
+        let mut opened = false;
+        for seed in 0..100u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let kicked = optimizer.kick(&project, &instances, &table_lookup, &start, &mut rng);
+
+            let assignments = optimizer.build_assignments(&project, &instances, &kicked);
+            validate_seating_solution(&project, &assignments)
+                .unwrap_or_else(|report| panic!("seed {seed}: invalid kick: {report:?}"));
+            assert_eq!(kicked[lt1].0, 1, "seed {seed}");
+            assert_eq!(kicked[ls1], (2, 0), "seed {seed}");
+
+            changed |= kicked != start;
+            opened |= used_table_counts(&kicked).len() > tables_at_start;
+        }
+        assert!(changed, "no kick changed the seating");
+        assert!(opened, "no kick opened the empty table");
     }
 
     /// Fallback: every table is already in use, so there is nothing for
