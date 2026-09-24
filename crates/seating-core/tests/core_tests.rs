@@ -1,5 +1,5 @@
 use seating_core::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -5360,6 +5360,316 @@ fn ensure_spare_tables_is_none_when_a_limited_type_is_at_its_limit() {
     // for `ensure_spare_tables` to grow into; the whole cap is already
     // materialized from the start, and once full, it stays full.
     assert_eq!(ensure_spare_tables(&project, &assignments), None);
+}
+
+// ── Table retype (relocate_table / split_table) ─────────────────────────────
+
+fn retype_person(id: &str) -> Person {
+    Person {
+        id: id.to_string(),
+        name: id.to_string(),
+        table_type: None,
+        groups: vec![],
+        locked_table: None,
+        locked_seat: None,
+    }
+}
+
+/// Type "big" (max 6, one instance -> table 1) and type "small" (max
+/// `small_max_people`, `small_number_of_tables` instances -> tables 2, 3,
+/// ...). `count` guests ("p1".."pN") sit at table 1, assigned to
+/// `assignments` in *reverse* seat order (`assignments[0]` holds the
+/// highest seat index) so a relocation that used `assignments`' own order
+/// instead of sorting by `seat_index` would misorder the group.
+fn retype_project(
+    count: usize,
+    small_max_people: usize,
+    small_number_of_tables: Option<usize>,
+) -> (ProjectInput, Vec<SeatingAssignment>) {
+    let table_types = build_table_type_map(vec![
+        (
+            "big".to_string(),
+            TableTypeConfig {
+                shape: TableShape::Round,
+                people_per_side: None,
+                max_people: 6,
+                recommended_people: None,
+                min_people: None,
+                number_of_tables: Some(1),
+            },
+        ),
+        (
+            "small".to_string(),
+            TableTypeConfig {
+                shape: TableShape::Round,
+                people_per_side: None,
+                max_people: small_max_people,
+                recommended_people: None,
+                min_people: None,
+                number_of_tables: small_number_of_tables,
+            },
+        ),
+    ])
+    .unwrap();
+    let people: Vec<Person> = (1..=count)
+        .map(|i| retype_person(&format!("p{i}")))
+        .collect();
+    let assignments: Vec<SeatingAssignment> = (1..=count)
+        .rev()
+        .map(|i| SeatingAssignment {
+            table_number: 1,
+            table_type: "big".to_string(),
+            seat_index: i - 1,
+            person_id: format!("p{i}"),
+            person_name: format!("p{i}"),
+        })
+        .collect();
+    let project = ProjectInput {
+        people,
+        closeness_rules: vec![],
+        table_types,
+        table_order: Vec::new(),
+    };
+    (project, assignments)
+}
+
+/// The default fixture: "small" max 2, two instances (tables 2, 3).
+fn retype_fixture(count: usize) -> (ProjectInput, Vec<SeatingAssignment>) {
+    retype_project(count, 2, Some(2))
+}
+
+#[test]
+fn relocate_table_moves_every_occupant_in_seat_order_to_the_first_free_instance() {
+    // `retype_fixture` seats p1/p2 in *reverse* seat order in `assignments`
+    // (assignments[0] is p2 at seat_index 1, assignments[1] is p1 at seat
+    // index 0) — a relocation that used `assignments`' own order instead of
+    // sorting by `seat_index` would swap p1 and p2 below.
+    let (project, assignments) = retype_fixture(2);
+
+    let relocation = relocate_table(&project, &assignments, 1, "small").unwrap();
+
+    assert_eq!(relocation.tables, vec![2]);
+    assert_eq!(relocation.table_order, None);
+    assert!(relocation.assignments.iter().all(|a| a.table_number != 1));
+    let p1 = relocation
+        .assignments
+        .iter()
+        .find(|a| a.person_id == "p1")
+        .unwrap();
+    assert_eq!((p1.table_number, p1.seat_index), (2, 0));
+    let p2 = relocation
+        .assignments
+        .iter()
+        .find(|a| a.person_id == "p2")
+        .unwrap();
+    assert_eq!((p2.table_number, p2.seat_index), (2, 1));
+
+    validate_partial_seating_solution(&project, &relocation.assignments).unwrap();
+}
+
+#[test]
+fn relocate_table_reports_capacity_exceeded_when_the_group_outgrows_the_target() {
+    let (project, assignments) = retype_fixture(3);
+
+    let report = relocate_table(&project, &assignments, 1, "small").unwrap_err();
+
+    assert_eq!(report.errors.len(), 1);
+    assert!(matches!(
+        report.errors[0],
+        ValidationError::TableCapacityExceeded {
+            table_number: 2,
+            count: 3,
+            capacity: 2,
+        }
+    ));
+}
+
+#[test]
+fn split_table_divides_the_group_in_seat_order_across_two_free_instances() {
+    let (project, assignments) = retype_fixture(3);
+
+    let relocation = split_table(&project, &assignments, 1, "small").unwrap();
+
+    assert_eq!(relocation.tables, vec![2, 3]);
+    assert_eq!(relocation.table_order, None);
+    let by_person: HashMap<&str, &SeatingAssignment> = relocation
+        .assignments
+        .iter()
+        .map(|a| (a.person_id.as_str(), a))
+        .collect();
+    assert_eq!(
+        (by_person["p1"].table_number, by_person["p1"].seat_index),
+        (2, 0)
+    );
+    assert_eq!(
+        (by_person["p2"].table_number, by_person["p2"].seat_index),
+        (2, 1)
+    );
+    assert_eq!(
+        (by_person["p3"].table_number, by_person["p3"].seat_index),
+        (3, 0)
+    );
+
+    validate_partial_seating_solution(&project, &relocation.assignments).unwrap();
+}
+
+#[test]
+fn split_table_reports_capacity_exceeded_beyond_twice_the_target_capacity() {
+    let (project, assignments) = retype_fixture(5);
+
+    let report = split_table(&project, &assignments, 1, "small").unwrap_err();
+
+    assert_eq!(report.errors.len(), 1);
+    assert!(matches!(
+        report.errors[0],
+        ValidationError::TableCapacityExceeded {
+            table_number: 2,
+            count: 3,
+            capacity: 2,
+        }
+    ));
+}
+
+#[test]
+fn split_table_reports_no_free_table_of_a_full_limited_type() {
+    let (project, assignments) = retype_project(2, 2, Some(1));
+
+    let report = split_table(&project, &assignments, 1, "small").unwrap_err();
+
+    assert_eq!(report.errors.len(), 1);
+    assert!(matches!(
+        &report.errors[0],
+        ValidationError::NoFreeTableOfType {
+            table_type,
+            needed: 2,
+            free: 1,
+        } if table_type == "small"
+    ));
+}
+
+#[test]
+fn split_table_grows_an_unlimited_target_type() {
+    let (project, assignments) = retype_project(4, 4, None);
+
+    let relocation = split_table(&project, &assignments, 1, "small").unwrap();
+
+    assert_eq!(
+        relocation.table_order,
+        Some(vec![
+            "big".to_string(),
+            "small".to_string(),
+            "small".to_string()
+        ])
+    );
+    assert_eq!(relocation.tables, vec![2, 3]);
+
+    let mut grown_project = project.clone();
+    grown_project.table_order = relocation.table_order.clone().unwrap();
+    validate_partial_seating_solution(&grown_project, &relocation.assignments).unwrap();
+}
+
+#[test]
+fn relocate_table_refuses_a_locked_table_guest_and_skips_a_reserved_instance() {
+    let (mut project, assignments) = retype_fixture(2);
+    project.people[0].locked_table = Some(1);
+
+    let report = relocate_table(&project, &assignments, 1, "small").unwrap_err();
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::SeatingViolatesLockedTable { .. }))
+    );
+
+    // Same group, no lock on the movers, but a third (unassigned) guest is
+    // locked to table 2 — the unlocked group must skip it and land on 3.
+    let (mut project, assignments) = retype_fixture(2);
+    project.people.push(Person {
+        locked_table: Some(2),
+        ..retype_person("p3")
+    });
+
+    let relocation = relocate_table(&project, &assignments, 1, "small").unwrap();
+    assert_eq!(relocation.tables, vec![3]);
+    validate_partial_seating_solution(&project, &relocation.assignments).unwrap();
+}
+
+/// A guest already seated at the first free instance of the destination
+/// type (table 2) is skipped, not displaced — the group lands on table 3
+/// instead, and the table-2 guest's own assignment is untouched.
+#[test]
+fn relocate_table_skips_an_already_occupied_instance_of_the_destination_type() {
+    let (mut project, mut assignments) = retype_fixture(1);
+    project.people.push(retype_person("q1"));
+    assignments.push(SeatingAssignment {
+        table_number: 2,
+        table_type: "small".to_string(),
+        seat_index: 0,
+        person_id: "q1".to_string(),
+        person_name: "q1".to_string(),
+    });
+
+    let relocation = relocate_table(&project, &assignments, 1, "small").unwrap();
+
+    assert_eq!(relocation.tables, vec![3]);
+    let q1 = relocation
+        .assignments
+        .iter()
+        .find(|a| a.person_id == "q1")
+        .unwrap();
+    assert_eq!((q1.table_number, q1.seat_index), (2, 0));
+    validate_partial_seating_solution(&project, &relocation.assignments).unwrap();
+}
+
+/// `relocate_table` (like `split_table`) grows an unlimited destination type
+/// when its only instance is already occupied by someone outside the group.
+#[test]
+fn relocate_table_grows_an_unlimited_target_type_when_its_only_instance_is_occupied() {
+    let (mut project, mut assignments) = retype_project(1, 4, None);
+    project.people.push(retype_person("q1"));
+    assignments.push(SeatingAssignment {
+        table_number: 2,
+        table_type: "small".to_string(),
+        seat_index: 0,
+        person_id: "q1".to_string(),
+        person_name: "q1".to_string(),
+    });
+
+    let relocation = relocate_table(&project, &assignments, 1, "small").unwrap();
+
+    assert_eq!(
+        relocation.table_order,
+        Some(vec![
+            "big".to_string(),
+            "small".to_string(),
+            "small".to_string()
+        ])
+    );
+    assert_eq!(relocation.tables, vec![3]);
+
+    let mut grown_project = project.clone();
+    grown_project.table_order = relocation.table_order.clone().unwrap();
+    validate_partial_seating_solution(&grown_project, &relocation.assignments).unwrap();
+}
+
+/// An unknown destination type has zero free instances and can't grow (it
+/// isn't a table type at all), so it reports `NoFreeTableOfType` with
+/// `free: 0`.
+#[test]
+fn relocate_table_reports_no_free_table_for_an_unknown_type() {
+    let (project, assignments) = retype_fixture(1);
+
+    let report = relocate_table(&project, &assignments, 1, "nonexistent").unwrap_err();
+
+    assert_eq!(report.errors.len(), 1);
+    assert!(matches!(
+        &report.errors[0],
+        ValidationError::NoFreeTableOfType {
+            table_type,
+            needed: 1,
+            free: 0,
+        } if table_type == "nonexistent"
+    ));
 }
 
 // ── Table order ───────────────────────────────────────────────────────────

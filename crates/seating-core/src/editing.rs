@@ -769,6 +769,184 @@ pub fn ensure_spare_tables(
     grew.then_some(order)
 }
 
+// ── Table retype ──────────────────────────────────────────────────────────────
+
+/// Outcome of [`relocate_table`]/[`split_table`]: the group's occupants moved
+/// to one or two free instances of the destination type.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableRelocation {
+    pub assignments: Vec<SeatingAssignment>,
+    /// Some only when an unlimited target type had to grow to fit; the
+    /// caller stores it in [`ProjectInput::table_order`].
+    pub table_order: Option<Vec<TableTypeId>>,
+    /// Destination table numbers, ascending (one for [`relocate_table`], two
+    /// for [`split_table`]).
+    pub tables: Vec<usize>,
+}
+
+/// Move every occupant of `from_table` to the first free instance of
+/// `to_type`, preserving their relative seat order.
+///
+/// "Free" means unoccupied by any current assignment and not the
+/// `locked_table` of any guest (same rule [`compact_table_numbers`] uses for
+/// `locked_numbers`), so a reserved-but-empty table is skipped rather than
+/// silently taken over. If `to_type` doesn't have enough free instances and
+/// is a *limited* type (or is not a known table type at all), fails with
+/// [`ValidationError::NoFreeTableOfType`]; if `to_type` is *unlimited*, it is
+/// grown by appending occurrences to the table order first (see
+/// [`ensure_spare_tables`] for the same append-only growth rule). If the
+/// group doesn't fit in a single instance of `to_type`, fails with
+/// [`ValidationError::TableCapacityExceeded`] instead — the GUI uses that to
+/// offer splitting the group across two tables via [`split_table`].
+///
+/// `from_table` is left empty; the input `assignments` are never mutated on
+/// failure. The result is checked with
+/// [`validate_partial_seating_solution`], so a locked guest at `from_table`
+/// blocks the move with [`ValidationError::SeatingViolatesLockedTable`]/
+/// [`ValidationError::SeatingViolatesLockedSeat`].
+///
+/// Capacity is checked *before* that lock/type validation, so a group too
+/// big for `to_type` reports [`ValidationError::TableCapacityExceeded`] even
+/// if it also contains a locked or type-restricted guest — the caller (the
+/// GUI) sees the capacity error first and offers [`split_table`]; only once
+/// the group actually fits does the lock/type conflict surface, on that
+/// later call. An unoccupied `from_table` is not an error: this returns
+/// `Ok` with nothing moved, though an unlimited `to_type` may still have
+/// grown its `table_order` to satisfy the (zero-sized) request.
+pub fn relocate_table(
+    project: &ProjectInput,
+    assignments: &[SeatingAssignment],
+    from_table: usize,
+    to_type: &str,
+) -> Result<TableRelocation, ValidationReport> {
+    relocate_into(project, assignments, from_table, to_type, 1)
+}
+
+/// Split every occupant of `from_table` across two free instances of
+/// `to_type`, in seat order — the first `ceil(n / 2)` occupants go to the
+/// lower-numbered destination table, the rest to the other.
+///
+/// Otherwise identical to [`relocate_table`] (free-instance selection,
+/// growth of an unlimited destination type, capacity/lock validation) except
+/// it needs two free instances instead of one, and reports
+/// [`ValidationError::TableCapacityExceeded`] only if a *half* of the group
+/// still doesn't fit.
+pub fn split_table(
+    project: &ProjectInput,
+    assignments: &[SeatingAssignment],
+    from_table: usize,
+    to_type: &str,
+) -> Result<TableRelocation, ValidationReport> {
+    relocate_into(project, assignments, from_table, to_type, 2)
+}
+
+/// Table numbers, in table-number order, of type `to_type` that are
+/// currently unoccupied and not any guest's `locked_table`.
+fn free_table_numbers_of_type(
+    project: &ProjectInput,
+    assignments: &[SeatingAssignment],
+    to_type: &str,
+) -> Vec<usize> {
+    let used_numbers: HashSet<usize> = assignments.iter().map(|a| a.table_number).collect();
+    let locked_numbers: HashSet<usize> = project
+        .people
+        .iter()
+        .filter_map(|p| p.locked_table)
+        .collect();
+    generate_table_instances(project)
+        .into_iter()
+        .filter(|instance| instance.table_type == to_type)
+        .filter(|instance| {
+            !used_numbers.contains(&instance.number) && !locked_numbers.contains(&instance.number)
+        })
+        .map(|instance| instance.number)
+        .collect()
+}
+
+/// Shared implementation for [`relocate_table`] (`parts == 1`) and
+/// [`split_table`] (`parts == 2`); see their docs for behavior.
+fn relocate_into(
+    project: &ProjectInput,
+    assignments: &[SeatingAssignment],
+    from_table: usize,
+    to_type: &str,
+    parts: usize,
+) -> Result<TableRelocation, ValidationReport> {
+    let mut occupant_indices: Vec<usize> = (0..assignments.len())
+        .filter(|&i| assignments[i].table_number == from_table)
+        .collect();
+    occupant_indices.sort_by_key(|&i| assignments[i].seat_index);
+    let occupant_count = occupant_indices.len();
+
+    let mut free = free_table_numbers_of_type(project, assignments, to_type);
+    let mut table_order = None;
+    let mut grown_project = None;
+
+    if free.len() < parts {
+        let can_grow = project
+            .table_types
+            .get(to_type)
+            .is_some_and(|cfg| cfg.number_of_tables.is_none());
+        if can_grow {
+            let mut order = current_table_order(project);
+            for _ in 0..(parts - free.len()) {
+                order.push(to_type.to_string());
+            }
+            let mut grown = project.clone();
+            grown.table_order = order.clone();
+            free = free_table_numbers_of_type(&grown, assignments, to_type);
+            table_order = Some(order);
+            grown_project = Some(grown);
+        }
+    }
+
+    if free.len() < parts {
+        return Err(ValidationReport {
+            errors: vec![ValidationError::NoFreeTableOfType {
+                table_type: to_type.to_string(),
+                needed: parts,
+                free: free.len(),
+            }],
+        });
+    }
+
+    let validation_project = grown_project.as_ref().unwrap_or(project);
+    // `free` is non-empty here, so `to_type` must be a known table type.
+    let max_people = validation_project
+        .table_types
+        .get(to_type)
+        .map(|cfg| cfg.max_people)
+        .unwrap_or(0);
+    let size = occupant_count.div_ceil(parts);
+    if size > max_people {
+        return Err(ValidationReport {
+            errors: vec![ValidationError::TableCapacityExceeded {
+                table_number: free[0],
+                count: size,
+                capacity: max_people,
+            }],
+        });
+    }
+
+    // `size` is only ever 0 when there are no occupants to move, in which
+    // case `occupant_indices` is empty and this loop never divides by it.
+    let mut updated = assignments.to_vec();
+    for (rank, &occupant_index) in occupant_indices.iter().enumerate() {
+        let table_number = free[rank / size];
+        updated[occupant_index].table_number = table_number;
+        updated[occupant_index].table_type = to_type.to_string();
+        updated[occupant_index].seat_index = rank % size;
+    }
+
+    validate_partial_seating_solution(validation_project, &updated)?;
+
+    Ok(TableRelocation {
+        assignments: updated,
+        table_order,
+        tables: free.into_iter().take(parts).collect(),
+    })
+}
+
 // ── Table compaction ──────────────────────────────────────────────────────────
 
 /// Renumber tables so every occupied table sorts before every empty one,
@@ -876,6 +1054,7 @@ impl ValidationError {
             ValidationError::SeatingViolatesLockedSeat { person_id, .. } => Some(person_id),
             ValidationError::LockedGuestDisplaced(id) => Some(id),
             ValidationError::LockedGuestUnassigned(id) => Some(id),
+            ValidationError::NoFreeTableOfType { .. } => None,
             ValidationError::DuplicateTableTypeId(_)
             | ValidationError::EmptyTableTypeId
             | ValidationError::EmptyPersonId
@@ -921,6 +1100,7 @@ impl ValidationError {
             ValidationError::SeatingPersonTableTypeMismatch { required_type, .. } => {
                 Some(required_type)
             }
+            ValidationError::NoFreeTableOfType { table_type, .. } => Some(table_type),
             ValidationError::EmptyTableTypeId
             | ValidationError::EmptyPersonId
             | ValidationError::DuplicatePersonId(_)
@@ -996,7 +1176,8 @@ impl ValidationError {
             | ValidationError::SeatingViolatesLockedTable { .. }
             | ValidationError::SeatingViolatesLockedSeat { .. }
             | ValidationError::LockedGuestDisplaced(_)
-            | ValidationError::LockedGuestUnassigned(_) => None,
+            | ValidationError::LockedGuestUnassigned(_)
+            | ValidationError::NoFreeTableOfType { .. } => None,
         }
     }
 }
