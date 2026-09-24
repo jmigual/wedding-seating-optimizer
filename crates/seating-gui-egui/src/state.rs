@@ -133,6 +133,9 @@ pub(crate) struct SharedState {
     /// View-only toggle for whether empty (unoccupied) tables render on the
     /// canvas. Not persisted in the project file.
     pub(crate) show_empty_tables: bool,
+    /// View-only guest-name label size on the canvas and in exports; table
+    /// cards grow with it. Not persisted in the project file.
+    pub(crate) label_font_size: f32,
     pub(crate) validation: Vec<ValidationError>,
     pub(crate) generated_table_numbers: Vec<usize>,
     pub(crate) table_capacities: BTreeMap<usize, usize>,
@@ -167,6 +170,7 @@ impl SharedState {
             assignments: Vec::new(),
             layout: None,
             show_empty_tables: true,
+            label_font_size: RenderOptions::default().label_font_size,
             validation: Vec::new(),
             generated_table_numbers: Vec::new(),
             table_capacities: BTreeMap::new(),
@@ -476,6 +480,15 @@ impl SharedState {
         self.dirty = false;
     }
 
+    /// Layout/render options for the canvas and exports: core defaults with
+    /// the user's label size.
+    pub(crate) fn render_options(&self) -> RenderOptions {
+        RenderOptions {
+            label_font_size: self.label_font_size,
+            ..RenderOptions::default()
+        }
+    }
+
     /// Recompute derived state (generated tables, validation, layout, score)
     /// from the current editable fields. Does not touch `dirty`; user edits
     /// should go through [`Self::refresh`] instead. `pub(crate)` so the
@@ -514,7 +527,7 @@ impl SharedState {
             &project,
             &self.assignments,
             self.show_empty_tables,
-            &RenderOptions::default(),
+            &self.render_options(),
         ) {
             Ok(layout) => self.layout = Some(layout),
             Err(error) => self.set_message(

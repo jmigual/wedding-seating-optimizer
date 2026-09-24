@@ -6,28 +6,24 @@
 
 use crate::state::{ClosenessRow, MessageKind, SharedState};
 use eframe::egui::{
-    self, Align2, Color32, FontId, Galley, Id, LayerId, Order, Pos2, Rect, ScrollArea, Sense,
-    Stroke, StrokeKind, UiBuilder, Vec2,
+    self, Align2, Color32, FontId, Id, LayerId, Order, Pos2, Rect, ScrollArea, Sense, Stroke,
+    StrokeKind, UiBuilder, Vec2,
 };
 use seating_core::{
     COLOR_BACKGROUND, COLOR_CARD, COLOR_GUEST_TEXT, COLOR_MUTED, COLOR_SEAT_FILL,
-    COLOR_SEAT_STROKE, COLOR_STROKE, COLOR_TABLE_FILL, COLOR_TABLE_STROKE, LayoutSeat, LayoutTable,
-    Person, ProjectInput, RenderOptions, SeatDropOutcome, SeatingAssignment, SeatingLayout,
-    TableSurface, apply_seat_append, apply_seat_drop, build_layout, compact_table_numbers,
-    min_seat_spacing, render_png, render_svg, swap_table_numbers, unassign_person,
-    unassigned_people,
+    COLOR_SEAT_STROKE, COLOR_STROKE, COLOR_TABLE_FILL, COLOR_TABLE_STROKE, LabelAlign, LayoutSeat,
+    LayoutTable, MIN_LABEL_FONT_SIZE, Person, ProjectInput, RenderOptions, SeatDropOutcome,
+    SeatingAssignment, SeatingLayout, TableSurface, apply_seat_append, apply_seat_drop,
+    build_layout, compact_table_numbers, render_png, render_svg, seat_label, swap_table_numbers,
+    unassign_person, unassigned_people,
 };
 use std::collections::HashMap;
-use std::sync::Arc;
 
 const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 3.0;
 const TOAST_LIFETIME: f64 = 2.2;
-/// Floor for the name-label wrap width, in the same layout units as
-/// `LayoutSeat::x`/`y` (i.e. before zoom or the label font scale are
-/// applied), so a table with tightly packed seats can't wrap a guest's name
-/// down to single letters.
-const NAME_WRAP_MIN_LAYOUT: f32 = 40.0;
+/// Largest guest-name label size the toolbar's "Names" slider allows.
+const MAX_LABEL_FONT_SIZE: f32 = 16.0;
 /// Fixed height, in screen pixels, reserved for the "Unassigned" band at the
 /// bottom of the canvas when at least one guest is unassigned. Unlike the
 /// rest of the canvas, the band ignores zoom/pan.
@@ -171,6 +167,19 @@ fn toolbar(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui::Ui)
         ui.label(format!("{:.0}%", state.zoom * 100.0));
         if ui.button("+").clicked() {
             state.zoom = (state.zoom * 1.25).clamp(MIN_ZOOM, MAX_ZOOM);
+        }
+        // Cards grow with the label size, so a change rebuilds the layout.
+        if ui
+            .add(
+                egui::Slider::new(
+                    &mut shared.label_font_size,
+                    MIN_LABEL_FONT_SIZE..=MAX_LABEL_FONT_SIZE,
+                )
+                .text("Names"),
+            )
+            .changed()
+        {
+            shared.recompute();
         }
         ui.separator();
         if ui
@@ -353,27 +362,17 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
     let mut pending_lock: Option<(String, Option<usize>, Option<usize>)> = None;
     let mut pending_swap: Option<(usize, usize)> = None;
 
-    // Guest-name labels are collected here and painted once after every
-    // table/seat has been drawn, so a later seat, its drop-highlight disc,
-    // or the next table's card never paints over an earlier seat's label.
-    let mut pending_labels: Vec<(Pos2, Align2, Arc<Galley>, Color32)> = Vec::new();
-
-    // The label font size follows zoom down to a floor of 7.0; scale the
-    // wrap width by the same ratio (rather than raw zoom) so chars-per-line
-    // stays constant even once the font itself has floored out.
-    let name_font = (11.0 * state.zoom).max(7.0);
-    let name_font_scale = name_font / 11.0;
+    // Guest-name label lines are collected here and painted once after
+    // every table/seat has been drawn, so a later seat, its drop-highlight
+    // disc, or the next table's card never paints over an earlier seat's
+    // label.
+    let mut pending_labels: Vec<(Pos2, Align2, String, f32, Color32)> = Vec::new();
+    // Same options the layout was built with (see `SharedState::recompute`).
+    let options = shared.render_options();
 
     for table in &layout.tables {
         draw_table(&painter, table, transform, state.zoom);
 
-        // Wrap width for names radiating outward from each seat: the
-        // smallest center-to-center distance between two seats at this
-        // table (or the layout-unit floor for a lone-seat table), scaled
-        // by the label font's own zoom ratio.
-        let spacing = min_seat_spacing(&table.seats).unwrap_or(NAME_WRAP_MIN_LAYOUT);
-        let name_wrap_width = spacing.max(NAME_WRAP_MIN_LAYOUT) * name_font_scale;
-        let surface_center = surface_center_screen(&table.surface, transform);
         // Pre-highlight the locked-table guest's only legal table while
         // dragging — shared by this table's occupied seats and its
         // empty-row markers (an unassigned locked guest's table may have no
@@ -433,17 +432,34 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
                 state.zoom,
             );
 
-            if let Some(name) = seat.person_name.as_deref() {
+            // Measured at zoom 1 (layout units), so lines don't re-wrap
+            // while zooming.
+            if let Some(label) = seat_label(table, seat, &options, |text, size| {
+                painter
+                    .layout_no_wrap(
+                        text.to_owned(),
+                        FontId::proportional(size),
+                        Color32::PLACEHOLDER,
+                    )
+                    .size()
+                    .x
+            }) {
                 let name_color = faded(rgb(COLOR_GUEST_TEXT), seat_alpha(is_being_dragged));
-                let galley = painter.layout(
-                    name.to_string(),
-                    FontId::proportional(name_font),
-                    name_color,
-                    name_wrap_width,
-                );
-                let (anchor, align) =
-                    label_anchor(center, surface_center, radius, 2.0 * state.zoom);
-                pending_labels.push((anchor, align, galley, name_color));
+                let align = match label.align {
+                    LabelAlign::Start => Align2::LEFT_TOP,
+                    LabelAlign::Center => Align2::CENTER_TOP,
+                    LabelAlign::End => Align2::RIGHT_TOP,
+                };
+                for (index, line) in label.lines.into_iter().enumerate() {
+                    let line_top = label.top + index as f32 * label.line_height;
+                    pending_labels.push((
+                        transform.to_screen((label.x, line_top)),
+                        align,
+                        line,
+                        label.font_size * state.zoom,
+                        name_color,
+                    ));
+                }
             }
 
             let hit_rect = Rect::from_center_size(center, Vec2::splat((radius * 2.0).max(20.0)));
@@ -542,9 +558,8 @@ fn canvas_area(shared: &mut SharedState, state: &mut CanvasState, ui: &mut egui:
         }
     }
 
-    for (anchor, align, galley, color) in pending_labels {
-        let pos = align.anchor_size(anchor, galley.size()).min;
-        painter.galley(pos, galley, color);
+    for (pos, align, line, font_size, color) in pending_labels {
+        painter.text(pos, align, line, FontId::proportional(font_size), color);
     }
 
     // Tables render as soon as guests + a table type exist, even before the
@@ -937,52 +952,6 @@ fn find_seat_under(
         }
     }
     best.map(|(target, _)| target)
-}
-
-/// Screen-space center of a table's surface, for every [`TableSurface`]
-/// variant — the point guest-name labels radiate outward from.
-fn surface_center_screen(surface: &TableSurface, transform: Transform) -> Pos2 {
-    let center = match surface {
-        TableSurface::Round { cx, cy, .. } | TableSurface::Semicircle { cx, cy, .. } => (*cx, *cy),
-        TableSurface::Rect {
-            x,
-            y,
-            width,
-            height,
-        } => (x + width / 2.0, y + height / 2.0),
-    };
-    transform.to_screen(center)
-}
-
-/// Anchor point and alignment for a guest's name label, placed just outside
-/// the seat circle in the direction pointing away from the table's surface
-/// center. Radiating labels outward (rather than always dropping them
-/// straight down) keeps a ring table's labels spread apart like its seats,
-/// and keeps a semicircle's top-row labels off the table surface.
-///
-/// The offset moves along the dominant axis of that direction only (not
-/// diagonally): a diagonal seat still gets the full `radius + gap` of
-/// clearance on the axis that matters, instead of splitting it between both
-/// axes and landing the label closer to the seat circle (and its lock icon)
-/// than intended.
-fn label_anchor(seat_center: Pos2, surface_center: Pos2, radius: f32, gap: f32) -> (Pos2, Align2) {
-    let dir = (seat_center - surface_center).normalized();
-    let offset = radius + gap;
-    if dir.x.abs() > dir.y.abs() {
-        let align = if dir.x >= 0.0 {
-            Align2::LEFT_CENTER
-        } else {
-            Align2::RIGHT_CENTER
-        };
-        (seat_center + Vec2::new(dir.x.signum() * offset, 0.0), align)
-    } else {
-        let align = if dir.y >= 0.0 {
-            Align2::CENTER_TOP
-        } else {
-            Align2::CENTER_BOTTOM
-        };
-        (seat_center + Vec2::new(0.0, dir.y.signum() * offset), align)
-    }
 }
 
 /// Alpha multiplier for a seat's fill/text while it's mid-drag (dimmed) vs.
@@ -1432,14 +1401,14 @@ fn rule_endpoint_label<'a>(id: &'a str, shared: &'a SharedState) -> &'a str {
 /// tables that actually seat someone.
 fn export_layout(shared: &SharedState) -> Option<SeatingLayout> {
     let project = shared.materialize_project().ok()?;
-    build_layout(&project, &shared.assignments, &RenderOptions::default()).ok()
+    build_layout(&project, &shared.assignments, &shared.render_options()).ok()
 }
 
 fn export_svg(shared: &mut SharedState) {
     let Some(layout) = export_layout(shared) else {
         return;
     };
-    let svg = render_svg(&layout, &RenderOptions::default());
+    let svg = render_svg(&layout, &shared.render_options());
     let Some(path) = rfd::FileDialog::new()
         .set_file_name("seating.svg")
         .add_filter("SVG", &["svg"])
@@ -1467,7 +1436,7 @@ fn export_png(shared: &mut SharedState) {
     else {
         return;
     };
-    match render_png(&layout, &RenderOptions::default(), &path) {
+    match render_png(&layout, &shared.render_options(), &path) {
         Ok(()) => shared.set_message(
             MessageKind::Success,
             format!("Exported PNG to {}", path.display()),
