@@ -130,7 +130,6 @@ fn people_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
 
     if shared.people.is_empty() {
         ui.label(egui::RichText::new("No guests yet — click \"+ Add Person\" to start.").weak());
-        return;
     }
     while state.new_group_inputs.len() < shared.people.len() {
         state.new_group_inputs.push(String::new());
@@ -729,7 +728,6 @@ fn closeness_section(shared: &mut SharedState, ui: &mut egui::Ui) {
 
     if shared.closeness_rules.is_empty() {
         ui.label(egui::RichText::new("No closeness rules yet — click \"+ Add Rule\".").weak());
-        return;
     }
 
     let options = reference_id_options(&shared.people);
@@ -960,7 +958,6 @@ fn tables_section(shared: &mut SharedState, ui: &mut egui::Ui) {
 
     if shared.table_configs.is_empty() {
         ui.label(egui::RichText::new("No table types yet — click \"+ Add Table Type\".").weak());
-        return;
     }
 
     let mut delete_index = None;
