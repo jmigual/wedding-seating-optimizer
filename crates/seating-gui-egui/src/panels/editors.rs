@@ -483,7 +483,7 @@ fn locked_seat_field(
         let combo_response = egui::ComboBox::from_id_salt(("person_locked_seat", index))
             .selected_text(
                 current_seat
-                    .map(|s| s.to_string())
+                    .map(|s| (s + 1).to_string())
                     .unwrap_or_else(|| "(none)".to_string()),
             )
             .width(combo_width)
@@ -497,7 +497,10 @@ fn locked_seat_field(
                 }
                 for seat in 0..capacity.unwrap_or(0) {
                     let is_selected = current_seat == Some(seat);
-                    if ui.selectable_label(is_selected, seat.to_string()).clicked() {
+                    if ui
+                        .selectable_label(is_selected, (seat + 1).to_string())
+                        .clicked()
+                    {
                         shared.people[index].locked_seat = Some(seat);
                         changed = true;
                     }

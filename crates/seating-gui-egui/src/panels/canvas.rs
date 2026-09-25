@@ -876,7 +876,10 @@ fn seat_lock_menu(
 ) {
     if (person.locked_table != Some(table_number) || person.locked_seat != Some(seat_index))
         && ui
-            .button(format!("Lock to table {table_number}, seat {seat_index}"))
+            .button(format!(
+                "Lock to table {table_number}, seat {}",
+                seat_index + 1
+            ))
             .clicked()
     {
         *pending_lock = Some((person.id.clone(), Some(table_number), Some(seat_index)));
@@ -912,7 +915,7 @@ fn finish_lock(
     let name = person.name.clone();
     shared.refresh();
     let message = match (locked_table, locked_seat) {
-        (Some(t), Some(s)) => format!("Locked {name} to table {t}, seat {s}."),
+        (Some(t), Some(s)) => format!("Locked {name} to table {t}, seat {}.", s + 1),
         (Some(t), None) => format!("Locked {name} to table {t}."),
         _ => format!("Unlocked {name}."),
     };
@@ -954,8 +957,9 @@ fn finish_drop(
             shared.set_message(
                 MessageKind::Success,
                 format!(
-                    "{verb} {} to table {table_number}, seat {seat_index}.",
-                    drag.person_name
+                    "{verb} {} to table {table_number}, seat {}.",
+                    drag.person_name,
+                    seat_index + 1
                 ),
             );
         }
@@ -1007,8 +1011,9 @@ fn finish_append(
             }
             let message = match seat_index {
                 Some(seat_index) => format!(
-                    "Seated {} at table {table_number}, seat {seat_index}.",
-                    drag.person_name
+                    "Seated {} at table {table_number}, seat {}.",
+                    drag.person_name,
+                    seat_index + 1
                 ),
                 None => format!("Seated {} at table {table_number}.", drag.person_name),
             };
@@ -1278,7 +1283,7 @@ fn draw_seat(
     let base_font = 10.0 * zoom;
     let min_font = 5.0 * zoom;
     let text_color = faded(rgb(COLOR_BACKGROUND), alpha);
-    let index_text = seat.seat_index.to_string();
+    let index_text = (seat.seat_index + 1).to_string();
     let index_size = painter
         .layout_no_wrap(
             index_text.clone(),
@@ -1534,7 +1539,7 @@ fn person_tooltip(ui: &mut egui::Ui, person: &Person, shared: &SharedState) {
     }
     match (person.locked_table, person.locked_seat) {
         (Some(table), Some(seat)) => {
-            ui.label(format!("locked to table {table}, seat {seat}"));
+            ui.label(format!("locked to table {table}, seat {}", seat + 1));
         }
         (Some(table), None) => {
             ui.label(format!("locked to table {table}"));
