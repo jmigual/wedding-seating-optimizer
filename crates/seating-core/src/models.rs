@@ -366,13 +366,19 @@ pub enum ValidationError {
         person_id: String,
         table_number: usize,
     },
-    #[error("locked seat {seat} exceeds table capacity {capacity} for person '{person_id}'")]
+    #[error(
+        "locked seat {} exceeds table capacity {capacity} for person '{person_id}'",
+        .seat + 1
+    )]
     LockedSeatOutOfRange {
         person_id: String,
         seat: usize,
         capacity: usize,
     },
-    #[error("seat {seat} exceeds table capacity {capacity} for person '{person_id}'")]
+    #[error(
+        "seat {} exceeds table capacity {capacity} for person '{person_id}'",
+        .seat + 1
+    )]
     SeatIndexOutOfRange {
         person_id: String,
         seat: usize,
@@ -409,7 +415,10 @@ pub enum ValidationError {
     },
     #[error("table type '{table_type}' must have number_of_tables > 0 when provided (got {count})")]
     InvalidNumberOfTables { table_type: String, count: usize },
-    #[error("multiple people locked to same seat: table {table_number}, seat {seat}")]
+    #[error(
+        "multiple people locked to same seat: table {table_number}, seat {}",
+        .seat + 1
+    )]
     DuplicateLockedSeat { table_number: usize, seat: usize },
     #[error(
         "person '{person_id}' is locked to table {table_number} of type '{locked_type}', incompatible with required table_type '{required_type}'"
@@ -453,7 +462,10 @@ pub enum ValidationError {
     UnknownPersonInSeating(String),
     #[error("unknown table in seating output: {0}")]
     UnknownTableInSeating(usize),
-    #[error("seat collision in seating output: table {table_number}, seat {seat}")]
+    #[error(
+        "seat collision in seating output: table {table_number}, seat {}",
+        .seat + 1
+    )]
     SeatCollision { table_number: usize, seat: usize },
     #[error("table {table_number} exceeds capacity: {count} > {capacity}")]
     TableCapacityExceeded {
@@ -497,7 +509,9 @@ pub enum ValidationError {
     },
     /// A person with a locked seat is assigned to a different seat.
     #[error(
-        "person '{person_id}' must be at seat {locked_seat} but is placed at seat {assigned_seat}"
+        "person '{person_id}' must be at seat {} but is placed at seat {}",
+        .locked_seat + 1,
+        .assigned_seat + 1
     )]
     SeatingViolatesLockedSeat {
         person_id: String,
@@ -522,4 +536,31 @@ pub enum ValidationError {
         needed: usize,
         free: usize,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ValidationError;
+
+    #[test]
+    fn duplicate_locked_seat_displays_seat_as_one_based() {
+        let err = ValidationError::DuplicateLockedSeat {
+            table_number: 1,
+            seat: 0,
+        };
+        assert!(err.to_string().ends_with("seat 1"));
+    }
+
+    #[test]
+    fn seating_violates_locked_seat_displays_both_seats_as_one_based() {
+        let err = ValidationError::SeatingViolatesLockedSeat {
+            person_id: "alice".to_string(),
+            locked_seat: 0,
+            assigned_seat: 2,
+        };
+        assert_eq!(
+            err.to_string(),
+            "person 'alice' must be at seat 1 but is placed at seat 3"
+        );
+    }
 }
