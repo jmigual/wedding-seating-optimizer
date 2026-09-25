@@ -4605,12 +4605,54 @@ fn table_list_markdown_sorts_by_table_then_seat_with_one_based_seats() {
         markdown,
         "# Seating plan\n\
          \n\
-         ## Table 1 — round_4 (2 guests)\n\
+         ## Table 1 — round\\_4 (2 guests)\n\
          - Seat 1: Alice\n\
          - Seat 2: Bob\n\
          \n\
-         ## Table 2 — round_4 (1 guest)\n\
+         ## Table 2 — round\\_4 (1 guest)\n\
          - Seat 1: Carol\n"
+    );
+}
+
+#[test]
+fn table_list_markdown_escapes_commonmark_punctuation_in_names() {
+    let assignments = vec![SeatingAssignment {
+        table_number: 1,
+        table_type: "round_4".to_string(),
+        seat_index: 0,
+        person_id: "p1".to_string(),
+        person_name: "Ann *Bo* _Lee_ [x]".to_string(),
+    }];
+
+    let markdown = write_table_list_markdown(&assignments);
+
+    assert_eq!(
+        markdown,
+        "# Seating plan\n\
+         \n\
+         ## Table 1 — round\\_4 (1 guest)\n\
+         - Seat 1: Ann \\*Bo\\* \\_Lee\\_ \\[x\\]\n"
+    );
+}
+
+#[test]
+fn table_list_markdown_replaces_newlines_in_names_with_a_space() {
+    let assignments = vec![SeatingAssignment {
+        table_number: 1,
+        table_type: "round_4".to_string(),
+        seat_index: 0,
+        person_id: "p1".to_string(),
+        person_name: "Ann\r\nBo\nLee".to_string(),
+    }];
+
+    let markdown = write_table_list_markdown(&assignments);
+
+    assert_eq!(
+        markdown,
+        "# Seating plan\n\
+         \n\
+         ## Table 1 — round\\_4 (1 guest)\n\
+         - Seat 1: Ann  Bo Lee\n"
     );
 }
 
