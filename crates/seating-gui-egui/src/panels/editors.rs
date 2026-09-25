@@ -1130,44 +1130,53 @@ fn table_order_section(shared: &mut SharedState, ui: &mut egui::Ui) {
     let mut from_number: Option<usize> = None;
     let mut to_index: Option<usize> = None;
 
-    ui.dnd_drop_zone::<usize, _>(egui::Frame::default(), |ui| {
-        for (index, instance) in instances.iter().enumerate() {
-            let item_id = egui::Id::new(("table_order_row", instance.number));
-            let response = ui
-                .dnd_drag_source(item_id, instance.number, |ui| {
+    // Not `ui.dnd_drop_zone`: it always paints `self.visuals().widgets.*.bg_fill`
+    // behind its whole contents regardless of the `Frame` passed in (egui 0.35
+    // `Ui::dnd_drop_zone`, egui-0.35.0/src/ui.rs — `frame.frame.fill = fill;` runs
+    // unconditionally after `begin`), which is the one grey background that made
+    // every row blend together. It's also functionally unnecessary here:
+    // `Response::dnd_hover_payload`/`dnd_release_payload` key off
+    // `contains_pointer()` and the global drag payload, not zone membership, so each
+    // row below already detects hover/drop on its own.
+    for (index, instance) in instances.iter().enumerate() {
+        let item_id = egui::Id::new(("table_order_row", instance.number));
+        let response = ui
+            .dnd_drag_source(item_id, instance.number, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(DRAG_HANDLE_GLYPH);
                     ui.label(format!(
                         "Table {} — {} ({})",
                         instance.number,
                         instance.table_type,
                         table_shape_label(&instance.shape)
                     ));
-                })
-                .response;
+                });
+            })
+            .response;
 
-            if let (Some(pointer), Some(hovered)) = (
-                ui.ctx().input(|i| i.pointer.interact_pos()),
-                response.dnd_hover_payload::<usize>(),
-            ) {
-                let rect = response.rect;
-                let stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(90, 200, 120));
-                let insert_index = if *hovered == instance.number {
-                    ui.painter().hline(rect.x_range(), rect.center().y, stroke);
-                    index
-                } else if pointer.y < rect.center().y {
-                    ui.painter().hline(rect.x_range(), rect.top(), stroke);
-                    index
-                } else {
-                    ui.painter().hline(rect.x_range(), rect.bottom(), stroke);
-                    index + 1
-                };
+        if let (Some(pointer), Some(hovered)) = (
+            ui.ctx().input(|i| i.pointer.interact_pos()),
+            response.dnd_hover_payload::<usize>(),
+        ) {
+            let rect = response.rect;
+            let stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(90, 200, 120));
+            let insert_index = if *hovered == instance.number {
+                ui.painter().hline(rect.x_range(), rect.center().y, stroke);
+                index
+            } else if pointer.y < rect.center().y {
+                ui.painter().hline(rect.x_range(), rect.top(), stroke);
+                index
+            } else {
+                ui.painter().hline(rect.x_range(), rect.bottom(), stroke);
+                index + 1
+            };
 
-                if let Some(dragged) = response.dnd_release_payload::<usize>() {
-                    from_number = Some(*dragged);
-                    to_index = Some(insert_index);
-                }
+            if let Some(dragged) = response.dnd_release_payload::<usize>() {
+                from_number = Some(*dragged);
+                to_index = Some(insert_index);
             }
         }
-    });
+    }
 
     let (Some(from_number), Some(mut to_index)) = (from_number, to_index) else {
         return;
