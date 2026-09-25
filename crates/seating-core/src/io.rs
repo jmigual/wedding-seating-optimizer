@@ -426,12 +426,32 @@ fn sorted_by_table_seat(assignments: &[SeatingAssignment]) -> Vec<&SeatingAssign
     sorted
 }
 
+/// Backslash-escape CommonMark-significant ASCII punctuation in `text` so it
+/// can't change inline rendering when embedded in a Markdown heading or list
+/// item, and replace `\r`/`\n` with a space so it can't break the list
+/// structure. Punctuation like `.`, `-`, `(` is left alone since it's
+/// harmless in these positions (the text never starts a line).
+fn escape_markdown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '#' | '|' | '~' | '&' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\r' | '\n' => out.push(' '),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Render a list of [`SeatingAssignment`] records as a Markdown table list:
 /// one `## Table N — <type> (k guests)` section per table, sorted by table
 /// number, followed by one `- Seat S: Name` line per guest, sorted by seat.
 /// Seat numbers are 1-based for display; the stored
-/// [`SeatingAssignment::seat_index`] stays 0-based. Guest names are not
-/// Markdown-escaped; tables with no guests are omitted.
+/// [`SeatingAssignment::seat_index`] stays 0-based. Guest names and table
+/// types are Markdown-escaped; tables with no guests are omitted.
 pub fn write_table_list_markdown(assignments: &[SeatingAssignment]) -> String {
     let sorted = sorted_by_table_seat(assignments);
 
@@ -442,11 +462,15 @@ pub fn write_table_list_markdown(assignments: &[SeatingAssignment]) -> String {
         out.push_str(&format!(
             "\n## Table {} — {} ({} {guest_word})\n",
             first.table_number,
-            first.table_type,
+            escape_markdown(&first.table_type),
             table.len()
         ));
         for a in table {
-            out.push_str(&format!("- Seat {}: {}\n", a.seat_index + 1, a.person_name));
+            out.push_str(&format!(
+                "- Seat {}: {}\n",
+                a.seat_index + 1,
+                escape_markdown(&a.person_name)
+            ));
         }
     }
     out
