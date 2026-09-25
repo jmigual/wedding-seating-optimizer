@@ -60,9 +60,10 @@ pub use editing::{
     unassign_person, unassigned_people,
 };
 pub use io::{
-    CLOSENESS_CSV_HEADER, PEOPLE_CSV_HEADER, SEATING_CSV_HEADER, TABLES_CSV_HEADER, make_project,
-    parse_closeness_csv, parse_people_csv, parse_project_file, parse_seating_csv, parse_tables_csv,
-    write_closeness_csv, write_people_csv, write_project_file, write_seating_csv, write_tables_csv,
+    CLOSENESS_CSV_HEADER, PEOPLE_CSV_HEADER, SEATING_CSV_HEADER, TABLE_LIST_CSV_HEADER,
+    TABLES_CSV_HEADER, make_project, parse_closeness_csv, parse_people_csv, parse_project_file,
+    parse_seating_csv, parse_tables_csv, write_closeness_csv, write_people_csv, write_project_file,
+    write_seating_csv, write_table_list_csv, write_table_list_markdown, write_tables_csv,
 };
 pub use models::{
     ClosenessRule, GroupId, OptimizationConfig, OptimizationResult, PROJECT_FILE_VERSION, Person,

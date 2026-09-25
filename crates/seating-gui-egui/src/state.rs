@@ -14,7 +14,8 @@ use seating_core::{
     merge_table_types, parse_closeness_csv, parse_f64_value, parse_optional_usize_value,
     parse_people_csv, parse_people_per_side, parse_project_file, parse_required_usize_value,
     parse_tables_csv, score_solution_breakdown, validate_partial_seating_solution,
-    validate_project, write_closeness_csv, write_people_csv, write_project_file, write_tables_csv,
+    validate_project, write_closeness_csv, write_people_csv, write_project_file,
+    write_table_list_csv, write_table_list_markdown, write_tables_csv,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -714,6 +715,53 @@ impl SharedState {
         self.set_message(
             MessageKind::Success,
             format!("Exported project CSV files to {}", folder.display()),
+        );
+    }
+
+    /// Export the current seating as a table-by-table guest list, in both
+    /// Markdown and CSV. The caller (the top bar) only enables this when
+    /// `score_breakdown.is_some()`, i.e. `self.assignments` is already a
+    /// complete, valid seating.
+    pub(crate) fn export_table_list(&mut self) {
+        let Some(folder) = rfd::FileDialog::new().pick_folder() else {
+            return;
+        };
+        let markdown_path = folder.join("seating-plan.md");
+        let csv_path = folder.join("seating-plan.csv");
+        let csv_contents = match write_table_list_csv(&self.assignments) {
+            Ok(contents) => contents,
+            Err(error) => {
+                self.set_message(
+                    MessageKind::Error,
+                    format!("Table list export failed: {error}"),
+                );
+                return;
+            }
+        };
+        if let Err(error) = fs::write(&markdown_path, write_table_list_markdown(&self.assignments))
+        {
+            self.set_message(
+                MessageKind::Error,
+                format!(
+                    "Table list export failed for {}: {error}",
+                    markdown_path.display()
+                ),
+            );
+            return;
+        }
+        if let Err(error) = fs::write(&csv_path, csv_contents) {
+            self.set_message(
+                MessageKind::Error,
+                format!(
+                    "Table list export failed for {}: {error}",
+                    csv_path.display()
+                ),
+            );
+            return;
+        }
+        self.set_message(
+            MessageKind::Success,
+            format!("Exported table list to {}", folder.display()),
         );
     }
 

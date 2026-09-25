@@ -51,8 +51,9 @@ use clap::{Parser, Subcommand};
 use seating_core::{
     HeuristicOptimizer, OptimizationConfig, ProjectFile, ProjectInput, RenderOptions, build_layout,
     make_project, parse_people_csv, parse_project_file, parse_seating_csv, parse_tables_csv,
-    render_png, render_svg, score_solution, validate_project, write_closeness_csv,
-    write_people_csv, write_project_file, write_seating_csv, write_tables_csv,
+    render_png, render_svg, score_solution, validate_project, validate_seating_solution,
+    write_closeness_csv, write_people_csv, write_project_file, write_seating_csv,
+    write_table_list_csv, write_table_list_markdown, write_tables_csv,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -225,6 +226,20 @@ enum Commands {
         #[arg(long)]
         tables: PathBuf,
     },
+
+    /// Export the current seating as a table-by-table guest list, in both
+    /// Markdown and CSV. Refuses an incomplete or invalid seating.
+    ExportTableList {
+        /// Path to a `.wseat` project file.
+        #[arg(long)]
+        project: PathBuf,
+        /// Destination Markdown file.
+        #[arg(long)]
+        markdown: PathBuf,
+        /// Destination CSV file.
+        #[arg(long)]
+        csv: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -389,6 +404,22 @@ fn main() -> Result<()> {
                 .with_context(|| format!("failed writing tables CSV {}", tables.display()))?;
             println!("Exported CSV files from {}", project.display());
         }
+        Commands::ExportTableList {
+            project,
+            markdown,
+            csv,
+        } => {
+            let project_file = read_project_file(&project)?;
+            let project_input = project_file.project_input();
+            validate_seating_solution(&project_input, &project_file.seating)
+                .with_context(|| format!("seating in {} is invalid", project.display()))?;
+            fs::write(&markdown, write_table_list_markdown(&project_file.seating)).with_context(
+                || format!("failed writing table list markdown {}", markdown.display()),
+            )?;
+            fs::write(&csv, write_table_list_csv(&project_file.seating)?)
+                .with_context(|| format!("failed writing table list CSV {}", csv.display()))?;
+            println!("Exported table list from {}", project.display());
+        }
     }
     Ok(())
 }
@@ -509,6 +540,18 @@ mod tests {
             "closeness.csv",
             "--tables",
             "tables.csv",
+        ])
+        .unwrap();
+
+        Cli::try_parse_from([
+            "wedding-seating",
+            "export-table-list",
+            "--project",
+            "wedding.wseat",
+            "--markdown",
+            "seating-plan.md",
+            "--csv",
+            "seating-plan.csv",
         ])
         .unwrap();
     }
