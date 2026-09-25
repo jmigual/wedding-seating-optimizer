@@ -37,6 +37,17 @@ pub(crate) fn show(app: &mut SeatingApp, ctx: &egui::Context, ui: &mut egui::Ui)
             other_action_clicked = true;
             app.shared.export_csvs();
         }
+        if ui
+            .add_enabled(
+                app.shared.score_breakdown.is_some(),
+                egui::Button::new("Export Table List"),
+            )
+            .on_disabled_hover_text("Needs a complete, valid seating")
+            .clicked()
+        {
+            other_action_clicked = true;
+            app.shared.export_table_list();
+        }
 
         ui.separator();
 
