@@ -205,21 +205,49 @@ impl eframe::App for SeatingApp {
         egui::Panel::bottom("status_bar").show(ui, |ui| {
             panels::status_bar::show(&self.shared, ui);
         });
-        egui::Panel::left("editors_panel")
-            .resizable(true)
-            .default_size(380.0)
-            .size_range(280.0..=f32::INFINITY)
-            .show_collapsible(ui, &mut self.editors_open, |ui| {
-                // `auto_shrink` off: with horizontal scrolling disabled,
-                // egui's default shrink-to-content otherwise makes the
-                // ScrollArea (and thus the panel) re-report the content's
-                // natural width every frame, overriding a user's resize drag.
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false; 2])
-                    .show(ui, |ui| {
-                        panels::editors::show(&mut self.shared, &mut self.editors_state, ui);
-                    });
-            });
+        // Collapsing the expanded panel (drag or top-bar toggle) leaves no
+        // affordance at the left edge to reopen it: `show_collapsible` alone
+        // renders nothing once fully closed. `show_switched` instead swaps
+        // in a thin strip with its own expand button, so there's always
+        // something to click where the panel was.
+        let expand_clicked = egui::Panel::show_switched(
+            ui,
+            &mut self.editors_open,
+            egui::Panel::left("editors_panel_collapsed")
+                .resizable(true)
+                .exact_size(24.0),
+            egui::Panel::left("editors_panel")
+                .resizable(true)
+                .default_size(380.0)
+                .size_range(280.0..=f32::INFINITY),
+            |ui, expanded| {
+                if expanded {
+                    // `auto_shrink` off: with horizontal scrolling disabled,
+                    // egui's default shrink-to-content otherwise makes the
+                    // ScrollArea (and thus the panel) re-report the content's
+                    // natural width every frame, overriding a user's resize drag.
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| {
+                            panels::editors::show(&mut self.shared, &mut self.editors_state, ui);
+                        });
+                    false
+                } else {
+                    ui.vertical_centered(|ui| {
+                        let (rect, response) =
+                            ui.allocate_exact_size(egui::Vec2::splat(20.0), egui::Sense::click());
+                        let response = response.with_new_rect(rect);
+                        egui::collapsing_header::paint_default_icon(ui, 0.0, &response);
+                        response.on_hover_text("Show editors").clicked()
+                    })
+                    .inner
+                }
+            },
+        )
+        .inner;
+        if expand_clicked {
+            self.editors_open = true;
+        }
         egui::CentralPanel::default().show(ui, |ui| {
             panels::canvas::show(&mut self.shared, &mut self.canvas_state, ui);
         });
