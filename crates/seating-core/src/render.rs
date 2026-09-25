@@ -491,7 +491,7 @@ pub fn render_svg(layout: &SeatingLayout, options: &RenderOptions) -> String {
                     "<text class=\"seat-index\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" dominant-baseline=\"middle\">{}</text>",
                     seat.x,
                     seat.y + 0.5,
-                    seat.seat_index
+                    seat.seat_index + 1
                 ));
                 if let Some(label) = seat_label(table, seat, options, |text, font_size| {
                     text.chars().count() as f32 * 0.55 * font_size
@@ -1033,7 +1033,11 @@ fn shape_label(shape: &TableShape) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{RenderOptions, SeatingAssignment, apportion, build_rectangular_seats};
+    use super::{
+        LayoutSeat, LayoutTable, RenderOptions, SeatingAssignment, SeatingLayout, TableSurface,
+        apportion, build_rectangular_seats, render_svg,
+    };
+    use crate::models::TableShape;
 
     /// `apportion` is the largest-remainder method: each side gets its exact
     /// proportional share (5|5|0|0 scaled to 6 total is exactly 3|3|0|0 with
@@ -1091,5 +1095,42 @@ mod tests {
         // mid-height as the right side (both single midpoints).
         assert!(seats[4].x < seats[0].x);
         assert_eq!(seats[4].y, seats[2].y);
+    }
+
+    /// Seat 0 is the first seat, so its rendered index text must read "1",
+    /// not "0" (display is 1-based; `LayoutSeat::seat_index` itself stays
+    /// 0-based).
+    #[test]
+    fn rendered_seat_index_is_one_based() {
+        let layout = SeatingLayout {
+            width: 400.0,
+            height: 400.0,
+            tables: vec![LayoutTable {
+                table_number: 1,
+                table_type: "round_8".to_string(),
+                shape: TableShape::Round,
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 200.0,
+                seats: vec![LayoutSeat {
+                    seat_index: 0,
+                    x: 100.0,
+                    y: 100.0,
+                    person_name: Some("Alice".to_string()),
+                }],
+                empty_seats: vec![],
+                surface: TableSurface::Round {
+                    cx: 100.0,
+                    cy: 100.0,
+                    radius: 60.0,
+                },
+            }],
+        };
+
+        let svg = render_svg(&layout, &RenderOptions::default());
+
+        assert!(svg.contains(">1<"));
+        assert!(!svg.contains(">0<"));
     }
 }
