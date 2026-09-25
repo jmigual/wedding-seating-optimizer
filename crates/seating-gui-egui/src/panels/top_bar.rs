@@ -10,6 +10,7 @@ pub(crate) fn show(app: &mut SeatingApp, ctx: &egui::Context, ui: &mut egui::Ui)
     let mut other_action_clicked = false;
 
     ui.horizontal(|ui| {
+        ui.toggle_value(&mut app.editors_open, "Editors");
         ui.heading("Wedding Seating");
         ui.separator();
 

@@ -35,6 +35,9 @@ pub(crate) struct SeatingApp {
     /// Whether to warm-start the next optimize from the current seating
     /// instead of a random one. Not persisted to the project file.
     pub(crate) warm_start: bool,
+    /// Whether the editors panel (people/groups/closeness/tables) is shown.
+    /// Not persisted to the project file.
+    pub(crate) editors_open: bool,
     /// Last `dirty` value reflected in the window title, so we only send a
     /// `ViewportCommand::Title` when it actually changes.
     shown_dirty: bool,
@@ -59,6 +62,7 @@ impl SeatingApp {
             optimize_started: None,
             optimize_limit: Duration::ZERO,
             warm_start: true,
+            editors_open: true,
             shown_dirty: false,
             chrome_set: false,
         }
@@ -205,7 +209,7 @@ impl eframe::App for SeatingApp {
             .resizable(true)
             .default_size(380.0)
             .size_range(280.0..=f32::INFINITY)
-            .show(ui, |ui| {
+            .show_collapsible(ui, &mut self.editors_open, |ui| {
                 // `auto_shrink` off: with horizontal scrolling disabled,
                 // egui's default shrink-to-content otherwise makes the
                 // ScrollArea (and thus the panel) re-report the content's
