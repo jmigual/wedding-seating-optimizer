@@ -410,6 +410,10 @@ fn csv_writers_emit_the_documented_headers() {
         write_seating_csv(&[]).unwrap().lines().next().unwrap(),
         SEATING_CSV_HEADER
     );
+    assert_eq!(
+        write_table_list_csv(&[]).unwrap().lines().next().unwrap(),
+        TABLE_LIST_CSV_HEADER
+    );
 }
 
 #[test]
@@ -4565,6 +4569,106 @@ fn seating_csv_round_trip_is_sorted() {
         },
     ];
     assert_eq!(parsed, expected);
+}
+
+fn table_list_assignments() -> Vec<SeatingAssignment> {
+    vec![
+        SeatingAssignment {
+            table_number: 2,
+            table_type: "round_4".to_string(),
+            seat_index: 0,
+            person_id: "p3".to_string(),
+            person_name: "Carol".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 1,
+            person_id: "p2".to_string(),
+            person_name: "Bob".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_4".to_string(),
+            seat_index: 0,
+            person_id: "p1".to_string(),
+            person_name: "Alice".to_string(),
+        },
+    ]
+}
+
+#[test]
+fn table_list_markdown_sorts_by_table_then_seat_with_one_based_seats() {
+    let markdown = write_table_list_markdown(&table_list_assignments());
+
+    assert_eq!(
+        markdown,
+        "# Seating plan\n\
+         \n\
+         ## Table 1 — round_4 (2 guests)\n\
+         - Seat 1: Alice\n\
+         - Seat 2: Bob\n\
+         \n\
+         ## Table 2 — round_4 (1 guest)\n\
+         - Seat 1: Carol\n"
+    );
+}
+
+#[test]
+fn table_list_csv_sorts_by_table_then_seat_with_one_based_seats() {
+    let csv = write_table_list_csv(&table_list_assignments()).unwrap();
+
+    assert_eq!(
+        csv,
+        format!(
+            "{TABLE_LIST_CSV_HEADER}\n\
+             1,1,p1,Alice,round_4\n\
+             1,2,p2,Bob,round_4\n\
+             2,1,p3,Carol,round_4\n"
+        )
+    );
+}
+
+#[test]
+fn table_list_csv_quotes_person_names_containing_a_comma() {
+    let assignments = vec![SeatingAssignment {
+        table_number: 1,
+        table_type: "round_4".to_string(),
+        seat_index: 0,
+        person_id: "p1".to_string(),
+        person_name: "Smith, Jane".to_string(),
+    }];
+
+    let csv = write_table_list_csv(&assignments).unwrap();
+
+    assert_eq!(
+        csv,
+        format!("{TABLE_LIST_CSV_HEADER}\n1,1,p1,\"Smith, Jane\",round_4\n")
+    );
+}
+
+#[test]
+fn table_list_markdown_orders_double_digit_seats_numerically_not_lexicographically() {
+    let assignments = vec![
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_12".to_string(),
+            seat_index: 9,
+            person_id: "p10".to_string(),
+            person_name: "Ten".to_string(),
+        },
+        SeatingAssignment {
+            table_number: 1,
+            table_type: "round_12".to_string(),
+            seat_index: 1,
+            person_id: "p2".to_string(),
+            person_name: "Two".to_string(),
+        },
+    ];
+
+    let markdown = write_table_list_markdown(&assignments);
+
+    assert!(markdown.find("Seat 2:").unwrap() < markdown.find("Seat 10:").unwrap());
 }
 
 /// Bumping `number_of_tables` on a type that isn't lexicographically last

@@ -5,6 +5,7 @@
 //! - [`parse_closeness_csv`] / [`write_closeness_csv`]
 //! - [`parse_tables_csv`] / [`write_tables_csv`]
 //! - [`parse_seating_csv`] / [`write_seating_csv`]
+//! - [`write_table_list_markdown`] / [`write_table_list_csv`]
 //! - [`parse_project_file`] / [`write_project_file`]
 //! - [`make_project`] – convenience constructor that parses all three inputs
 
@@ -39,6 +40,11 @@ pub const TABLES_CSV_HEADER: &str =
 
 /// Header row for the seating-solution CSV format.
 pub const SEATING_CSV_HEADER: &str = "table_number,table_type,seat_index,person_id,person_name";
+
+/// Header row for the table-list export CSV format (see
+/// [`write_table_list_csv`]). `seat` is 1-based for display; the stored
+/// [`SeatingAssignment::seat_index`] stays 0-based.
+pub const TABLE_LIST_CSV_HEADER: &str = "table,seat,person_id,person_name,table_type";
 
 // ── Internal deserialization structs ──────────────────────────────────────────
 // These are intentionally private; callers always receive the public domain types.
@@ -125,6 +131,15 @@ struct SeatingCsvOut<'a> {
     seat_index: usize,
     person_id: &'a str,
     person_name: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct TableListCsvOut<'a> {
+    table: usize,
+    seat: usize,
+    person_id: &'a str,
+    person_name: &'a str,
+    table_type: &'a str,
 }
 
 // ── Parsing ───────────────────────────────────────────────────────────────────
@@ -395,6 +410,76 @@ pub fn write_seating_csv(assignments: &[SeatingAssignment]) -> Result<String, Va
         .map_err(|e| ValidationError::MalformedInput(format!("seating CSV serialization: {e}")))?;
     }
     finish_writer(wtr, "seating CSV")
+}
+
+/// Sort assignment references by (table_number, seat_index, person_id) for
+/// deterministic, human-readable output. Used by the table-list writers;
+/// [`write_seating_csv`] keeps its own inline sort over owned rows.
+fn sorted_by_table_seat(assignments: &[SeatingAssignment]) -> Vec<&SeatingAssignment> {
+    let mut sorted: Vec<&SeatingAssignment> = assignments.iter().collect();
+    sorted.sort_by(|a, b| {
+        a.table_number
+            .cmp(&b.table_number)
+            .then(a.seat_index.cmp(&b.seat_index))
+            .then(a.person_id.cmp(&b.person_id))
+    });
+    sorted
+}
+
+/// Render a list of [`SeatingAssignment`] records as a Markdown table list:
+/// one `## Table N — <type> (k guests)` section per table, sorted by table
+/// number, followed by one `- Seat S: Name` line per guest, sorted by seat.
+/// Seat numbers are 1-based for display; the stored
+/// [`SeatingAssignment::seat_index`] stays 0-based. Guest names are not
+/// Markdown-escaped; tables with no guests are omitted.
+pub fn write_table_list_markdown(assignments: &[SeatingAssignment]) -> String {
+    let sorted = sorted_by_table_seat(assignments);
+
+    let mut out = String::from("# Seating plan\n");
+    for table in sorted.chunk_by(|a, b| a.table_number == b.table_number) {
+        let first = table[0];
+        let guest_word = if table.len() == 1 { "guest" } else { "guests" };
+        out.push_str(&format!(
+            "\n## Table {} — {} ({} {guest_word})\n",
+            first.table_number,
+            first.table_type,
+            table.len()
+        ));
+        for a in table {
+            out.push_str(&format!("- Seat {}: {}\n", a.seat_index + 1, a.person_name));
+        }
+    }
+    out
+}
+
+/// Serialize a list of [`SeatingAssignment`] records to the table-list CSV
+/// format: one row per guest, sorted by (table, seat), with 1-based seat
+/// numbers for display.
+///
+/// # Errors
+/// Returns [`ValidationError::MalformedInput`] on any serialization error.
+pub fn write_table_list_csv(assignments: &[SeatingAssignment]) -> Result<String, ValidationError> {
+    let sorted = sorted_by_table_seat(assignments);
+    let mut wtr = csv::WriterBuilder::new()
+        .has_headers(false)
+        .from_writer(vec![]);
+    wtr.write_record(TABLE_LIST_CSV_HEADER.split(','))
+        .map_err(|e| {
+            ValidationError::MalformedInput(format!("table list CSV serialization: {e}"))
+        })?;
+    for a in &sorted {
+        wtr.serialize(TableListCsvOut {
+            table: a.table_number,
+            seat: a.seat_index + 1,
+            person_id: &a.person_id,
+            person_name: &a.person_name,
+            table_type: &a.table_type,
+        })
+        .map_err(|e| {
+            ValidationError::MalformedInput(format!("table list CSV serialization: {e}"))
+        })?;
+    }
+    finish_writer(wtr, "table list CSV")
 }
 
 /// Serialize a `.wseat` JSON project file.
