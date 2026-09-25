@@ -234,6 +234,34 @@ pub fn reference_label(id: &str, options: &[ReferenceIdOption]) -> String {
         .unwrap_or_else(|| format!("{id} — unknown"))
 }
 
+/// `true` when `query` (Unicode case-insensitive substring, trimmed) matches
+/// `person`'s id, name, or any of their groups. An empty query matches
+/// everything — same convention as [`reference_matches`].
+pub fn person_matches(person: &Person, query: &str) -> bool {
+    let normalized = query.trim().to_lowercase();
+    normalized.is_empty()
+        || person.id.to_lowercase().contains(&normalized)
+        || person.name.to_lowercase().contains(&normalized)
+        || person
+            .groups
+            .iter()
+            .any(|group| group.to_lowercase().contains(&normalized))
+}
+
+/// `true` when `query` matches `group`'s name, or the name/id of any person
+/// in `people` who belongs to it. Same matching convention as
+/// [`person_matches`].
+pub fn group_matches(group: &str, people: &[Person], query: &str) -> bool {
+    let normalized = query.trim().to_lowercase();
+    normalized.is_empty()
+        || group.to_lowercase().contains(&normalized)
+        || people.iter().any(|person| {
+            person.groups.iter().any(|g| g == group)
+                && (person.id.to_lowercase().contains(&normalized)
+                    || person.name.to_lowercase().contains(&normalized))
+        })
+}
+
 // ── CSV import merge ──────────────────────────────────────────────────────────
 
 /// Upsert `imported` into `existing`, keyed by `Person.id`. An imported
@@ -257,6 +285,33 @@ pub fn merge_people(existing: &[Person], imported: Vec<Person>) -> Vec<Person> {
         }
     }
     result
+}
+
+/// Move the person at `from` to just before what is currently index
+/// `insert_at` (0-based; `insert_at == people.len()` means "at the end") —
+/// drag-and-drop reorder semantics, mirroring the old→new adjustment
+/// [`move_table_number`] applies for the same reason: removing `from` shifts
+/// every later index down by one, so `insert_at` is decremented first when it
+/// falls after `from`.
+///
+/// Returns `false` — leaving `people` unmutated — when `from` or `insert_at`
+/// is out of range, or when the adjusted position is unchanged (dropping a
+/// row onto itself, i.e. `insert_at == from` or `insert_at == from + 1`).
+pub fn move_person(people: &mut Vec<Person>, from: usize, insert_at: usize) -> bool {
+    if from >= people.len() || insert_at > people.len() {
+        return false;
+    }
+    let target = if insert_at > from {
+        insert_at - 1
+    } else {
+        insert_at
+    };
+    if target == from {
+        return false;
+    }
+    let person = people.remove(from);
+    people.insert(target, person);
+    true
 }
 
 /// Upsert `imported` into `existing`, keyed by the unordered
@@ -1382,6 +1437,65 @@ mod tests {
         assert!(people[1].groups.is_empty());
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].left_id, "p1");
+    }
+
+    #[test]
+    fn person_matches_is_case_insensitive_on_id_name_and_group() {
+        let mut alice = person("p1", &["family"]);
+        alice.name = "Alice".to_string();
+        assert!(person_matches(&alice, "ALICE"));
+        assert!(person_matches(&alice, "p1"));
+        assert!(person_matches(&alice, "FAMILY"));
+        assert!(person_matches(&alice, ""));
+        assert!(!person_matches(&alice, "bob"));
+    }
+
+    #[test]
+    fn person_matches_trims_a_padded_query() {
+        let mut alice = person("p1", &[]);
+        alice.name = "Alice".to_string();
+        assert!(person_matches(&alice, "  alice "));
+    }
+
+    #[test]
+    fn group_matches_on_name_or_member() {
+        let mut alice = person("p1", &["family"]);
+        alice.name = "Alice".to_string();
+        let people = vec![alice, person("p2", &["friends"])];
+        assert!(group_matches("family", &people, "FAM"));
+        assert!(group_matches("family", &people, "alice"));
+        assert!(!group_matches("family", &people, "p2"));
+        assert!(group_matches("family", &people, ""));
+    }
+
+    fn ids(people: &[Person]) -> Vec<&str> {
+        people.iter().map(|p| p.id.as_str()).collect()
+    }
+
+    #[test]
+    fn move_person_moves_forward_and_backward() {
+        let mut forward = vec![person("p1", &[]), person("p2", &[]), person("p3", &[])];
+        assert!(move_person(&mut forward, 0, 3));
+        assert_eq!(ids(&forward), vec!["p2", "p3", "p1"]);
+
+        let mut backward = vec![person("p1", &[]), person("p2", &[]), person("p3", &[])];
+        assert!(move_person(&mut backward, 2, 0));
+        assert_eq!(ids(&backward), vec!["p3", "p1", "p2"]);
+    }
+
+    #[test]
+    fn move_person_no_op_positions_return_false_and_do_not_mutate() {
+        let mut people = vec![person("p1", &[]), person("p2", &[]), person("p3", &[])];
+        assert!(!move_person(&mut people, 1, 1));
+        assert!(!move_person(&mut people, 1, 2));
+        assert_eq!(ids(&people), vec!["p1", "p2", "p3"]);
+    }
+
+    #[test]
+    fn move_person_out_of_range_returns_false() {
+        let mut people = vec![person("p1", &[]), person("p2", &[])];
+        assert!(!move_person(&mut people, 5, 0));
+        assert!(!move_person(&mut people, 0, 5));
     }
 
     #[test]
