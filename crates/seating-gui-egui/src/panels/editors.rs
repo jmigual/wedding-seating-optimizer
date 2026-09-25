@@ -12,9 +12,9 @@ use eframe::egui;
 use seating_core::{
     CLOSENESS_CSV_HEADER, ClosenessRule, OptimizationConfig, PEOPLE_CSV_HEADER, ReferenceIdOption,
     TABLES_CSV_HEADER, TableShape, ValidationError, closeness_display_order, collect_group_ids,
-    generate_table_instances, move_table_number, parse_f64_value, reference_id_options,
-    reference_label, reference_matches, remove_group, rename_group, rules_match,
-    table_number_remap,
+    generate_table_instances, group_matches, move_person, move_table_number, parse_f64_value,
+    person_matches, reference_id_options, reference_label, reference_matches, remove_group,
+    rename_group, rules_match, table_number_remap,
 };
 use std::collections::HashMap;
 
@@ -30,12 +30,15 @@ const ROW_SPACING: f32 = 8.0;
 const DELETE_BUDGET: f32 = 90.0;
 
 /// UI-only state for the editors panel: per-person "new group" scratch
-/// input (kept index-aligned with `SharedState::people`), and per-group
-/// rename scratch input (keyed by the group's current name).
+/// input (kept index-aligned with `SharedState::people`), per-group rename
+/// scratch input (keyed by the group's current name), and the People/Groups
+/// search filters. None of this is persisted with the project.
 #[derive(Default)]
 pub(crate) struct EditorsState {
     new_group_inputs: Vec<String>,
     group_rename_inputs: HashMap<String, String>,
+    people_query: String,
+    groups_query: String,
 }
 
 pub(crate) fn show(shared: &mut SharedState, state: &mut EditorsState, ui: &mut egui::Ui) {
@@ -83,6 +86,17 @@ const TABLE_TYPE_COMBO_W: f32 = 100.0;
 const TABLE_TYPE_MAX_CHARS: usize = 9;
 const LOCKED_TABLE_COMBO_W: f32 = 90.0;
 const LOCKED_SEAT_COMBO_W: f32 = 90.0;
+/// Budgeted width of the "≡" drag handle, same "generous, deterministic
+/// estimate" philosophy as `DELETE_BUDGET`.
+const DRAG_HANDLE_W: f32 = 20.0;
+
+/// Drag-and-drop payload for reordering people rows (see
+/// [`table_order_section`]'s comment for the same pattern with tables). A
+/// private newtype, not a bare `usize`, so a drag started on a person row
+/// can never be dropped onto — or accepted from — the table-order drop zone,
+/// which uses `usize` payloads.
+#[derive(Clone, Copy)]
+struct PersonDrag(usize);
 
 /// Small deterministic cushion added on top of a measured label width, to
 /// absorb sub-pixel differences between this measurement and egui's own
@@ -122,6 +136,16 @@ fn people_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
         state.new_group_inputs.push(String::new());
     }
 
+    ui.add(
+        egui::TextEdit::singleline(&mut state.people_query)
+            .hint_text("Search people…")
+            .desired_width(200.0),
+    );
+    let reorder_enabled = state.people_query.trim().is_empty();
+    let matching_indices: Vec<usize> = (0..shared.people.len())
+        .filter(|&index| person_matches(&shared.people[index], &state.people_query))
+        .collect();
+
     let table_type_ids: Vec<String> = shared
         .table_configs
         .iter()
@@ -133,10 +157,11 @@ fn people_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
     let locked_table_label_w = measured_label_width(ui, "Locked table:");
     let locked_seat_label_w = measured_label_width(ui, "Locked seat:");
 
-    // Wide tier's one line has 9 items (id, name, delete, 3×(label+combo)) → 8 gaps.
+    // Wide tier's one line has 10 items (handle, id, name, delete, 3×(label+combo)) → 9 gaps.
     // Below this width the name field can't shrink further without dropping under
     // PERSON_NAME_MIN_W, so the tier can no longer fit.
-    let wide_required = PERSON_ID_W
+    let wide_required = DRAG_HANDLE_W
+        + PERSON_ID_W
         + PERSON_NAME_MIN_W
         + DELETE_BUDGET
         + table_type_label_w
@@ -145,13 +170,14 @@ fn people_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
         + LOCKED_TABLE_COMBO_W
         + locked_seat_label_w
         + LOCKED_SEAT_COMBO_W
-        + ROW_SPACING * 8.0
+        + ROW_SPACING * 9.0
         + LABEL_MEASURE_SLACK;
 
-    // Medium tier's line 1 (id, name, delete — name flexes to PERSON_NAME_MIN_W)
+    // Medium tier's line 1 (handle, id, name, delete — name flexes to PERSON_NAME_MIN_W)
     // and line 2 (3×(label+combo), no flex field, 6 items → 5 gaps) must both fit;
     // line 2 is the true bottleneck (matches the reported symptom).
-    let medium_line1_required = PERSON_ID_W + PERSON_NAME_MIN_W + DELETE_BUDGET + ROW_SPACING * 2.0;
+    let medium_line1_required =
+        DRAG_HANDLE_W + PERSON_ID_W + PERSON_NAME_MIN_W + DELETE_BUDGET + ROW_SPACING * 3.0;
     let medium_line2_required = table_type_label_w
         + TABLE_TYPE_COMBO_W
         + locked_table_label_w
@@ -162,169 +188,232 @@ fn people_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
         + LABEL_MEASURE_SLACK;
     let medium_required = medium_line1_required.max(medium_line2_required);
 
+    if matching_indices.is_empty() {
+        ui.label(egui::RichText::new("No matches.").weak());
+    }
+
     let mut delete_index = None;
-    for index in 0..shared.people.len() {
-        ui.group(|ui| {
-            let mut changed = false;
+    let mut drag_from = None;
+    let mut drag_to = None;
+    ui.dnd_drop_zone::<PersonDrag, _>(egui::Frame::default(), |ui| {
+        for &index in &matching_indices {
+            let row = ui.group(|ui| {
+                let mut changed = false;
 
-            // Explicit width-branched layout, never `horizontal_wrapped`:
-            // pick a tier from this row's actual available width (already
-            // the panel's real, resized width — the SidePanel's ScrollArea
-            // runs with `auto_shrink` off, so it reports the assigned width
-            // rather than re-measuring content and pushing that back up),
-            // then lay out plain `ui.horizontal` lines. A label can never
-            // wrap mid-word here because these lines are never
-            // `horizontal_wrapped`. Every non-flex widget on a line gets an
-            // explicit, deterministic width — TextEdit honors
-            // `desired_width` exactly, and ComboBox text is truncated
-            // (`truncate_label`) so its "at least" width (egui 0.27 grows a
-            // ComboBox past `.width()` to fit unwrapped `selected_text`)
-            // never exceeds what we budget for it. The one flex field per
-            // line (`name`) gets whatever's left, computed *before* it's
-            // drawn from those same deterministic budgets. So every line's
-            // total is bounded by `w` by construction: the row's min_rect
-            // can never demand more width than the panel actually granted
-            // it, which is what stops the resize/snap-back loop this
-            // replaces. Tier thresholds are computed per-frame from label
-            // widths measured via the font-layout cache rather than
-            // hardcoded, so they track the actual rendered text; the
-            // measurement is a pure function of font metrics + text + style,
-            // never of panel width, so it cannot feed back into container
-            // size or reintroduce that loop.
-            let w = ui.available_width();
-            let wide = w >= wide_required;
-            let medium = !wide && w >= medium_required;
+                // Explicit width-branched layout, never `horizontal_wrapped`:
+                // pick a tier from this row's actual available width (already
+                // the panel's real, resized width — the SidePanel's ScrollArea
+                // runs with `auto_shrink` off, so it reports the assigned width
+                // rather than re-measuring content and pushing that back up),
+                // then lay out plain `ui.horizontal` lines. A label can never
+                // wrap mid-word here because these lines are never
+                // `horizontal_wrapped`. Every non-flex widget on a line gets an
+                // explicit, deterministic width — TextEdit honors
+                // `desired_width` exactly, and ComboBox text is truncated
+                // (`truncate_label`) so its "at least" width (egui 0.27 grows a
+                // ComboBox past `.width()` to fit unwrapped `selected_text`)
+                // never exceeds what we budget for it. The one flex field per
+                // line (`name`) gets whatever's left, computed *before* it's
+                // drawn from those same deterministic budgets. So every line's
+                // total is bounded by `w` by construction: the row's min_rect
+                // can never demand more width than the panel actually granted
+                // it, which is what stops the resize/snap-back loop this
+                // replaces. Tier thresholds are computed per-frame from label
+                // widths measured via the font-layout cache rather than
+                // hardcoded, so they track the actual rendered text; the
+                // measurement is a pure function of font metrics + text + style,
+                // never of panel width, so it cannot feed back into container
+                // size or reintroduce that loop.
+                let w = ui.available_width();
+                let wide = w >= wide_required;
+                let medium = !wide && w >= medium_required;
 
-            if wide {
-                let name_w = (w
-                    - PERSON_ID_W
-                    - DELETE_BUDGET
-                    - table_type_label_w
-                    - TABLE_TYPE_COMBO_W
-                    - locked_table_label_w
-                    - LOCKED_TABLE_COMBO_W
-                    - locked_seat_label_w
-                    - LOCKED_SEAT_COMBO_W
-                    - ROW_SPACING * 8.0)
-                    .max(PERSON_NAME_MIN_W);
-                ui.horizontal(|ui| {
-                    changed |= id_field(ui, shared, index, PERSON_ID_W);
-                    changed |= name_field(ui, shared, index, name_w);
-                    if delete_button(ui) {
-                        delete_index = Some(index);
-                    }
-                    changed |=
-                        table_type_field(ui, shared, &table_type_ids, index, TABLE_TYPE_COMBO_W);
-                    changed |= locked_table_field(ui, shared, index, LOCKED_TABLE_COMBO_W);
-                    changed |= locked_seat_field(ui, shared, index, LOCKED_SEAT_COMBO_W);
-                });
-            } else if medium {
-                let name_w =
-                    (w - PERSON_ID_W - DELETE_BUDGET - ROW_SPACING * 2.0).max(PERSON_NAME_MIN_W);
-                ui.horizontal(|ui| {
-                    changed |= id_field(ui, shared, index, PERSON_ID_W);
-                    changed |= name_field(ui, shared, index, name_w);
-                    if delete_button(ui) {
-                        delete_index = Some(index);
-                    }
-                });
-                ui.horizontal(|ui| {
-                    changed |=
-                        table_type_field(ui, shared, &table_type_ids, index, TABLE_TYPE_COMBO_W);
-                    changed |= locked_table_field(ui, shared, index, LOCKED_TABLE_COMBO_W);
-                    changed |= locked_seat_field(ui, shared, index, LOCKED_SEAT_COMBO_W);
-                });
-            } else {
-                ui.horizontal(|ui| {
-                    changed |= id_field(ui, shared, index, PERSON_ID_W);
-                    if delete_button(ui) {
-                        delete_index = Some(index);
-                    }
-                });
-                ui.horizontal(|ui| {
-                    let name_w = (w - ROW_SPACING).max(PERSON_NAME_MIN_W);
-                    changed |= name_field(ui, shared, index, name_w);
-                });
-                ui.horizontal(|ui| {
-                    changed |=
-                        table_type_field(ui, shared, &table_type_ids, index, TABLE_TYPE_COMBO_W);
-                });
-                ui.horizontal(|ui| {
-                    changed |= locked_table_field(ui, shared, index, LOCKED_TABLE_COMBO_W);
-                });
-                ui.horizontal(|ui| {
-                    changed |= locked_seat_field(ui, shared, index, LOCKED_SEAT_COMBO_W);
-                });
-            }
-
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Groups:");
-                let mut remove_group = None;
-                for (group_index, group) in shared.people[index].groups.iter().enumerate() {
-                    if ui.button(format!("{group} ×")).clicked() {
-                        remove_group = Some(group_index);
-                    }
-                }
-                if let Some(group_index) = remove_group {
-                    shared.people[index].groups.remove(group_index);
-                    changed = true;
-                }
-                let mut add_existing_group = None;
-                let group_picker_filter_id = egui::Id::new(("person_group_picker_filter", index));
-                let group_picker = egui::ComboBox::from_id_salt(("person_group_picker", index))
-                    .selected_text("+ existing group")
-                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                    .show_ui(ui, |ui| {
-                        let filter = search_filter_field(ui, group_picker_filter_id, 100.0);
-                        let pickable: Vec<ReferenceIdOption> = all_groups
-                            .iter()
-                            .filter(|group| !shared.people[index].groups.contains(group))
-                            .map(|group| ReferenceIdOption {
-                                id: group.clone(),
-                                label: group.clone(),
-                            })
-                            .collect();
-                        for option in reference_matches(&pickable, &filter) {
-                            if ui.selectable_label(false, &option.label).clicked() {
-                                add_existing_group = Some(option.id);
-                                ui.close();
-                            }
+                if wide {
+                    let name_w = (w
+                        - DRAG_HANDLE_W
+                        - PERSON_ID_W
+                        - DELETE_BUDGET
+                        - table_type_label_w
+                        - TABLE_TYPE_COMBO_W
+                        - locked_table_label_w
+                        - LOCKED_TABLE_COMBO_W
+                        - locked_seat_label_w
+                        - LOCKED_SEAT_COMBO_W
+                        - ROW_SPACING * 9.0)
+                        .max(PERSON_NAME_MIN_W);
+                    ui.horizontal(|ui| {
+                        person_drag_handle(ui, index, reorder_enabled);
+                        changed |= id_field(ui, shared, index, PERSON_ID_W);
+                        changed |= name_field(ui, shared, index, name_w);
+                        if delete_button(ui) {
+                            delete_index = Some(index);
+                        }
+                        changed |= table_type_field(
+                            ui,
+                            shared,
+                            &table_type_ids,
+                            index,
+                            TABLE_TYPE_COMBO_W,
+                        );
+                        changed |= locked_table_field(ui, shared, index, LOCKED_TABLE_COMBO_W);
+                        changed |= locked_seat_field(ui, shared, index, LOCKED_SEAT_COMBO_W);
+                    });
+                } else if medium {
+                    let name_w =
+                        (w - DRAG_HANDLE_W - PERSON_ID_W - DELETE_BUDGET - ROW_SPACING * 3.0)
+                            .max(PERSON_NAME_MIN_W);
+                    ui.horizontal(|ui| {
+                        person_drag_handle(ui, index, reorder_enabled);
+                        changed |= id_field(ui, shared, index, PERSON_ID_W);
+                        changed |= name_field(ui, shared, index, name_w);
+                        if delete_button(ui) {
+                            delete_index = Some(index);
                         }
                     });
-                if group_picker.inner.is_none() {
-                    clear_search_filter(ui, group_picker_filter_id);
+                    ui.horizontal(|ui| {
+                        changed |= table_type_field(
+                            ui,
+                            shared,
+                            &table_type_ids,
+                            index,
+                            TABLE_TYPE_COMBO_W,
+                        );
+                        changed |= locked_table_field(ui, shared, index, LOCKED_TABLE_COMBO_W);
+                        changed |= locked_seat_field(ui, shared, index, LOCKED_SEAT_COMBO_W);
+                    });
+                } else {
+                    ui.horizontal(|ui| {
+                        person_drag_handle(ui, index, reorder_enabled);
+                        changed |= id_field(ui, shared, index, PERSON_ID_W);
+                        if delete_button(ui) {
+                            delete_index = Some(index);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        let name_w = (w - ROW_SPACING).max(PERSON_NAME_MIN_W);
+                        changed |= name_field(ui, shared, index, name_w);
+                    });
+                    ui.horizontal(|ui| {
+                        changed |= table_type_field(
+                            ui,
+                            shared,
+                            &table_type_ids,
+                            index,
+                            TABLE_TYPE_COMBO_W,
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        changed |= locked_table_field(ui, shared, index, LOCKED_TABLE_COMBO_W);
+                    });
+                    ui.horizontal(|ui| {
+                        changed |= locked_seat_field(ui, shared, index, LOCKED_SEAT_COMBO_W);
+                    });
                 }
-                if let Some(group) = add_existing_group {
-                    shared.people[index].groups.push(group);
-                    changed = true;
-                }
-                ui.add(
-                    egui::TextEdit::singleline(&mut state.new_group_inputs[index])
-                        .hint_text("new group")
-                        .desired_width(70.0),
-                );
-                let has_input = !state.new_group_inputs[index].trim().is_empty();
-                if ui.add_enabled(has_input, egui::Button::new("+")).clicked() {
-                    let group = state.new_group_inputs[index].trim().to_string();
-                    if !shared.people[index].groups.contains(&group) {
+
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Groups:");
+                    let mut remove_group = None;
+                    for (group_index, group) in shared.people[index].groups.iter().enumerate() {
+                        if ui.button(format!("{group} ×")).clicked() {
+                            remove_group = Some(group_index);
+                        }
+                    }
+                    if let Some(group_index) = remove_group {
+                        shared.people[index].groups.remove(group_index);
+                        changed = true;
+                    }
+                    let mut add_existing_group = None;
+                    let group_picker_filter_id =
+                        egui::Id::new(("person_group_picker_filter", index));
+                    let group_picker = egui::ComboBox::from_id_salt(("person_group_picker", index))
+                        .selected_text("+ existing group")
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show_ui(ui, |ui| {
+                            let filter = search_filter_field(ui, group_picker_filter_id, 100.0);
+                            let pickable: Vec<ReferenceIdOption> = all_groups
+                                .iter()
+                                .filter(|group| !shared.people[index].groups.contains(group))
+                                .map(|group| ReferenceIdOption {
+                                    id: group.clone(),
+                                    label: group.clone(),
+                                })
+                                .collect();
+                            for option in reference_matches(&pickable, &filter) {
+                                if ui.selectable_label(false, &option.label).clicked() {
+                                    add_existing_group = Some(option.id);
+                                    ui.close();
+                                }
+                            }
+                        });
+                    if group_picker.inner.is_none() {
+                        clear_search_filter(ui, group_picker_filter_id);
+                    }
+                    if let Some(group) = add_existing_group {
                         shared.people[index].groups.push(group);
                         changed = true;
                     }
-                    state.new_group_inputs[index].clear();
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.new_group_inputs[index])
+                            .id_salt(("person_new_group", index))
+                            .hint_text("new group")
+                            .desired_width(70.0),
+                    );
+                    let has_input = !state.new_group_inputs[index].trim().is_empty();
+                    if ui.add_enabled(has_input, egui::Button::new("+")).clicked() {
+                        let group = state.new_group_inputs[index].trim().to_string();
+                        if !shared.people[index].groups.contains(&group) {
+                            shared.people[index].groups.push(group);
+                            changed = true;
+                        }
+                        state.new_group_inputs[index].clear();
+                    }
+                });
+
+                let person_id = shared.people[index].id.clone();
+                for error in &shared.validation {
+                    if error.person_id() == Some(person_id.as_str()) {
+                        ui.colored_label(ERROR_COLOR, error.to_string());
+                    }
+                }
+
+                if changed {
+                    shared.refresh();
                 }
             });
 
-            let person_id = shared.people[index].id.clone();
-            for error in &shared.validation {
-                if error.person_id() == Some(person_id.as_str()) {
-                    ui.colored_label(ERROR_COLOR, error.to_string());
+            if reorder_enabled
+                && let (Some(pointer), Some(hovered)) = (
+                    ui.ctx().input(|i| i.pointer.interact_pos()),
+                    row.response.dnd_hover_payload::<PersonDrag>(),
+                )
+            {
+                let rect = row.response.rect;
+                let stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(90, 200, 120));
+                let insert_index = if hovered.0 == index {
+                    ui.painter().hline(rect.x_range(), rect.center().y, stroke);
+                    index
+                } else if pointer.y < rect.center().y {
+                    ui.painter().hline(rect.x_range(), rect.top(), stroke);
+                    index
+                } else {
+                    ui.painter().hline(rect.x_range(), rect.bottom(), stroke);
+                    index + 1
+                };
+
+                if let Some(dragged) = row.response.dnd_release_payload::<PersonDrag>() {
+                    drag_from = Some(dragged.0);
+                    drag_to = Some(insert_index);
                 }
             }
+        }
+    });
 
-            if changed {
-                shared.refresh();
-            }
-        });
+    if let Some((from, to)) = drag_from.zip(drag_to)
+        && move_person(&mut shared.people, from, to)
+    {
+        state.new_group_inputs = vec![String::new(); shared.people.len()];
+        ui.memory_mut(|memory| memory.stop_text_input());
+        shared.refresh();
     }
 
     if let Some(index) = delete_index {
@@ -345,6 +434,7 @@ fn people_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
                 locked_seat: None,
             });
             state.new_group_inputs.push(String::new());
+            state.people_query.clear();
             shared.refresh();
         }
         if ui
@@ -360,9 +450,27 @@ fn people_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
     });
 }
 
+/// Drag handle for reordering a person row (see [`table_order_section`] for
+/// the matching table-order drag source). Disabled while a people search is
+/// active, since the filtered indices no longer line up with a plain
+/// insert-before position.
+fn person_drag_handle(ui: &mut egui::Ui, index: usize, enabled: bool) {
+    let item_id = egui::Id::new(("person_drag_handle", index));
+    let response = ui
+        .add_enabled_ui(enabled, |ui| {
+            ui.dnd_drag_source(item_id, PersonDrag(index), |ui| {
+                ui.label("≡");
+            })
+            .response
+        })
+        .inner;
+    response.on_disabled_hover_text("Clear the search to reorder");
+}
+
 fn id_field(ui: &mut egui::Ui, shared: &mut SharedState, index: usize, width: f32) -> bool {
     ui.add(
         egui::TextEdit::singleline(&mut shared.people[index].id)
+            .id_salt(("person_id", index))
             .hint_text("id")
             .desired_width(width),
     )
@@ -372,6 +480,7 @@ fn id_field(ui: &mut egui::Ui, shared: &mut SharedState, index: usize, width: f3
 fn name_field(ui: &mut egui::Ui, shared: &mut SharedState, index: usize, width: f32) -> bool {
     ui.add(
         egui::TextEdit::singleline(&mut shared.people[index].name)
+            .id_salt(("person_name", index))
             .hint_text("name")
             .desired_width(width),
     )
@@ -531,9 +640,23 @@ fn groups_section(shared: &mut SharedState, state: &mut EditorsState, ui: &mut e
         return;
     }
 
+    ui.add(
+        egui::TextEdit::singleline(&mut state.groups_query)
+            .hint_text("Search groups…")
+            .desired_width(200.0),
+    );
+    let matching_groups: Vec<_> = groups
+        .iter()
+        .filter(|group| group_matches(group.as_str(), &shared.people, &state.groups_query))
+        .collect();
+    if matching_groups.is_empty() {
+        ui.label(egui::RichText::new("No matches.").weak());
+        return;
+    }
+
     let mut rename_action = None;
     let mut delete_action = None;
-    for group in &groups {
+    for group in matching_groups {
         let members: Vec<&str> = shared
             .people
             .iter()
